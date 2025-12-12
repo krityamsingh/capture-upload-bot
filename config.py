@@ -1,96 +1,133 @@
-# config.py - UNCHANGED
 import os
 from typing import Dict, Any
 
+
 class Config:
-    """Configuration class for bot settings"""
-    
-    # Telegram API credentials
+    """Central configuration for the Telegram bot"""
+
+    # ───────────────────────────
+    # Telegram API Credentials
+    # ───────────────────────────
     API_ID = int(os.getenv("API_ID", 26676741))
     API_HASH = os.getenv("API_HASH", "6fbc29f23c15bdb0c7fbbefe65c9193a")
-    BOT_TOKEN = os.getenv("BOT_TOKEN", "8496337458:AAF7ORldWpN-C6hpzSDt1bPCOeGVxfbU4qg")
-    
-    # MongoDB configuration
-    MONGO_URI = os.getenv("MONGO_URI", "mongodb+srv://erenxironman09:erenxironman09@catcherbot.koejwre.mongodb.net/?appName=catcherbot")
+    BOT_TOKEN = os.getenv(
+        "BOT_TOKEN",
+        "8496337458:AAF7ORldWpN-C6hpzSDt1bPCOeGVxfbU4qg"
+    )
+
+    # ───────────────────────────
+    # MongoDB Configuration
+    # ───────────────────────────
+    MONGO_URI = os.getenv(
+        "MONGO_URI",
+        "mongodb+srv://erenxironman09:erenxironman09@catcherbot.koejwre.mongodb.net/?appName=catcherbot"
+    )
     DATABASE_NAME = os.getenv("DATABASE_NAME", "telegram_upload_bot")
-    
-    # Bot owner ID (for admin commands)
-    OWNER_ID = int(os.getenv("OWNER_ID", 8496760733))
-    
-    # Upload service configuration
-    UPLOAD_TIMEOUT = 60  # Reduced from 300 to 60 seconds for faster timeout
-    MAX_FILE_SIZE = 50 * 1024 * 1024  # 50MB max file size
-    
-    # Mass upload configuration
-    MAX_BATCH_SIZE = 50  # Maximum characters per batch
-    BATCH_PROCESSING_TIMEOUT = 300  # 5 minutes per batch
-    
-    # Rarity mappings
+
+    # ───────────────────────────
+    # Bot Owner / Admin
+    # ───────────────────────────
+    OWNER_ID = int(os.getenv("OWNER_ID", 7878477646))
+
+    # ───────────────────────────
+    # Upload & Performance Limits
+    # ───────────────────────────
+    UPLOAD_TIMEOUT = 60                  # seconds
+    MAX_FILE_SIZE = 50 * 1024 * 1024     # 50 MB
+
+    # Mass / Batch Processing
+    MAX_BATCH_SIZE = 50
+    BATCH_PROCESSING_TIMEOUT = 300       # seconds
+
+    # ───────────────────────────
+    # RARITY SYSTEM (UPDATED)
+    # ───────────────────────────
     RARITY_MAP = {
-        1: "⚪️ Common",
-        2: "🟠 Rare", 
-        3: "🟡 Legendary",
-        4: "💮 Exclusive",
-        5: "🔮 Limited Edition",
-        6: "✨ Celestial",
-        7: "👑 Eternal",
-        8: "🎥 Cinematic",
-        9: "🪔 Diwali",
+        1: "⚪ Common",
+        2: "🟢 Uncommon",
+        3: "🔴 Rare",
+        4: "🟡 Legendary",
+        5: "🎐 Limited Edition",
+        6: "💎 Premium",
+        7: "🥵 Exotic",
+        8: "🎬 Animated",
+        9: "🌩️ Thundra",
+        10: "☄️ Galvoria",
+        11: "🌈 Neon",
+        12: "🛡️ Supreme",
+        13: "🔮 Crystal",
+        14: "🎤 Celebrity",
     }
-    
+
+    # ───────────────────────────
+    # Rarities that support sub-types
+    # ───────────────────────────
+    RARITIES_WITH_SUBTYPES = [5, 6, 7, 12, 13, 14]
+
+    # ───────────────────────────
+    # Subtype Groups
+    # ───────────────────────────
     LIMITED_SUBTYPES = {
         "valentine": "💝 Valentine",
-        "christmas": "🎄 Christmas", 
+        "christmas": "🎄 Christmas",
         "halloween": "🎃 Halloween",
         "summer": "🏖️ Summer",
         "winter": "❄️ Winter",
-        "basketball": "🏀 Basketball",
-        "police": "👮‍♀️ Police",
         "newyear": "🎆 New Year",
-        "easter": "🐰 Easter",
         "wedding": "💒 Wedding",
-        "karate": "🥋 Karate",
     }
-    
-    CELESTIAL_SUBTYPES = {
-        "dragonic": "🐉 Dragonic",
-        "egypt": "🏜 Egypt",
-        "special": "🎗 Special",
-        "nun": "🌑 Nun",
-        "viking": "🛡 Viking",
-        "demon": "🃏 Demon",
-        "nurse": "💊 Nurse",
-        "cake": "🍰 Cake",
-        "monster": "🍾 Monster",
+
+    PREMIUM_SUBTYPES = {
+        "gold": "🥇 Gold",
+        "diamond": "💠 Diamond",
+        "royal": "👑 Royal",
+        "dark": "🌑 Dark",
     }
-    
-    # Subrarity to emoji mapping for auto-emoji system
+
+    SUPREME_SUBTYPES = {
+        "mythic": "🛡️ Mythic",
+        "ancient": "📜 Ancient",
+        "celestial": "✨ Celestial",
+    }
+
+    CELEBRITY_SUBTYPES = {
+        "phyco": "🎭 phyco",
+        "singer": "🎤 Singer",
+        "power": "🏆 power",
+        "influencer": "📸 Influencer",
+    }
+
+    # ───────────────────────────
+    # Auto Emoji Mapping (for captions)
+    # ───────────────────────────
     SUBRARITY_EMOJI_MAP = {
+        # Limited
         "valentine": "💝",
-        "christmas": "🎄", 
+        "christmas": "🎄",
         "halloween": "🎃",
         "summer": "🏖️",
         "winter": "❄️",
-        "basketball": "🏀",
-        "police": "👮‍♀️",
         "newyear": "🎆",
-        "easter": "🐰",
         "wedding": "💒",
-        "karate": "🥋",
-        "dragonic": "🐉",
-        "egypt": "🏜",
-        "special": "🎗",
-        "nun": "🌑",
-        "viking": "🛡",
-        "demon": "🃏",
-        "nurse": "💊",
-        "cake": "🍰",
-        "monster": "🍾",
+
+        # Premium / Exotic
+        "gold": "🥇",
+        "diamond": "💠",
+        "royal": "👑",
+        "dark": "🌑",
+
+        # Supreme / Crystal
+        "mythic": "🛡️",
+        "ancient": "📜",
+        "celestial": "✨",
+
+        # Celebrity
+        "actor": "🎭",
+        "singer": "🎤",
+        "athlete": "🏆",
+        "influencer": "📸",
     }
-    
-    # Rarities that have sub-types
-    RARITIES_WITH_SUBTYPES = [5, 6]  # Limited Edition and Celestial
 
 
+# Export config instance
 config = Config()
-
