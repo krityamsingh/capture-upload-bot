@@ -11,7 +11,7 @@ class Config:
     BOT_TOKEN = os.getenv("BOT_TOKEN", "7933219254:AAGpxPhNxgu__b7F_R_fmayVsVyTilD-Du0")
     
     # MongoDB configuration
-    MONGO_URI = os.getenv("MONGO_URI", "mongodb+srv://fosownerzoro_db_user:fosownerzoro_db_user@cluster0.sgmzbvx.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0")
+    MONGO_URI = os.getenv("MONGO_URI", "mongodb+srv://erenxironman09:erenxironman09@catcherbot.koejwre.mongodb.net/?appName=catcherbot")
     DATABASE_NAME = os.getenv("DATABASE_NAME", "telegram_upload_bot")
     
     # Bot owner ID (for admin commands)
@@ -90,5 +90,6 @@ class Config:
     
     # Rarities that have sub-types
     RARITIES_WITH_SUBTYPES = [5, 6]  # Limited Edition and Celestial
+
 
 config = Config()
