@@ -8,7 +8,7 @@ class Config:
     # Telegram API credentials
     API_ID = int(os.getenv("API_ID", 26676741))
     API_HASH = os.getenv("API_HASH", "6fbc29f23c15bdb0c7fbbefe65c9193a")
-    BOT_TOKEN = os.getenv("BOT_TOKEN", "7933219254:AAGpxPhNxgu__b7F_R_fmayVsVyTilD-Du0")
+    BOT_TOKEN = os.getenv("BOT_TOKEN", "8496337458:AAF7ORldWpN-C6hpzSDt1bPCOeGVxfbU4qg")
     
     # MongoDB configuration
     MONGO_URI = os.getenv("MONGO_URI", "mongodb+srv://erenxironman09:erenxironman09@catcherbot.koejwre.mongodb.net/?appName=catcherbot")
@@ -93,3 +93,4 @@ class Config:
 
 
 config = Config()
+
