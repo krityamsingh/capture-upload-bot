@@ -31,14 +31,14 @@ class Config:
     # Telegram API credentials
     API_ID = int(os.getenv("API_ID", 26676741))
     API_HASH = os.getenv("API_HASH", "6fbc29f23c15bdb0c7fbbefe65c9193a")
-    BOT_TOKEN = os.getenv("BOT_TOKEN", "7933219254:AAGpxPhNxgu__b7F_R_fmayVsVyTilD-Du0")
+    BOT_TOKEN = os.getenv("BOT_TOKEN", "8496337458:AAF7ORldWpN-C6hpzSDt1bPCOeGVxfbU4qg")
     
     # MongoDB configuration
-    MONGO_URI = os.getenv("MONGO_URI", "mongodb+srv://fosownerzoro_db_user:fosownerzoro_db_user@cluster0.sgmzbvx.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0")
-    DATABASE_NAME = os.getenv("DATABASE_NAME", "telegram_upload_bot")
+    MONGO_URI = os.getenv("MONGO_URI", "mongodb+srv://erenxironman09:erenxironman09@catcherbot.koejwre.mongodb.net/?appName=catcherbot")
+    DATABASE_NAME = os.getenv("DATABASE_NAME", "catcherbot")
     
     # Bot owner ID (for admin commands)
-    OWNER_ID = int(os.getenv("OWNER_ID", 8496760733))
+    OWNER_ID = int(os.getenv("OWNER_ID", 7878477646))
     
     # Upload service configuration
     UPLOAD_TIMEOUT = 60  # Reduced from 300 to 60 seconds for faster timeout
@@ -2684,3 +2684,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
