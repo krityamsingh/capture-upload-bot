@@ -14,7 +14,7 @@ class Config:
         "BOT_TOKEN",
         "8496337458:AAF7ORldWpN-C6hpzSDt1bPCOeGVxfbU4qg"
     )
-
+    CAPTURE_CHANNEL = os.getenv("CAPTURE_CHANNEL", "@capture_database")
     # ───────────────────────────
     # MongoDB Configuration
     # ───────────────────────────
@@ -131,3 +131,4 @@ class Config:
 
 # Export config instance
 config = Config()
+
