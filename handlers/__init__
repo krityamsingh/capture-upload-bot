@@ -1,0 +1,16 @@
+# ==================== HANDLERS/__INIT__.PY ====================
+# handlers/__init__.py - UPDATED
+# handlers package initialization
+from .command_handlers import register_command_handlers
+from .callback_handlers import register_callback_handlers
+from .character_management_handlers import register_character_management_handlers
+from .mass_upload_handlers import register_mass_upload_handlers
+from .sudo_handlers import register_sudo_handlers  # NEW
+
+__all__ = [
+    'register_command_handlers', 
+    'register_callback_handlers',
+    'register_character_management_handlers',
+    'register_mass_upload_handlers',
+    'register_sudo_handlers'  # NEW
+]
