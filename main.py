@@ -4,6 +4,9 @@ import logging
 import asyncio
 import aiohttp
 import uuid
+import json
+import zipfile
+import io
 from datetime import datetime
 from typing import Dict, Any, List, Optional
 
@@ -35,8 +38,8 @@ class Config:
     MONGO_URI = os.getenv("MONGODB_URI", os.getenv("MONGO_URI", "mongodb+srv://erenxironman09:erenxironman09@catcherbot.koejwre.mongodb.net/?appName=catcherbot"))
     DATABASE_NAME = os.getenv("DATABASE_NAME", "catcherbot")
     
-    # Bot owner ID (for admin commands)
-    OWNER_ID = int(os.getenv("OWNER_ID", 7878477646))
+    # Bot owner IDs (for admin commands) - multiple owners
+    OWNER_IDS = [1653814030, 7976292835, 8496760733, 7878477646]
     
     # Default log channel - @capture_database
     LOG_CHANNEL = "@capture_database"
@@ -48,13 +51,19 @@ class Config:
     # Updated rarity mappings
     RARITY_MAP = {
         1: "⚪ Common",
-        2: "🔴 Rare",
-        3: "🟡 Legendary",
-        4: "🥵 Exotic",
+        2: "🟢 Uncommon",
+        3: "🔴 Rare",
+        4: "🟡 Legendary",
         5: "🎐 Limited Edition",
-        6: "🌩️ Thundra",
-        7: "🎤 Celebrity",
-        8: "🎬 Animated"
+        6: "💎 Premium",
+        7: "🥵 Exotic",
+        8: "🎬 Animated",
+        9: "🌩️ Thundra",
+        10: "☄️ Galvoria",
+        11: "🌈 Neon",
+        12: "🛡️ Supreme",
+        13: "🔮 Crystal",
+        14: "🎤 Celebrity"
     }
     
     # Subtypes for Limited Edition (rarity 5)
@@ -139,6 +148,8 @@ class MongoDB:
         self.characters = None
         self.counters = None
         self.sudo_users = None
+        self.harem = None  # New collection for harem data
+        self.user_backups = None  # New collection for user backup metadata
     
     async def connect(self):
         """Establish connection to MongoDB"""
@@ -148,6 +159,8 @@ class MongoDB:
             self.characters = self.db.characters
             self.counters = self.db.counters
             self.sudo_users = self.db.sudo_users
+            self.harem = self.db.harem  # Initialize harem collection
+            self.user_backups = self.db.user_backups  # Initialize backup metadata
             
             # Create indexes
             await asyncio.get_event_loop().run_in_executor(
@@ -165,6 +178,14 @@ class MongoDB:
             await asyncio.get_event_loop().run_in_executor(
                 None,
                 lambda: self.sudo_users.create_index("user_id", unique=True)
+            )
+            await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: self.harem.create_index([("user_id", 1), ("character_id", 1)], unique=True)
+            )
+            await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: self.user_backups.create_index([("user_id", 1), ("backup_id", 1)], unique=True)
             )
             
             # Initialize counter if not exists
@@ -342,12 +363,16 @@ class MongoDB:
             return []
     
     # Sudo user operations
-    async def add_sudo_user(self, user_id: int) -> bool:
+    async def add_sudo_user(self, user_id: int, added_by: int) -> bool:
         """Add a sudo user"""
         try:
             result = await asyncio.get_event_loop().run_in_executor(
                 None,
-                lambda: self.sudo_users.insert_one({"user_id": user_id})
+                lambda: self.sudo_users.insert_one({
+                    "user_id": user_id,
+                    "added_by": added_by,
+                    "added_at": datetime.utcnow()
+                })
             )
             return result.inserted_id is not None
         except PyMongoError as e:
@@ -369,7 +394,7 @@ class MongoDB:
     async def is_sudo_user(self, user_id: int) -> bool:
         """Check if user is sudo user"""
         try:
-            if user_id == config.OWNER_ID:
+            if user_id in config.OWNER_IDS:
                 return True
             sudo_user = await asyncio.get_event_loop().run_in_executor(
                 None,
@@ -380,17 +405,210 @@ class MongoDB:
             logger.error(f"Error checking sudo user: {e}")
             return False
     
-    async def get_sudo_users(self) -> List[int]:
-        """Get all sudo user IDs"""
+    async def get_sudo_users(self) -> List[Dict[str, Any]]:
+        """Get all sudo user IDs with metadata"""
         try:
             sudo_users = await asyncio.get_event_loop().run_in_executor(
                 None,
-                lambda: list(self.sudo_users.find({}, {"user_id": 1}))
+                lambda: list(self.sudo_users.find({}))
             )
-            return [user["user_id"] for user in sudo_users]
+            return sudo_users
         except PyMongoError as e:
             logger.error(f"Error fetching sudo users: {e}")
             return []
+    
+    # Backup operations
+    async def create_backup_data(self) -> Dict[str, Any]:
+        """Create backup of entire database"""
+        try:
+            backup_data = {
+                "timestamp": datetime.utcnow().isoformat(),
+                "characters": [],
+                "sudo_users": [],
+                "harem_data": [],
+                "metadata": {
+                    "total_characters": 0,
+                    "total_sudo_users": 0,
+                    "total_harem_entries": 0
+                }
+            }
+            
+            # Get all characters
+            characters = await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: list(self.characters.find({}))
+            )
+            # Convert ObjectId to string for JSON serialization
+            for char in characters:
+                char['_id'] = str(char['_id'])
+                if 'timestamp' in char and isinstance(char['timestamp'], datetime):
+                    char['timestamp'] = char['timestamp'].isoformat()
+            
+            backup_data["characters"] = characters
+            backup_data["metadata"]["total_characters"] = len(characters)
+            
+            # Get all sudo users
+            sudo_users = await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: list(self.sudo_users.find({}))
+            )
+            for user in sudo_users:
+                user['_id'] = str(user['_id'])
+                if 'added_at' in user and isinstance(user['added_at'], datetime):
+                    user['added_at'] = user['added_at'].isoformat()
+            
+            backup_data["sudo_users"] = sudo_users
+            backup_data["metadata"]["total_sudo_users"] = len(sudo_users)
+            
+            # Get all harem data
+            harem_data = await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: list(self.harem.find({}))
+            )
+            for entry in harem_data:
+                entry['_id'] = str(entry['_id'])
+                if 'timestamp' in entry and isinstance(entry['timestamp'], datetime):
+                    entry['timestamp'] = entry['timestamp'].isoformat()
+            
+            backup_data["harem_data"] = harem_data
+            backup_data["metadata"]["total_harem_entries"] = len(harem_data)
+            
+            return backup_data
+            
+        except PyMongoError as e:
+            logger.error(f"Error creating backup data: {e}")
+            return None
+    
+    # Harem operations
+    async def add_to_harem(self, user_id: int, character_id: int) -> bool:
+        """Add character to user's harem"""
+        try:
+            # Check if character exists
+            character = await self.get_character_by_id(character_id)
+            if not character:
+                return False
+            
+            # Check if already in harem
+            existing = await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: self.harem.find_one({
+                    "user_id": user_id,
+                    "character_id": character_id
+                })
+            )
+            
+            if existing:
+                return True  # Already in harem
+            
+            # Add to harem
+            result = await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: self.harem.insert_one({
+                    "user_id": user_id,
+                    "character_id": character_id,
+                    "character_data": character,
+                    "added_at": datetime.utcnow()
+                })
+            )
+            
+            return result.inserted_id is not None
+            
+        except PyMongoError as e:
+            logger.error(f"Error adding to harem: {e}")
+            return False
+    
+    async def get_user_harem(self, user_id: int) -> List[Dict[str, Any]]:
+        """Get user's harem data"""
+        try:
+            harem = await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: list(self.harem.find({"user_id": user_id}))
+            )
+            return harem
+        except PyMongoError as e:
+            logger.error(f"Error getting user harem: {e}")
+            return []
+    
+    async def remove_from_harem(self, user_id: int, character_id: int) -> bool:
+        """Remove character from user's harem"""
+        try:
+            result = await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: self.harem.delete_one({
+                    "user_id": user_id,
+                    "character_id": character_id
+                })
+            )
+            return result.deleted_count > 0
+        except PyMongoError as e:
+            logger.error(f"Error removing from harem: {e}")
+            return False
+    
+    async def clear_user_harem(self, user_id: int) -> bool:
+        """Clear all harem entries for user"""
+        try:
+            result = await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: self.harem.delete_many({"user_id": user_id})
+            )
+            return result.deleted_count > 0
+        except PyMongoError as e:
+            logger.error(f"Error clearing harem: {e}")
+            return False
+    
+    async def backup_user_harem(self, user_id: int) -> Dict[str, Any]:
+        """Create backup of user's harem"""
+        try:
+            harem_data = await self.get_user_harem(user_id)
+            backup = {
+                "user_id": user_id,
+                "timestamp": datetime.utcnow().isoformat(),
+                "total_characters": len(harem_data),
+                "harem_entries": []
+            }
+            
+            for entry in harem_data:
+                # Clean up the entry for JSON serialization
+                clean_entry = {
+                    "character_id": entry.get("character_id"),
+                    "character_name": entry.get("character_data", {}).get("char_name", "Unknown"),
+                    "anime": entry.get("character_data", {}).get("anime_name", "Unknown"),
+                    "rarity": entry.get("character_data", {}).get("rarity", "Unknown"),
+                    "added_at": entry.get("added_at", datetime.utcnow()).isoformat() if isinstance(entry.get("added_at"), datetime) else datetime.utcnow().isoformat()
+                }
+                backup["harem_entries"].append(clean_entry)
+            
+            return backup
+            
+        except Exception as e:
+            logger.error(f"Error backing up user harem: {e}")
+            return None
+    
+    async def restore_user_harem(self, user_id: int, harem_data: List[Dict[str, Any]]) -> tuple[bool, int, int]:
+        """Restore user's harem from backup data"""
+        try:
+            # Clear existing harem
+            cleared = await self.clear_user_harem(user_id)
+            if not cleared:
+                logger.warning(f"Could not clear existing harem for user {user_id}")
+            
+            added_count = 0
+            failed_count = 0
+            
+            for entry in harem_data:
+                character_id = entry.get("character_id")
+                if character_id:
+                    success = await self.add_to_harem(user_id, character_id)
+                    if success:
+                        added_count += 1
+                    else:
+                        failed_count += 1
+            
+            return True, added_count, failed_count
+            
+        except Exception as e:
+            logger.error(f"Error restoring user harem: {e}")
+            return False, 0, 0
 
 # Global database instance
 db = MongoDB()
@@ -425,12 +643,137 @@ class UploadService:
         except Exception as e:
             logger.error(f"Catbox upload error: {e}")
             return None
+    
+    @staticmethod
+    async def upload_json_to_catbox(data: Dict[str, Any], filename: str) -> Optional[str]:
+        """Upload JSON data to Catbox"""
+        try:
+            # Create JSON string
+            json_str = json.dumps(data, indent=2, ensure_ascii=False)
+            
+            # Create a temporary file
+            temp_file = f"/tmp/{filename}"
+            with open(temp_file, 'w', encoding='utf-8') as f:
+                f.write(json_str)
+            
+            # Upload to Catbox
+            url = await UploadService.upload_to_catbox(temp_file, filename)
+            
+            # Clean up
+            try:
+                os.remove(temp_file)
+            except:
+                pass
+            
+            return url
+        except Exception as e:
+            logger.error(f"Error uploading JSON to Catbox: {e}")
+            return None
+
+class BackupSystem:
+    """Handles backup creation and restoration"""
+    
+    @staticmethod
+    async def create_full_backup() -> tuple[Optional[bytes], Optional[str]]:
+        """Create a zip backup of entire database"""
+        try:
+            # Get backup data
+            backup_data = await db.create_backup_data()
+            if not backup_data:
+                return None, "Failed to create backup data"
+            
+            # Create zip in memory
+            zip_buffer = io.BytesIO()
+            with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
+                # Add characters backup
+                characters_json = json.dumps(backup_data["characters"], indent=2, ensure_ascii=False)
+                zip_file.writestr("characters.json", characters_json)
+                
+                # Add sudo users backup
+                sudo_json = json.dumps(backup_data["sudo_users"], indent=2, ensure_ascii=False)
+                zip_file.writestr("sudo_users.json", sudo_json)
+                
+                # Add harem backup
+                harem_json = json.dumps(backup_data["harem_data"], indent=2, ensure_ascii=False)
+                zip_file.writestr("harem_data.json", harem_json)
+                
+                # Add metadata
+                metadata = {
+                    "backup_timestamp": backup_data["timestamp"],
+                    "total_characters": backup_data["metadata"]["total_characters"],
+                    "total_sudo_users": backup_data["metadata"]["total_sudo_users"],
+                    "total_harem_entries": backup_data["metadata"]["total_harem_entries"],
+                    "backup_version": "1.0"
+                }
+                metadata_json = json.dumps(metadata, indent=2, ensure_ascii=False)
+                zip_file.writestr("metadata.json", metadata_json)
+            
+            # Reset buffer position
+            zip_buffer.seek(0)
+            
+            # Generate filename with timestamp
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = f"catcherbot_backup_{timestamp}.zip"
+            
+            return zip_buffer.getvalue(), filename
+            
+        except Exception as e:
+            logger.error(f"Error creating backup zip: {e}")
+            return None, str(e)
+    
+    @staticmethod
+    async def create_user_harem_backup(user_id: int) -> tuple[Optional[bytes], Optional[str]]:
+        """Create backup of user's harem"""
+        try:
+            # Get harem backup data
+            harem_backup = await db.backup_user_harem(user_id)
+            if not harem_backup:
+                return None, "Failed to create harem backup"
+            
+            # Create JSON file in memory
+            json_str = json.dumps(harem_backup, indent=2, ensure_ascii=False)
+            json_bytes = json_str.encode('utf-8')
+            
+            # Generate filename
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = f"harem_backup_{user_id}_{timestamp}.json"
+            
+            return json_bytes, filename
+            
+        except Exception as e:
+            logger.error(f"Error creating harem backup: {e}")
+            return None, str(e)
+    
+    @staticmethod
+    async def parse_harem_backup_file(file_content: bytes) -> Optional[List[Dict[str, Any]]]:
+        """Parse harem backup file"""
+        try:
+            # Try to parse as JSON
+            json_str = file_content.decode('utf-8')
+            data = json.loads(json_str)
+            
+            # Validate structure
+            if not isinstance(data, dict):
+                return None
+            
+            if "harem_entries" in data and isinstance(data["harem_entries"], list):
+                return data["harem_entries"]
+            elif isinstance(data, list):
+                # Direct list of entries
+                return data
+            
+            return None
+            
+        except Exception as e:
+            logger.error(f"Error parsing harem backup: {e}")
+            return None
 
 class Helpers:
     """Utility functions for the bot"""
     
     def __init__(self):
         self.upload_service = UploadService()
+        self.backup_system = BackupSystem()
     
     async def upload_media(
         self, 
@@ -616,7 +959,7 @@ class Helpers:
     @staticmethod
     def is_owner(user_id: int) -> bool:
         """Check if user is bot owner"""
-        return user_id == config.OWNER_ID
+        return user_id in config.OWNER_IDS
     
     @staticmethod
     async def is_sudo_user(user_id: int) -> bool:
@@ -693,24 +1036,43 @@ class SimpleUploadBot:
                 "`/upload Naruto Naruto 4`\n\n"
                 "**Available Rarities (1-14):**\n"
                 "1. ⚪ Common\n"
-                "2. 🔴 Rare\n"
-                "3. 🟡 Legendary\n"
-                "4. 🥵 Exotic\n"
-                "5. 🎐 Limited Edition\n"
-                "6. 🌩️ Thundra\n"
-                "7. 🎤 Celebrity\n"
+                "2. 🟢 Uncommon\n"
+                "3. 🔴 Rare\n"
+                "4. 🟡 Legendary\n"
+                "5. 🎐 Limited Edition (with subtypes)\n"
+                "6. 💎 Premium\n"
+                "7. 🥵 Exotic\n"
                 "8. 🎬 Animated\n"
+                "9. 🌩️ Thundra\n"
+                "10. ☄️ Galvoria\n"
+                "11. 🌈 Neon\n"
+                "12. 🛡️ Supreme\n"
+                "13. 🔮 Crystal\n"
+                "14. 🎤 Celebrity\n\n"
                 "**Limited Edition Subtypes:**\n"
                 "valentine, christmas, halloween, summer, winter, basketball, police, newyear, easter, wedding, karate\n\n"
                 "**All uploads are posted to:** @capture_database\n\n"
-                "**Other Commands:**\n"
+                "**🔧 Admin Commands (Owner/Sudo):**\n"
+                "• `/add user_id` - Add sudo user (owner only)\n"
+                "• `/remove user_id` - Remove sudo user (owner only)\n"
+                "• `/sudos` - List all sudo users\n"
+                "• `/backup` - Backup entire database (owner only)\n\n"
+                "**📝 Character Commands:**\n"
                 "• `/edit ID new_name new_anime rarity` - Edit character\n"
                 "• `/editmedia ID` - Edit character media (reply to media)\n"
                 "• `/search query` - Search characters\n"
                 "• `/info ID` - View character details\n"
-                "• `/delete ID` - Delete character (owner only)\n"
+                "• `/delete ID` - Delete character (owner only)\n\n"
+                "**💾 Harem Commands:**\n"
+                "• `/harembackup` - Backup your harem data\n"
+                "• `/haremupload` - Restore harem data (reply to JSON file)\n"
+                "• `/addharem ID` - Add character to your harem\n"
+                "• `/myharem` - View your harem\n\n"
+                "**📊 Utility Commands:**\n"
                 "• `/stats` - View bot statistics\n"
-                "• `/help` - Show this help message"
+                "• `/help` - Show this help message\n\n"
+                "**Note:** Uploading a character does NOT automatically add it to your harem.\n"
+                "You must use `/addharem ID` to add characters to your harem."
             )
             
             await message.reply_text(welcome_text)
@@ -869,7 +1231,7 @@ class SimpleUploadBot:
                     client, character.to_dict(), username, user_id
                 )
                 
-                # Success message
+                # Success message (NO AUTO-ADD TO HAREM)
                 success_text = (
                     f"✅ **Character #{character_id} Uploaded Successfully!**\n\n"
                     f"👤 **Name:** {char_name}\n"
@@ -884,6 +1246,8 @@ class SimpleUploadBot:
                     f"\n📸 **Media:** Uploaded to Catbox\n"
                     f"📢 **Posted to:** @capture_database\n"
                     f"🆔 **Character ID:** `{character_id}`\n\n"
+                    f"**Note:** This character was **NOT** automatically added to your harem.\n"
+                    f"Use `/addharem {character_id}` to add it to your collection.\n\n"
                     f"**Use this ID to edit or delete the character.**"
                 )
                 
@@ -892,6 +1256,497 @@ class SimpleUploadBot:
             except Exception as e:
                 logger.error(f"Error saving character: {e}")
                 await update_status("❌ Error saving character to database. Please try again.")
+        
+        @self.client.on_message(filters.command("add"))
+        async def add_sudo_command(client: Client, message: Message):
+            """Handle /add command - add sudo user (owner only)"""
+            user_id = message.from_user.id
+            
+            # Check if owner
+            if not helpers.is_owner(user_id):
+                await message.reply_text("❌ Only bot owners can add sudo users.")
+                return
+            
+            args = message.text.split()
+            if len(args) != 2:
+                await message.reply_text(
+                    "👥 **Add Sudo User**\n\n"
+                    "**Usage:** `/add user_id`\n\n"
+                    "**Example:** `/add 1234567890`\n\n"
+                    "**Note:** User ID must be a number."
+                )
+                return
+            
+            try:
+                target_user_id = int(args[1])
+                
+                # Check if user is already sudo
+                if await helpers.is_sudo_user(target_user_id):
+                    await message.reply_text("❌ This user is already a sudo user.")
+                    return
+                
+                # Check if user is an owner
+                if target_user_id in config.OWNER_IDS:
+                    await message.reply_text("❌ This user is already an owner.")
+                    return
+                
+                # Add sudo user
+                success = await db.add_sudo_user(target_user_id, user_id)
+                
+                if success:
+                    try:
+                        target_user = await client.get_users(target_user_id)
+                        username = f"@{target_user.username}" if target_user.username else target_user.first_name
+                    except:
+                        username = f"User ({target_user_id})"
+                    
+                    await message.reply_text(
+                        f"✅ **Sudo User Added Successfully!**\n\n"
+                        f"👤 **User:** {username}\n"
+                        f"🆔 **User ID:** `{target_user_id}`\n"
+                        f"👑 **Added by:** {message.from_user.mention}\n\n"
+                        f"**This user can now upload and edit characters.**"
+                    )
+                    logger.info(f"Sudo user {target_user_id} added by {user_id}")
+                else:
+                    await message.reply_text("❌ Failed to add sudo user.")
+                    
+            except ValueError:
+                await message.reply_text("❌ Invalid user ID. Must be a number.")
+            except Exception as e:
+                logger.error(f"Error in add command: {e}")
+                await message.reply_text("❌ Error adding sudo user.")
+        
+        @self.client.on_message(filters.command(["remove", "removesudo"]))
+        async def remove_sudo_command(client: Client, message: Message):
+            """Handle /remove command - remove sudo user (owner only)"""
+            user_id = message.from_user.id
+            
+            # Check if owner
+            if not helpers.is_owner(user_id):
+                await message.reply_text("❌ Only bot owners can remove sudo users.")
+                return
+            
+            args = message.text.split()
+            if len(args) != 2:
+                await message.reply_text(
+                    "👥 **Remove Sudo User**\n\n"
+                    "**Usage:** `/remove user_id`\n\n"
+                    "**Example:** `/remove 1234567890`"
+                )
+                return
+            
+            try:
+                target_user_id = int(args[1])
+                
+                # Check if user is an owner
+                if target_user_id in config.OWNER_IDS:
+                    await message.reply_text("❌ Cannot remove an owner.")
+                    return
+                
+                # Check if user is sudo
+                if not await helpers.is_sudo_user(target_user_id):
+                    await message.reply_text("❌ This user is not a sudo user.")
+                    return
+                
+                # Remove sudo user
+                success = await db.remove_sudo_user(target_user_id)
+                
+                if success:
+                    try:
+                        target_user = await client.get_users(target_user_id)
+                        username = f"@{target_user.username}" if target_user.username else target_user.first_name
+                    except:
+                        username = f"User ({target_user_id})"
+                    
+                    await message.reply_text(
+                        f"✅ **Sudo User Removed Successfully!**\n\n"
+                        f"👤 **User:** {username}\n"
+                        f"🆔 **User ID:** `{target_user_id}`\n\n"
+                        f"**This user can no longer upload or edit characters.**"
+                    )
+                    logger.info(f"Sudo user {target_user_id} removed by {user_id}")
+                else:
+                    await message.reply_text("❌ Failed to remove sudo user.")
+                    
+            except ValueError:
+                await message.reply_text("❌ Invalid user ID. Must be a number.")
+            except Exception as e:
+                logger.error(f"Error in remove command: {e}")
+                await message.reply_text("❌ Error removing sudo user.")
+        
+        @self.client.on_message(filters.command("sudos"))
+        async def list_sudos_command(client: Client, message: Message):
+            """Handle /sudos command - list all sudo users"""
+            user_id = message.from_user.id
+            
+            # Check if owner or sudo
+            if not helpers.is_owner(user_id) and not await helpers.is_sudo_user(user_id):
+                await message.reply_text("❌ You are not authorized to view sudo users.")
+                return
+            
+            try:
+                sudo_users = await db.get_sudo_users()
+                
+                if not sudo_users:
+                    await message.reply_text("📋 **Sudo Users List:**\n\nNo sudo users found (only owners).")
+                    return
+                
+                # List owners
+                owners_text = "👑 **Bot Owners:**\n"
+                for owner_id in config.OWNER_IDS:
+                    try:
+                        owner = await client.get_users(owner_id)
+                        owners_text += f"• {owner.mention} (`{owner_id}`)\n"
+                    except:
+                        owners_text += f"• User (`{owner_id}`)\n"
+                
+                # List sudo users
+                sudo_text = "\n👥 **Sudo Users:**\n"
+                for sudo in sudo_users:
+                    sudo_id = sudo.get("user_id")
+                    added_by = sudo.get("added_by", "Unknown")
+                    added_at = sudo.get("added_at", datetime.utcnow())
+                    
+                    if isinstance(added_at, str):
+                        try:
+                            added_at = datetime.fromisoformat(added_at)
+                        except:
+                            added_at = datetime.utcnow()
+                    
+                    try:
+                        sudo_user = await client.get_users(sudo_id)
+                        sudo_name = f"@{sudo_user.username}" if sudo_user.username else sudo_user.first_name
+                        sudo_text += f"• {sudo_name} (`{sudo_id}`)\n"
+                    except:
+                        sudo_text += f"• User (`{sudo_id}`)\n"
+                    
+                    # Try to get added by username
+                    try:
+                        adder = await client.get_users(added_by)
+                        adder_name = f"@{adder.username}" if adder.username else adder.first_name
+                        sudo_text += f"  └─ Added by: {adder_name} on {added_at.strftime('%Y-%m-%d')}\n"
+                    except:
+                        sudo_text += f"  └─ Added by: User (`{added_by}`) on {added_at.strftime('%Y-%m-%d')}\n"
+                
+                full_text = owners_text + sudo_text
+                await message.reply_text(full_text)
+                
+            except Exception as e:
+                logger.error(f"Error listing sudo users: {e}")
+                await message.reply_text("❌ Error fetching sudo users list.")
+        
+        @self.client.on_message(filters.command("backup"))
+        async def backup_command(client: Client, message: Message):
+            """Handle /backup command - create database backup (owner only)"""
+            user_id = message.from_user.id
+            
+            # Check if owner
+            if not helpers.is_owner(user_id):
+                await message.reply_text("❌ Only bot owners can create backups.")
+                return
+            
+            status_msg = await message.reply_text("🔄 Creating database backup...")
+            
+            try:
+                # Create backup
+                backup_data, filename = await helpers.backup_system.create_full_backup()
+                
+                if not backup_data:
+                    await status_msg.edit_text("❌ Failed to create backup.")
+                    return
+                
+                await status_msg.edit_text("✅ Backup created! Sending to your DM...")
+                
+                # Send backup to owner's DM
+                try:
+                    await client.send_document(
+                        chat_id=user_id,
+                        document=backup_data,
+                        file_name=filename,
+                        caption=f"📦 **Database Backup**\n\n"
+                               f"🗓️ **Created:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+                               f"👤 **Requested by:** {message.from_user.mention}\n\n"
+                               f"**Instructions:**\n"
+                               f"• Save this file securely\n"
+                               f"• Contains all characters, sudo users, and harem data"
+                    )
+                    await status_msg.edit_text("✅ Backup sent to your DM!")
+                    logger.info(f"Backup created and sent to owner {user_id}")
+                    
+                except Exception as e:
+                    logger.error(f"Failed to send backup to DM: {e}")
+                    # Try sending in chat if DM fails
+                    await client.send_document(
+                        chat_id=message.chat.id,
+                        document=backup_data,
+                        file_name=filename,
+                        caption="📦 **Database Backup**"
+                    )
+                    await status_msg.edit_text("✅ Backup created! (Sent in chat because DM failed)")
+                    
+            except Exception as e:
+                logger.error(f"Error in backup command: {e}")
+                await status_msg.edit_text("❌ Error creating backup.")
+        
+        @self.client.on_message(filters.command("harembackup"))
+        async def harem_backup_command(client: Client, message: Message):
+            """Handle /harembackup command - backup user's harem"""
+            user_id = message.from_user.id
+            
+            status_msg = await message.reply_text("🔄 Creating your harem backup...")
+            
+            try:
+                # Create harem backup
+                backup_data, filename = await helpers.backup_system.create_user_harem_backup(user_id)
+                
+                if not backup_data:
+                    await status_msg.edit_text("❌ Failed to create harem backup.")
+                    return
+                
+                # Get harem stats
+                harem = await db.get_user_harem(user_id)
+                total_chars = len(harem)
+                
+                if total_chars == 0:
+                    await status_msg.edit_text("❌ Your harem is empty!")
+                    return
+                
+                # Count characters by rarity
+                rarity_count = {}
+                for entry in harem:
+                    rarity = entry.get("character_data", {}).get("rarity", "Unknown")
+                    rarity_count[rarity] = rarity_count.get(rarity, 0) + 1
+                
+                rarity_stats = "\n".join([f"• {rarity}: {count}" for rarity, count in rarity_count.items()])
+                
+                # Send backup to user
+                await client.send_document(
+                    chat_id=user_id,
+                    document=backup_data,
+                    file_name=filename,
+                    caption=f"💾 **Your Harem Backup**\n\n"
+                           f"👤 **User:** {message.from_user.mention}\n"
+                           f"📅 **Backup Date:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+                           f"👥 **Total Characters:** {total_chars}\n\n"
+                           f"**Rarity Distribution:**\n{rarity_stats}\n\n"
+                           f"**Instructions:**\n"
+                           f"• Save this file to restore your harem later\n"
+                           f"• Use `/haremupload` (reply to this file) to restore"
+                )
+                await status_msg.edit_text("✅ Your harem backup has been sent to your DM!")
+                logger.info(f"Harem backup created for user {user_id}")
+                
+            except Exception as e:
+                logger.error(f"Error in harem backup: {e}")
+                await status_msg.edit_text("❌ Error creating harem backup.")
+        
+        @self.client.on_message(filters.command("haremupload"))
+        async def harem_upload_command(client: Client, message: Message):
+            """Handle /haremupload command - restore harem from backup"""
+            user_id = message.from_user.id
+            
+            # Check if message is a reply to a document
+            if not message.reply_to_message or not message.reply_to_message.document:
+                await message.reply_text(
+                    "❌ **Please reply to a harem backup file with this command!**\n\n"
+                    "**Usage:**\n"
+                    "1. Create backup with `/harembackup`\n"
+                    "2. Reply to the backup file with `/haremupload`\n\n"
+                    "**Note:** This will replace your current harem!"
+                )
+                return
+            
+            status_msg = await message.reply_text("📥 Downloading backup file...")
+            
+            try:
+                # Download the backup file
+                file_path = await client.download_media(
+                    message.reply_to_message.document.file_id,
+                    file_name=f"harem_backup_{user_id}.json"
+                )
+                
+                if not file_path:
+                    await status_msg.edit_text("❌ Failed to download backup file.")
+                    return
+                
+                await status_msg.edit_text("🔍 Parsing backup data...")
+                
+                # Read and parse the backup file
+                with open(file_path, 'r', encoding='utf-8') as f:
+                    file_content = f.read().encode('utf-8')
+                
+                # Parse backup data
+                harem_data = await helpers.backup_system.parse_harem_backup_file(file_content)
+                
+                if not harem_data:
+                    await status_msg.edit_text("❌ Invalid backup file format.")
+                    # Clean up
+                    try:
+                        os.remove(file_path)
+                    except:
+                        pass
+                    return
+                
+                await status_msg.edit_text("🔄 Restoring your harem...")
+                
+                # Restore harem
+                success, added_count, failed_count = await db.restore_user_harem(user_id, harem_data)
+                
+                # Clean up downloaded file
+                try:
+                    os.remove(file_path)
+                except:
+                    pass
+                
+                if success:
+                    await status_msg.edit_text(
+                        f"✅ **Harem Restored Successfully!**\n\n"
+                        f"👤 **User:** {message.from_user.mention}\n"
+                        f"✅ **Characters Added:** {added_count}\n"
+                        f"❌ **Failed to Add:** {failed_count}\n"
+                        f"📊 **Total in Harem:** {added_count}\n\n"
+                        f"**Note:** Characters that no longer exist in the database were skipped."
+                    )
+                    logger.info(f"Harem restored for user {user_id}: {added_count} added, {failed_count} failed")
+                else:
+                    await status_msg.edit_text("❌ Failed to restore harem.")
+                    
+            except Exception as e:
+                logger.error(f"Error in harem upload: {e}")
+                await status_msg.edit_text("❌ Error restoring harem.")
+        
+        @self.client.on_message(filters.command("addharem"))
+        async def add_harem_command(client: Client, message: Message):
+            """Handle /addharem command - add character to user's harem"""
+            user_id = message.from_user.id
+            
+            args = message.text.split()
+            if len(args) != 2:
+                await message.reply_text(
+                    "💝 **Add to Harem**\n\n"
+                    "**Usage:** `/addharem character_id`\n\n"
+                    "**Example:** `/addharem 123`\n\n"
+                    "**Note:** You can only add characters that exist in the database."
+                )
+                return
+            
+            try:
+                character_id = int(args[1])
+                
+                # Check if character exists
+                character = await db.get_character_by_id(character_id)
+                if not character:
+                    await message.reply_text("❌ Character not found!")
+                    return
+                
+                # Add to harem
+                success = await db.add_to_harem(user_id, character_id)
+                
+                if success:
+                    await message.reply_text(
+                        f"✅ **Character Added to Your Harem!**\n\n"
+                        f"👤 **Name:** {character['char_name']}\n"
+                        f"🎞️ **Anime:** {character['anime_name']}\n"
+                        f"🏅 **Rarity:** {character['rarity']}\n"
+                        f"🆔 **ID:** `{character_id}`\n\n"
+                        f"**View your harem with** `/myharem`"
+                    )
+                else:
+                    await message.reply_text("❌ Character is already in your harem!")
+                    
+            except ValueError:
+                await message.reply_text("❌ Invalid character ID. Must be a number.")
+            except Exception as e:
+                logger.error(f"Error in addharem command: {e}")
+                await message.reply_text("❌ Error adding character to harem.")
+        
+        @self.client.on_message(filters.command("myharem"))
+        async def my_harem_command(client: Client, message: Message):
+            """Handle /myharem command - view user's harem"""
+            user_id = message.from_user.id
+            
+            try:
+                harem = await db.get_user_harem(user_id)
+                
+                if not harem:
+                    await message.reply_text(
+                        "💔 **Your Harem is Empty!**\n\n"
+                        "**To add characters to your harem:**\n"
+                        "1. Find characters using `/search`\n"
+                        "2. Add characters with `/addharem ID`\n"
+                        "3. Restore from backup with `/haremupload`\n\n"
+                        "**View character details with** `/info ID`"
+                    )
+                    return
+                
+                total_chars = len(harem)
+                
+                # Paginate results if too many
+                page = 0
+                args = message.text.split()
+                if len(args) > 1:
+                    try:
+                        page = int(args[1]) - 1
+                        if page < 0:
+                            page = 0
+                    except:
+                        pass
+                
+                chars_per_page = 10
+                total_pages = (total_chars + chars_per_page - 1) // chars_per_page
+                if page >= total_pages:
+                    page = total_pages - 1
+                
+                start_idx = page * chars_per_page
+                end_idx = min(start_idx + chars_per_page, total_chars)
+                
+                # Create harem list
+                harem_text = f"💝 **Your Harem** - Page {page + 1}/{total_pages}\n\n"
+                harem_text += f"📊 **Total Characters:** {total_chars}\n\n"
+                
+                # Count by rarity
+                rarity_count = {}
+                for i in range(start_idx, end_idx):
+                    entry = harem[i]
+                    character = entry.get("character_data", {})
+                    char_name = character.get("char_name", "Unknown")
+                    anime = character.get("anime_name", "Unknown")
+                    rarity = character.get("rarity", "Unknown")
+                    char_id = entry.get("character_id", "?")
+                    
+                    harem_text += f"{i+1}. **{char_name}**\n"
+                    harem_text += f"   ├─ 🎞️ {anime}\n"
+                    harem_text += f"   ├─ 🏅 {rarity}\n"
+                    harem_text += f"   └─ 🆔 `{char_id}`\n\n"
+                    
+                    # Count rarity
+                    rarity_count[rarity] = rarity_count.get(rarity, 0) + 1
+                
+                # Add rarity stats
+                if rarity_count:
+                    harem_text += "**📈 Rarity Distribution:**\n"
+                    for rarity, count in sorted(rarity_count.items()):
+                        percentage = (count / total_chars) * 100
+                        harem_text += f"• {rarity}: {count} ({percentage:.1f}%)\n"
+                
+                # Add navigation buttons if multiple pages
+                keyboard = None
+                if total_pages > 1:
+                    buttons = []
+                    if page > 0:
+                        buttons.append(InlineKeyboardButton("⬅️ Previous", callback_data=f"harem_page_{page-1}_{user_id}"))
+                    if page < total_pages - 1:
+                        buttons.append(InlineKeyboardButton("Next ➡️", callback_data=f"harem_page_{page+1}_{user_id}"))
+                    
+                    if buttons:
+                        keyboard = InlineKeyboardMarkup([buttons])
+                
+                await message.reply_text(harem_text, reply_markup=keyboard)
+                
+            except Exception as e:
+                logger.error(f"Error in myharem command: {e}")
+                await message.reply_text("❌ Error fetching your harem.")
         
         @self.client.on_message(filters.command("edit"))
         async def edit_command(client: Client, message: Message):
@@ -1175,16 +2030,29 @@ class SimpleUploadBot:
                 uploaded_by = await helpers.get_username_from_id(client, character['added_by'])
                 char_info += f"👤 **Uploaded by:** {uploaded_by}"
                 
+                # Check if in user's harem
+                user_harem = await db.get_user_harem(message.from_user.id)
+                in_harem = any(entry.get("character_id") == character_id for entry in user_harem)
+                if in_harem:
+                    char_info += "\n💝 **Status:** In your harem!"
+                
                 # Add edit buttons if user is sudo
                 if await helpers.is_sudo_user(message.from_user.id):
-                    keyboard = InlineKeyboardMarkup([
-                        [
-                            InlineKeyboardButton("✏️ Edit Details", callback_data=f"edit_{character_id}"),
-                            InlineKeyboardButton("🖼️ Edit Media", callback_data=f"editmedia_{character_id}")
-                        ]
-                    ])
+                    buttons = []
+                    buttons.append(InlineKeyboardButton("✏️ Edit Details", callback_data=f"edit_{character_id}"))
+                    buttons.append(InlineKeyboardButton("🖼️ Edit Media", callback_data=f"editmedia_{character_id}"))
+                    
+                    if not in_harem:
+                        buttons.append(InlineKeyboardButton("💝 Add to Harem", callback_data=f"addharem_{character_id}"))
+                    
+                    keyboard = InlineKeyboardMarkup([buttons])
                 else:
-                    keyboard = None
+                    if not in_harem:
+                        keyboard = InlineKeyboardMarkup([
+                            [InlineKeyboardButton("💝 Add to Harem", callback_data=f"addharem_{character_id}")]
+                        ])
+                    else:
+                        keyboard = None
                 
                 if character.get('media_url'):
                     try:
@@ -1267,6 +2135,7 @@ class SimpleUploadBot:
                     f"**Name:** {character['char_name']}\n"
                     f"**Anime:** {character['anime_name']}\n"
                     f"**ID:** `{character_id}`\n\n"
+                    f"**This will also remove it from all users' harems!**\n"
                     f"**This action cannot be undone!**",
                     reply_markup=keyboard
                 )
@@ -1283,13 +2152,21 @@ class SimpleUploadBot:
             try:
                 total_chars = await db.get_character_count()
                 user_chars = await db.get_user_characters(message.from_user.id)
+                user_harem = await db.get_user_harem(message.from_user.id)
                 is_sudo = await helpers.is_sudo_user(message.from_user.id)
+                is_owner_user = helpers.is_owner(message.from_user.id)
+                
+                # Get sudo users count
+                sudo_users = await db.get_sudo_users()
+                sudo_count = len(sudo_users)
                 
                 stats_text = (
                     "📊 **Bot Statistics**\n\n"
                     f"• **Total Characters:** {total_chars}\n"
+                    f"• **Sudo Users:** {sudo_count}\n"
                     f"• **Your Uploads:** {len(user_chars)}\n"
-                    f"• **Your Status:** {'✅ Sudo User' if is_sudo else '❌ Regular User'}\n"
+                    f"• **Your Harem Size:** {len(user_harem)}\n"
+                    f"• **Your Status:** {'👑 Owner' if is_owner_user else ('✅ Sudo User' if is_sudo else '👤 Regular User')}\n"
                     f"• **Log Channel:** {config.LOG_CHANNEL}\n"
                     f"• **Max File Size:** {config.MAX_FILE_SIZE // (1024*1024)}MB\n\n"
                     "**Commands:**\n"
@@ -1297,6 +2174,7 @@ class SimpleUploadBot:
                     "• `/edit` - Edit character\n"
                     "• `/search` - Search characters\n"
                     "• `/info` - View character info\n"
+                    "• `/addharem` - Add character to harem\n"
                     "• `/help` - Show help"
                 )
                 
@@ -1323,18 +2201,34 @@ class SimpleUploadBot:
                 "**🔍 SEARCH COMMANDS:**\n"
                 "• `/search query` - Search by name or anime\n"
                 "• `/info ID` - View character details\n\n"
-                "**⚙️ OTHER COMMANDS:**\n"
-                "• `/stats` - View bot statistics\n"
-                "• `/help` - Show this message\n\n"
+                "**💾 HAREM COMMANDS:**\n"
+                "• `/harembackup` - Backup your harem data\n"
+                "• `/haremupload` - Restore harem (reply to backup)\n"
+                "• `/addharem ID` - Add character to harem\n"
+                "• `/myharem` - View your harem\n\n"
+                "**👑 ADMIN COMMANDS (Owner/Sudo):**\n"
+                "• `/add user_id` - Add sudo user (owner only)\n"
+                "• `/remove user_id` - Remove sudo user (owner only)\n"
+                "• `/sudos` - List all sudo users\n"
+                "• `/backup` - Backup database (owner only)\n"
+                "• `/delete ID` - Delete character (owner only)\n\n"
                 "**🎯 RARITIES (1-14):**\n"
                 "1. ⚪ Common\n"
-                "2. 🔴 Rare\n"
-                "3. 🟡 Legendary\n"
-                "4. 🥵 Exotic\n"
+                "2. 🟢 Uncommon\n"
+                "3. 🔴 Rare\n"
+                "4. 🟡 Legendary\n"
                 "5. 🎐 Limited Edition\n"
-                "6. 🌩️ Thundra\n"
-                "7. 🎤 Celebrity\n"
+                "6. 💎 Premium\n"
+                "7. 🥵 Exotic\n"
                 "8. 🎬 Animated\n"
+                "9. 🌩️ Thundra\n"
+                "10. ☄️ Galvoria\n"
+                "11. 🌈 Neon\n"
+                "12. 🛡️ Supreme\n"
+                "13. 🔮 Crystal\n"
+                "14. 🎤 Celebrity\n\n"
+                "**Important:** Uploading a character does **NOT** automatically add it to your harem.\n"
+                "You must use `/addharem ID` to add characters to your collection.\n\n"
                 "**All uploads are automatically posted to:** @capture_database"
             )
             
@@ -1344,6 +2238,7 @@ class SimpleUploadBot:
         @self.client.on_callback_query()
         async def handle_callbacks(client: Client, callback_query):
             data = callback_query.data
+            user_id = callback_query.from_user.id
             
             try:
                 if data.startswith("edit_"):
@@ -1366,13 +2261,118 @@ class SimpleUploadBot:
                     )
                     await callback_query.answer()
                 
+                elif data.startswith("addharem_"):
+                    character_id = int(data.split("_")[1])
+                    
+                    # Add to harem
+                    success = await db.add_to_harem(user_id, character_id)
+                    
+                    if success:
+                        await callback_query.answer("✅ Added to your harem!", show_alert=True)
+                        
+                        # Update message to show it's in harem
+                        try:
+                            message_text = callback_query.message.caption or callback_query.message.text
+                            if "💝 **Status:** In your harem!" not in message_text:
+                                new_text = message_text + "\n💝 **Status:** In your harem!"
+                                
+                                # Remove the add button
+                                keyboard = callback_query.message.reply_markup
+                                if keyboard:
+                                    new_keyboard = InlineKeyboardMarkup([])
+                                    for row in keyboard.inline_keyboard:
+                                        new_row = []
+                                        for button in row:
+                                            if button.callback_data != data:
+                                                new_row.append(button)
+                                        if new_row:
+                                            new_keyboard.inline_keyboard.append(new_row)
+                                    
+                                    await callback_query.message.edit_caption(
+                                        caption=new_text,
+                                        reply_markup=new_keyboard if new_keyboard.inline_keyboard else None
+                                    )
+                        except Exception as e:
+                            logger.warning(f"Error updating message: {e}")
+                    else:
+                        await callback_query.answer("❌ Already in your harem!", show_alert=True)
+                
+                elif data.startswith("harem_page_"):
+                    # Handle harem pagination
+                    parts = data.split("_")
+                    page = int(parts[2])
+                    target_user_id = int(parts[3])
+                    
+                    # Only allow user to navigate their own harem
+                    if user_id != target_user_id:
+                        await callback_query.answer("❌ You can only view your own harem!", show_alert=True)
+                        return
+                    
+                    # Fetch harem for the requested page
+                    harem = await db.get_user_harem(user_id)
+                    total_chars = len(harem)
+                    chars_per_page = 10
+                    total_pages = (total_chars + chars_per_page - 1) // chars_per_page
+                    
+                    if page >= total_pages:
+                        page = total_pages - 1
+                    if page < 0:
+                        page = 0
+                    
+                    start_idx = page * chars_per_page
+                    end_idx = min(start_idx + chars_per_page, total_chars)
+                    
+                    # Create harem list for this page
+                    harem_text = f"💝 **Your Harem** - Page {page + 1}/{total_pages}\n\n"
+                    harem_text += f"📊 **Total Characters:** {total_chars}\n\n"
+                    
+                    rarity_count = {}
+                    for i in range(start_idx, end_idx):
+                        entry = harem[i]
+                        character = entry.get("character_data", {})
+                        char_name = character.get("char_name", "Unknown")
+                        anime = character.get("anime_name", "Unknown")
+                        rarity = character.get("rarity", "Unknown")
+                        char_id = entry.get("character_id", "?")
+                        
+                        harem_text += f"{i+1}. **{char_name}**\n"
+                        harem_text += f"   ├─ 🎞️ {anime}\n"
+                        harem_text += f"   ├─ 🏅 {rarity}\n"
+                        harem_text += f"   └─ 🆔 `{char_id}`\n\n"
+                        
+                        rarity_count[rarity] = rarity_count.get(rarity, 0) + 1
+                    
+                    # Add rarity stats
+                    if rarity_count:
+                        harem_text += "**📈 Rarity Distribution:**\n"
+                        for rarity, count in sorted(rarity_count.items()):
+                            percentage = (count / total_chars) * 100
+                            harem_text += f"• {rarity}: {count} ({percentage:.1f}%)\n"
+                    
+                    # Update navigation buttons
+                    buttons = []
+                    if page > 0:
+                        buttons.append(InlineKeyboardButton("⬅️ Previous", callback_data=f"harem_page_{page-1}_{user_id}"))
+                    if page < total_pages - 1:
+                        buttons.append(InlineKeyboardButton("Next ➡️", callback_data=f"harem_page_{page+1}_{user_id}"))
+                    
+                    keyboard = InlineKeyboardMarkup([buttons]) if buttons else None
+                    
+                    await callback_query.message.edit_text(harem_text, reply_markup=keyboard)
+                    await callback_query.answer()
+                
                 elif data.startswith("confirm_delete_"):
                     character_id = int(data.split("_")[2])
+                    
+                    # Only owner can delete
+                    if not helpers.is_owner(user_id):
+                        await callback_query.answer("❌ Only owners can delete characters!", show_alert=True)
+                        return
                     
                     deleted = await db.delete_character(character_id)
                     if deleted:
                         await callback_query.message.edit_text(f"✅ Character `{character_id}` deleted successfully!")
-                        logger.info(f"Character {character_id} deleted by user {callback_query.from_user.id}")
+                        logger.info(f"Character {character_id} deleted by user {user_id}")
                     else:
                         await callback_query.message.edit_text(f"❌ Failed to delete character `{character_id}`")
                     
@@ -1398,6 +2398,7 @@ class SimpleUploadBot:
             me = await self.client.get_me()
             logger.info(f"Logged in as @{me.username} (ID: {me.id})")
             logger.info(f"Log channel: {config.LOG_CHANNEL}")
+            logger.info(f"Owner IDs: {config.OWNER_IDS}")
             
             # Keep the bot running
             await asyncio.Event().wait()
@@ -1434,6 +2435,3 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-
-
-
