@@ -4,3 +4,5 @@ motor
 pymongo
 dnspython
 python-dotenv
+aiohttp==3.9.3
+
