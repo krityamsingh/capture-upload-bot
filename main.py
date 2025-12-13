@@ -1,19 +1,16 @@
-# ==================== COMPLETE CHARACTER UPLOAD BOT - SINGLE FILE ====================
+# ==================== SIMPLE CHARACTER UPLOAD BOT ====================
 import os
-import sys
 import logging
 import asyncio
 import aiohttp
 import uuid
 from datetime import datetime
-from enum import Enum
 from typing import Dict, Any, List, Optional
-from dataclasses import dataclass, field
 
 from pyrogram import Client, filters
 from pyrogram.types import (
-    Message, CallbackQuery, InlineKeyboardButton, 
-    InlineKeyboardMarkup, ForceReply
+    Message, InlineKeyboardButton, 
+    InlineKeyboardMarkup
 )
 from pymongo import MongoClient
 from pymongo.errors import PyMongoError
@@ -32,27 +29,23 @@ class Config:
     # Get environment variables from Heroku
     API_ID = int(os.getenv("API_ID", 26676741))
     API_HASH = os.getenv("API_HASH", "6fbc29f23c15bdb0c7fbbefe65c9193a")
-    BOT_TOKEN = os.getenv("BOT_TOKEN", "8496337458:AAF7ORldWpN-C6hpzSDt1bPCOeGVxfbU4qg")
+    BOT_TOKEN = os.getenv("BOT_TOKEN", "7933219254:AAGpxPhNxgu__b7F_R_fmayVsVyTilD-Du0")
     
     # MongoDB configuration
-    MONGO_URI = os.getenv("MONGODB_URI", os.getenv("MONGO_URI", "mongodb+srv://erenxironman09:erenxironman09@catcherbot.koejwre.mongodb.net/?appName=catcherbot"))
-    DATABASE_NAME = os.getenv("DATABASE_NAME", "catcherbot")
+    MONGO_URI = os.getenv("MONGODB_URI", os.getenv("MONGO_URI", "mongodb+srv://fosownerzoro_db_user:fosownerzoro_db_user@cluster0.sgmzbvx.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0"))
+    DATABASE_NAME = os.getenv("DATABASE_NAME", "telegram_upload_bot")
     
     # Bot owner ID (for admin commands)
-    OWNER_ID = int(os.getenv("OWNER_ID", 7878477646))
+    OWNER_ID = int(os.getenv("OWNER_ID", 8496760733))
     
     # Default log channel - @capture_database
-    DEFAULT_LOG_CHANNEL = "@capture_database"
+    LOG_CHANNEL = "@capture_database"
     
     # Upload service configuration
     UPLOAD_TIMEOUT = 60
     MAX_FILE_SIZE = 50 * 1024 * 1024  # 50MB max file size
     
-    # Mass upload configuration
-    MAX_BATCH_SIZE = 50
-    BATCH_PROCESSING_TIMEOUT = 300
-    
-    # Updated rarity mappings as per request
+    # Updated rarity mappings
     RARITY_MAP = {
         1: "⚪ Common",
         2: "🟢 Uncommon",
@@ -84,36 +77,8 @@ class Config:
         "wedding": "💒 Wedding",
         "karate": "🥋 Karate",
     }
-    
-    # Subrarity to emoji mapping for auto-emoji system
-    SUBRARITY_EMOJI_MAP = {
-        "valentine": "💝",
-        "christmas": "🎄", 
-        "halloween": "🎃",
-        "summer": "🏖️",
-        "winter": "❄️",
-        "basketball": "🏀",
-        "police": "👮‍♀️",
-        "newyear": "🎆",
-        "easter": "🐰",
-        "wedding": "💒",
-        "karate": "🥋",
-    }
-    
-    # Rarities that have sub-types (only Limited Edition now)
-    RARITIES_WITH_SUBTYPES = [5]
 
 config = Config()
-
-# ==================== STATES ====================
-class CharacterStates(Enum):
-    """State management for character upload flow"""
-    WAITING_CHAR_NAME = "waiting_char_name"
-    WAITING_ANIME_NAME = "waiting_anime_name" 
-    WAITING_RARITY = "waiting_rarity"
-    WAITING_SUBRARITY = "waiting_subrarity"
-    WAITING_MEDIA = "waiting_media"
-    WAITING_CONFIRMATION = "waiting_confirmation"
 
 # ==================== MODELS ====================
 class Character:
@@ -170,119 +135,6 @@ class Character:
             timestamp=data.get("timestamp")
         )
 
-class UserSession:
-    """Temporary session data for character upload flow"""
-    
-    def __init__(
-        self,
-        user_id: int,
-        state: str,
-        char_name: Optional[str] = None,
-        anime_name: Optional[str] = None,
-        rarity: Optional[str] = None,
-        subrarity: Optional[str] = None,
-        media_file_id: Optional[str] = None,
-        media_type: Optional[str] = None,
-        media_url: Optional[str] = None
-    ):
-        self.user_id = user_id
-        self.state = state
-        self.char_name = char_name
-        self.anime_name = anime_name
-        self.rarity = rarity
-        self.subrarity = subrarity
-        self.media_file_id = media_file_id
-        self.media_type = media_type
-        self.media_url = media_url
-    
-    def to_dict(self) -> Dict[str, Any]:
-        """Convert session to dictionary"""
-        return {
-            "user_id": self.user_id,
-            "state": self.state,
-            "char_name": self.char_name,
-            "anime_name": self.anime_name,
-            "rarity": self.rarity,
-            "subrarity": self.subrarity,
-            "media_file_id": self.media_file_id,
-            "media_type": self.media_type,
-            "media_url": self.media_url
-        }
-    
-    @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> 'UserSession':
-        """Create UserSession from dictionary"""
-        return cls(
-            user_id=data.get("user_id"),
-            state=data.get("state"),
-            char_name=data.get("char_name"),
-            anime_name=data.get("anime_name"),
-            rarity=data.get("rarity"),
-            subrarity=data.get("subrarity"),
-            media_file_id=data.get("media_file_id"),
-            media_type=data.get("media_type"),
-            media_url=data.get("media_url")
-        )
-
-@dataclass
-class MassUploadSession:
-    """Mass upload session for batch character processing"""
-    user_id: int
-    char_name: str
-    anime_name: str
-    uploaded_characters: List[Dict[str, Any]] = field(default_factory=list)
-    created_at: datetime = field(default_factory=datetime.utcnow)
-    last_activity: datetime = field(default_factory=datetime.utcnow)
-    
-    def to_dict(self) -> Dict[str, Any]:
-        """Convert mass upload session to dictionary"""
-        return {
-            "user_id": self.user_id,
-            "char_name": self.char_name,
-            "anime_name": self.anime_name,
-            "uploaded_characters": self.uploaded_characters,
-            "created_at": self.created_at,
-            "last_activity": self.last_activity
-        }
-    
-    @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> 'MassUploadSession':
-        """Create MassUploadSession from dictionary"""
-        session = cls(
-            user_id=data.get("user_id"),
-            char_name=data.get("char_name"),
-            anime_name=data.get("anime_name"),
-            uploaded_characters=data.get("uploaded_characters", []),
-            created_at=data.get("created_at", datetime.utcnow())
-        )
-        session.last_activity = data.get("last_activity", session.created_at)
-        return session
-    
-    def add_character(self, character_data: Dict[str, Any]):
-        """Add a character to the session"""
-        self.uploaded_characters.append(character_data)
-        self.last_activity = datetime.utcnow()
-    
-    def remove_last_character(self) -> Optional[Dict[str, Any]]:
-        """Remove and return the last uploaded character"""
-        if self.uploaded_characters:
-            return self.uploaded_characters.pop()
-        return None
-    
-    def get_character_count(self) -> int:
-        """Get total characters uploaded in this session"""
-        return len(self.uploaded_characters)
-    
-    def get_session_summary(self) -> str:
-        """Get formatted session summary"""
-        return (
-            f"📋 **Current Session**\n\n"
-            f"👤 **Character:** {self.char_name}\n"
-            f"🎞️ **Anime:** {self.anime_name}\n"
-            f"📊 **Uploaded:** {self.get_character_count()} characters\n"
-            f"🕐 **Started:** {self.created_at.strftime('%Y-%m-%d %H:%M:%S')}"
-        )
-
 # ==================== DATABASE ====================
 class MongoDB:
     """MongoDB database operations handler"""
@@ -291,9 +143,6 @@ class MongoDB:
         self.client = None
         self.db = None
         self.characters = None
-        self.sessions = None
-        self.mass_upload_sessions = None
-        self.config = None
         self.counters = None
         self.sudo_users = None
     
@@ -303,9 +152,6 @@ class MongoDB:
             self.client = MongoClient(config.MONGO_URI)
             self.db = self.client[config.DATABASE_NAME]
             self.characters = self.db.characters
-            self.sessions = self.db.user_sessions
-            self.mass_upload_sessions = self.db.mass_upload_sessions
-            self.config = self.db.config
             self.counters = self.db.counters
             self.sudo_users = self.db.sudo_users
             
@@ -324,14 +170,6 @@ class MongoDB:
             )
             await asyncio.get_event_loop().run_in_executor(
                 None,
-                lambda: self.sessions.create_index("user_id", unique=True)
-            )
-            await asyncio.get_event_loop().run_in_executor(
-                None,
-                lambda: self.mass_upload_sessions.create_index("user_id", unique=True)
-            )
-            await asyncio.get_event_loop().run_in_executor(
-                None,
                 lambda: self.sudo_users.create_index("user_id", unique=True)
             )
             
@@ -346,12 +184,6 @@ class MongoDB:
                     None,
                     lambda: self.counters.insert_one({"_id": "character_id", "seq": 0})
                 )
-            
-            # Initialize log channel to @capture_database if not set
-            log_config = await self.get_log_config()
-            if not log_config.get('log_chat_1'):
-                # Try to get chat ID for @capture_database
-                logger.info("Setting default log channel to @capture_database")
             
             logger.info("Connected to MongoDB successfully")
             
@@ -496,117 +328,24 @@ class MongoDB:
             logger.error(f"Error updating character media: {e}")
             return False
     
-    # Session operations
-    async def save_session(self, session: UserSession):
-        """Save or update user session"""
+    async def search_characters(self, query: str, limit: int = 20) -> List[Dict[str, Any]]:
+        """Search characters by name or anime"""
         try:
-            await asyncio.get_event_loop().run_in_executor(
+            search_filter = {
+                "$or": [
+                    {"char_name": {"$regex": query, "$options": "i"}},
+                    {"anime_name": {"$regex": query, "$options": "i"}}
+                ]
+            }
+            
+            characters = await asyncio.get_event_loop().run_in_executor(
                 None,
-                lambda: self.sessions.update_one(
-                    {"user_id": session.user_id},
-                    {"$set": session.to_dict()},
-                    upsert=True
-                )
+                lambda: list(self.characters.find(search_filter).limit(limit))
             )
+            return characters
         except PyMongoError as e:
-            logger.error(f"Error saving session: {e}")
-            raise
-    
-    async def get_session(self, user_id: int) -> Optional[UserSession]:
-        """Get user session by user ID"""
-        try:
-            session_data = await asyncio.get_event_loop().run_in_executor(
-                None,
-                lambda: self.sessions.find_one({"user_id": user_id})
-            )
-            if session_data:
-                return UserSession.from_dict(session_data)
-            return None
-        except PyMongoError as e:
-            logger.error(f"Error fetching session: {e}")
-            return None
-    
-    async def delete_session(self, user_id: int):
-        """Delete user session"""
-        try:
-            await asyncio.get_event_loop().run_in_executor(
-                None,
-                lambda: self.sessions.delete_one({"user_id": user_id})
-            )
-        except PyMongoError as e:
-            logger.error(f"Error deleting session: {e}")
-            raise
-    
-    # Mass Upload Session operations
-    async def save_mass_upload_session(self, session: MassUploadSession):
-        """Save or update mass upload session"""
-        try:
-            await asyncio.get_event_loop().run_in_executor(
-                None,
-                lambda: self.mass_upload_sessions.update_one(
-                    {"user_id": session.user_id},
-                    {"$set": session.to_dict()},
-                    upsert=True
-                )
-            )
-        except PyMongoError as e:
-            logger.error(f"Error saving mass upload session: {e}")
-            raise
-    
-    async def get_mass_upload_session(self, user_id: int) -> Optional[MassUploadSession]:
-        """Get mass upload session by user ID"""
-        try:
-            session_data = await asyncio.get_event_loop().run_in_executor(
-                None,
-                lambda: self.mass_upload_sessions.find_one({"user_id": user_id})
-            )
-            if session_data:
-                return MassUploadSession.from_dict(session_data)
-            return None
-        except PyMongoError as e:
-            logger.error(f"Error fetching mass upload session: {e}")
-            return None
-    
-    async def delete_mass_upload_session(self, user_id: int):
-        """Delete mass upload session"""
-        try:
-            await asyncio.get_event_loop().run_in_executor(
-                None,
-                lambda: self.mass_upload_sessions.delete_one({"user_id": user_id})
-            )
-        except PyMongoError as e:
-            logger.error(f"Error deleting mass upload session: {e}")
-            raise
-    
-    # Configuration operations
-    async def get_log_config(self) -> Dict[str, Any]:
-        """Get log channel configuration"""
-        try:
-            config_data = await asyncio.get_event_loop().run_in_executor(
-                None,
-                lambda: self.config.find_one({"_id": "log_config"})
-            )
-            if config_data:
-                return config_data
-            return {"log_chat_1": config.DEFAULT_LOG_CHANNEL, "log_chat_2": None}
-        except PyMongoError as e:
-            logger.error(f"Error fetching log config: {e}")
-            return {"log_chat_1": config.DEFAULT_LOG_CHANNEL, "log_chat_2": None}
-    
-    async def update_log_chat(self, chat_type: str, chat_id: int):
-        """Update log chat configuration"""
-        try:
-            await asyncio.get_event_loop().run_in_executor(
-                None,
-                lambda: self.config.update_one(
-                    {"_id": "log_config"},
-                    {"$set": {f"log_chat_{chat_type}": chat_id}},
-                    upsert=True
-                )
-            )
-        except PyMongoError as e:
-            logger.error(f"Error updating log config: {e}")
-            raise
+            logger.error(f"Error searching characters: {e}")
+            return []
     
     # Sudo user operations
     async def add_sudo_user(self, user_id: int) -> bool:
@@ -662,79 +401,6 @@ class MongoDB:
 # Global database instance
 db = MongoDB()
 
-# ==================== KEYBOARDS ====================
-class Keyboards:
-    """Inline keyboard generators for the bot"""
-    
-    @staticmethod
-    def get_rarity_keyboard() -> InlineKeyboardMarkup:
-        """Generate rarity selection keyboard with 14 rarities, 3 per row"""
-        buttons = []
-        row = []
-        
-        for rarity_id, rarity_name in config.RARITY_MAP.items():
-            row.append(InlineKeyboardButton(
-                rarity_name, 
-                callback_data=f"rarity_{rarity_id}"
-            ))
-            if len(row) == 3:  # 3 buttons per row for better layout
-                buttons.append(row)
-                row = []
-        
-        # Add remaining buttons if any
-        if row:
-            buttons.append(row)
-        
-        buttons.append([InlineKeyboardButton("🔙 Back", callback_data="back_start")])
-        
-        return InlineKeyboardMarkup(buttons)
-    
-    @staticmethod
-    def get_limited_subtypes_keyboard() -> InlineKeyboardMarkup:
-        """Generate Limited Edition subtypes keyboard"""
-        buttons = []
-        row = []
-        
-        for subtype_key, subtype_name in config.LIMITED_SUBTYPES.items():
-            row.append(InlineKeyboardButton(
-                subtype_name,
-                callback_data=f"subrarity_limited_{subtype_key}"
-            ))
-            if len(row) == 3:  # 3 per row
-                buttons.append(row)
-                row = []
-        
-        if row:
-            buttons.append(row)
-        
-        buttons.append([InlineKeyboardButton("🔙 Back", callback_data="back_rarity")])
-        
-        return InlineKeyboardMarkup(buttons)
-    
-    @staticmethod
-    def get_confirmation_keyboard() -> InlineKeyboardMarkup:
-        """Generate confirmation keyboard"""
-        return InlineKeyboardMarkup([
-            [
-                InlineKeyboardButton("✅ Confirm", callback_data="confirm_upload"),
-                InlineKeyboardButton("❌ Reject", callback_data="reject_upload")
-            ],
-            [InlineKeyboardButton("🔙 Back", callback_data="back_subrarity")]
-        ])
-    
-    @staticmethod
-    def get_main_menu_keyboard() -> InlineKeyboardMarkup:
-        """Generate main menu keyboard"""
-        return InlineKeyboardMarkup([
-            [
-                InlineKeyboardButton("➕ Add Character", callback_data="add_char"),
-                InlineKeyboardButton("📊 Status", callback_data="status")
-            ],
-            [InlineKeyboardButton("ℹ️ Help", callback_data="help")]
-        ])
-
-keyboards = Keyboards()
-
 # ==================== HELPERS ====================
 class UploadService:
     """Handles media uploads exclusively with Catbox service"""
@@ -772,12 +438,7 @@ class Helpers:
     def __init__(self):
         self.upload_service = UploadService()
     
-    @staticmethod
-    def force_reply():
-        """Create a force reply markup"""
-        return ForceReply(selective=True)
-    
-    async def upload_media_with_fallback(
+    async def upload_media(
         self, 
         client: Client, 
         message: Message,
@@ -832,9 +493,7 @@ class Helpers:
                 
             file_path = await client.download_media(
                 file_id, 
-                file_name=filename,
-                progress=self._download_progress,
-                progress_args=(status_callback,)
+                file_name=filename
             )
             
             if not file_path:
@@ -844,7 +503,7 @@ class Helpers:
             try:
                 # Upload to Catbox
                 if status_callback:
-                    await status_callback("🔄 Uploading to Catbox... (5-8 seconds)")
+                    await status_callback("🔄 Uploading to Catbox...")
                     
                 media_url = await self.upload_service.upload_to_catbox(file_path, filename)
                 
@@ -866,130 +525,98 @@ class Helpers:
                     logger.warning(f"Failed to clean up temp file: {e}")
             
         except Exception as e:
-            logger.error(f"Error in upload_media_with_fallback: {e}")
+            logger.error(f"Error in upload_media: {e}")
             if status_callback:
                 await status_callback("❌ Upload process failed")
             return None, None
     
-    async def _download_progress(self, current, total, status_callback):
-        """Progress callback for download"""
-        if status_callback and total > 0:
-            percentage = (current / total) * 100
-            if int(percentage) % 25 == 0:
-                await status_callback(f"📥 Downloading... {int(percentage)}%")
-    
     @staticmethod
-    def format_character_preview(session: UserSession) -> str:
-        """Format character data for preview"""
-        preview = "📋 **Character Upload Preview**\n\n"
-        preview += f"👤 **Name:** {session.char_name}\n"
-        preview += f"🎞️ **Anime:** {session.anime_name}\n"
-        preview += f"🏅 **Rarity:** {session.rarity}\n"
-        
-        if session.subrarity:
-            preview += f"💠 **Sub-Rarity:** {session.subrarity}\n"
-        
-        if session.media_url:
-            preview += f"📸 **Media:** Uploaded successfully\n"
-        else:
-            preview += f"📸 **Media:** Waiting for upload\n"
-        
-        return preview
-    
-    @staticmethod
-    def format_log_message(character_data: Dict[str, Any], username: str, user_id: int) -> str:
-        """Format character data for log channels"""
-        log_msg = "🆕 **New Character Added!**\n\n"
-        log_msg += f"👤 **Name:** {character_data['char_name']}\n"
-        log_msg += f"🎞️ **Anime:** {character_data['anime_name']}\n"
-        log_msg += f"🏅 **Rarity:** {character_data['rarity']}\n"
+    def format_character_info(character_data: Dict[str, Any]) -> str:
+        """Format character data for display"""
+        info = f"👤 **Name:** {character_data['char_name']}\n"
+        info += f"🎞️ **Anime:** {character_data['anime_name']}\n"
+        info += f"🏅 **Rarity:** {character_data['rarity']}\n"
         
         if character_data.get('subrarity'):
-            log_msg += f"💠 **Sub-Rarity:** {character_data['subrarity']}\n"
+            info += f"💠 **Sub-Rarity:** {character_data['subrarity']}\n"
         
-        log_msg += f"🧍 **Added by:** @{username} ({user_id})\n"
-        log_msg += f"🆔 **Character ID:** {character_data['character_id']}\n\n"
+        info += f"🆔 **ID:** `{character_data['character_id']}`\n"
         
-        if character_data.get('media_url'):
-            log_msg += "📸 Character media uploaded successfully\n\n"
+        if character_data.get('timestamp'):
+            from datetime import datetime
+            timestamp = character_data['timestamp']
+            if isinstance(timestamp, datetime):
+                info += f"📅 **Added:** {timestamp.strftime('%Y-%m-%d %H:%M:%S')}\n"
         
-        log_msg += "**Note:** Character IDs increase automatically — next one will be " \
-                  f"{character_data['character_id'] + 1}"
-        
-        return log_msg
+        return info
     
     @staticmethod
-    async def send_to_log_channels(
+    async def send_to_log_channel(
         client: Client, 
         character_data: Dict[str, Any], 
         username: str,
-        user_id: int,
-        db: MongoDB
+        user_id: int
     ) -> bool:
-        """Send character data to configured log channels (default: @capture_database)"""
+        """Send character data to log channel"""
         try:
-            log_config = await db.get_log_config()
-            log_message = Helpers.format_log_message(character_data, username, user_id)
+            log_message = (
+                f"🆕 **New Character Added!**\n\n"
+                f"👤 **Name:** {character_data['char_name']}\n"
+                f"🎞️ **Anime:** {character_data['anime_name']}\n"
+                f"🏅 **Rarity:** {character_data['rarity']}\n"
+            )
             
-            success = True
-            sent_to = []
+            if character_data.get('subrarity'):
+                log_message += f"💠 **Sub-Rarity:** {character_data['subrarity']}\n"
             
-            # Send to @capture_database (log_chat_1)
-            log_chat = log_config.get('log_chat_1', config.DEFAULT_LOG_CHANNEL)
-            if log_chat:
+            log_message += f"🧍 **Added by:** @{username} ({user_id})\n"
+            log_message += f"🆔 **Character ID:** {character_data['character_id']}"
+            
+            # Send media if available
+            if character_data.get('media_url') and character_data.get('media_type'):
                 try:
-                    if character_data.get('media_url') and character_data.get('media_type'):
-                        try:
-                            if character_data.get('media_type') == 'photo':
-                                await client.send_photo(
-                                    chat_id=log_chat,
-                                    photo=character_data['media_url'],
-                                    caption=log_message
-                                )
-                            elif character_data.get('media_type') == 'video':
-                                await client.send_video(
-                                    chat_id=log_chat,
-                                    video=character_data['media_url'],
-                                    caption=log_message
-                                )
-                            elif character_data.get('media_type') == 'audio':
-                                await client.send_audio(
-                                    chat_id=log_chat,
-                                    audio=character_data['media_url'],
-                                    caption=log_message
-                                )
-                            else:
-                                await client.send_document(
-                                    chat_id=log_chat,
-                                    document=character_data['media_url'],
-                                    caption=log_message
-                                )
-                        except Exception as e:
-                            logger.warning(f"Failed to send media to log channel: {e}")
-                            log_message += f"\n\n📸 **Media URL:** {character_data['media_url']}"
-                            await client.send_message(
-                                chat_id=log_chat,
-                                text=log_message
-                            )
-                    else:
-                        await client.send_message(
-                            chat_id=log_chat,
-                            text=log_message
+                    if character_data.get('media_type') == 'photo':
+                        await client.send_photo(
+                            chat_id=config.LOG_CHANNEL,
+                            photo=character_data['media_url'],
+                            caption=log_message
                         )
-                    sent_to.append("Capture Database (@capture_database)")
+                    elif character_data.get('media_type') == 'video':
+                        await client.send_video(
+                            chat_id=config.LOG_CHANNEL,
+                            video=character_data['media_url'],
+                            caption=log_message
+                        )
+                    elif character_data.get('media_type') == 'audio':
+                        await client.send_audio(
+                            chat_id=config.LOG_CHANNEL,
+                            audio=character_data['media_url'],
+                            caption=log_message
+                        )
+                    else:
+                        await client.send_document(
+                            chat_id=config.LOG_CHANNEL,
+                            document=character_data['media_url'],
+                            caption=log_message
+                        )
                 except Exception as e:
-                    logger.error(f"Failed to send to @capture_database: {e}")
-                    success = False
+                    logger.warning(f"Failed to send media to log channel: {e}")
+                    log_message += f"\n\n📸 **Media URL:** {character_data['media_url']}"
+                    await client.send_message(
+                        chat_id=config.LOG_CHANNEL,
+                        text=log_message
+                    )
+            else:
+                await client.send_message(
+                    chat_id=config.LOG_CHANNEL,
+                    text=log_message
+                )
             
-            if not sent_to:
-                logger.warning("No log channels configured")
-                return False
-                
-            logger.info(f"Log message sent to: {', '.join(sent_to)}")
-            return success
+            logger.info(f"Character sent to log channel: {config.LOG_CHANNEL}")
+            return True
             
         except Exception as e:
-            logger.error(f"Error in send_to_log_channels: {e}")
+            logger.error(f"Error sending to log channel: {e}")
             return False
     
     @staticmethod
@@ -1016,1335 +643,36 @@ class Helpers:
             return f"User ({user_id})"
     
     @staticmethod
-    def format_session_duration(start_time: datetime) -> str:
-        """Format session duration for display"""
-        duration = datetime.utcnow() - start_time
-        hours, remainder = divmod(int(duration.total_seconds()), 3600)
-        minutes, seconds = divmod(remainder, 60)
-        
-        if hours > 0:
-            return f"{hours}h {minutes}m {seconds}s"
-        elif minutes > 0:
-            return f"{minutes}m {seconds}s"
-        else:
-            return f"{seconds}s"
+    def parse_rarity(rarity_input: str) -> tuple[Optional[str], Optional[str]]:
+        """Parse rarity input (e.g., '5 valentine' or just '5')"""
+        try:
+            parts = rarity_input.strip().split()
+            if not parts:
+                return None, None
+            
+            rarity_num = int(parts[0])
+            if rarity_num not in config.RARITY_MAP:
+                return None, None
+            
+            rarity_name = config.RARITY_MAP[rarity_num]
+            subrarity = None
+            
+            # Check for Limited Edition subtype
+            if rarity_num == 5 and len(parts) > 1:
+                subtype_key = parts[1].lower()
+                if subtype_key in config.LIMITED_SUBTYPES:
+                    subrarity = config.LIMITED_SUBTYPES[subtype_key]
+            
+            return rarity_name, subrarity
+            
+        except (ValueError, IndexError):
+            return None, None
 
 helpers = Helpers()
 
-# ==================== COMMAND HANDLERS ====================
-class CommandHandlers:
-    """Handle all bot commands"""
-    
-    def __init__(self, client: Client):
-        self.client = client
-    
-    async def start_command(self, client: Client, message: Message):
-        """Handle /start command"""
-        welcome_text = (
-            "👋 **Welcome to Character Upload Bot!**\n\n"
-            "I can help you upload and manage character data with rarity systems. "
-            "Use the buttons below to get started!\n\n"
-            "**NEW Character Upload Flow:**\n"
-            "1. Character Name\n"
-            "2. Anime Name\n" 
-            "3. Rarity Selection\n"
-            "4. Sub-rarity (if applicable)\n"
-            "5. Media Upload\n"
-            "6. Confirmation\n\n"
-            "**Supported Media Types:**\n"
-            "• 📷 Photos (JPEG, PNG, GIF)\n" 
-            "• 🎥 Videos (MP4, MKV, AVI)\n"
-            "• 🎵 Audio files (MP3, WAV)\n"
-            "• 📄 Documents (PDF, TXT, etc.)\n\n"
-            "**Max File Size:** 50MB\n\n"
-            "**Upload Service:** Catbox.moe (Fast - 5-8 seconds)\n\n"
-            "**Log Channel:** All uploaded characters are sent to @capture_database"
-        )
-        
-        await message.reply_text(
-            welcome_text,
-            reply_markup=keyboards.get_main_menu_keyboard()
-        )
-    
-    async def addchar_command(self, client: Client, message: Message):
-        """Handle /addchar command - starts with character name"""
-        user_id = message.from_user.id
-        
-        if not await helpers.is_sudo_user(user_id):
-            await message.reply_text("❌ You are not authorized to use this bot. Contact admin.")
-            return
-        
-        mass_session = await db.get_mass_upload_session(user_id)
-        if mass_session:
-            await message.reply_text(
-                "⚠️ **You have an active mass upload session!**\n\n"
-                f"**Current Session:** {mass_session.char_name} ({mass_session.anime_name})\n\n"
-                "Use `/donechar` to end mass session first."
-            )
-            return
-        
-        existing_session = await db.get_session(user_id)
-        if existing_session:
-            await message.reply_text(
-                "⚠️ **You already have an active upload session!**\n\n"
-                "Use `/cs` to clear your current session first."
-            )
-            return
-        
-        session = UserSession(
-            user_id=user_id,
-            state=CharacterStates.WAITING_CHAR_NAME.value
-        )
-        await db.save_session(session)
-        
-        await message.reply_text(
-            "🚀 **Starting Character Upload Process**\n\n"
-            "💬 **Step 1: What is the character's name?**\n\n"
-            "Please use the format: `Name [emoji]` if rarity has one\n"
-            "Example: `Ichigo Kurosaki 🗡️`\n\n"
-            "**Please send the character name:**",
-            reply_markup=helpers.force_reply()
-        )
-    
-    async def cs_command(self, client: Client, message: Message):
-        """Handle /cs command - clear current session"""
-        user_id = message.from_user.id
-        
-        mass_session = await db.get_mass_upload_session(user_id)
-        if mass_session:
-            await db.delete_mass_upload_session(user_id)
-            await message.reply_text("✅ Mass upload session cleared!")
-            return
-        
-        session = await db.get_session(user_id)
-        if session:
-            await db.delete_session(user_id)
-            await message.reply_text("✅ Single character upload session cleared!")
-            return
-        
-        await message.reply_text("ℹ️ No active session to clear.")
-    
-    async def check_command(self, client: Client, message: Message):
-        """Handle /c command - check character by ID"""
-        try:
-            args = message.text.split()
-            if len(args) != 2:
-                await message.reply_text(
-                    "🔍 **Character Check Command**\n\n"
-                    "**Usage:**\n"
-                    "`/c [character_id]`\n\n"
-                    "**Example:**\n"
-                    "`/c 1`"
-                )
-                return
-            
-            character_id = int(args[1])
-            character = await db.get_character_by_id(character_id)
-            
-            if not character:
-                await message.reply_text("⚠️ Character not found!")
-                return
-            
-            character_info = (
-                "🔍 **Character Preview**\n\n"
-                f"👤 **Name:** {character['char_name']}\n"
-                f"🎞️ **Anime:** {character['anime_name']}\n"
-                f"🏅 **Rarity:** {character['rarity']}\n"
-                f"🆔 **Character ID:** {character['character_id']}\n"
-                f"🧍 **Uploaded by:** {await helpers.get_username_from_id(client, character['added_by'])}"
-            )
-            
-            if character.get('media_url') and character.get('media_type'):
-                try:
-                    if character.get('media_type') == 'photo':
-                        await client.send_photo(
-                            chat_id=message.chat.id,
-                            photo=character['media_url'],
-                            caption=character_info
-                        )
-                    elif character.get('media_type') == 'video':
-                        await client.send_video(
-                            chat_id=message.chat.id,
-                            video=character['media_url'],
-                            caption=character_info
-                        )
-                    elif character.get('media_type') == 'audio':
-                        await client.send_audio(
-                            chat_id=message.chat.id,
-                            audio=character['media_url'],
-                            caption=character_info
-                        )
-                    else:
-                        await client.send_document(
-                            chat_id=message.chat.id,
-                            document=character['media_url'],
-                            caption=character_info
-                        )
-                except Exception as e:
-                    logger.warning(f"Failed to send media for character {character_id}: {e}")
-                    character_info += f"\n\n📸 **Media URL:** {character['media_url']}"
-                    await message.reply_text(character_info)
-            else:
-                await message.reply_text(character_info)
-                
-        except ValueError:
-            await message.reply_text("❌ Invalid character ID.")
-        except Exception as e:
-            logger.error(f"Error in check command: {e}")
-            await message.reply_text("❌ Error fetching character.")
-    
-    async def status_command(self, client: Client, message: Message):
-        """Handle /status command - show bot statistics"""
-        try:
-            total_chars = await db.get_character_count()
-            user_chars = await db.get_user_characters(message.from_user.id)
-            
-            mass_session = await db.get_mass_upload_session(message.from_user.id)
-            mass_session_info = ""
-            if mass_session:
-                mass_session_info = f"• **Active Mass Session:** {mass_session.char_name} ({mass_session.get_character_count()} chars)\n"
-            
-            is_sudo = await helpers.is_sudo_user(message.from_user.id)
-            
-            status_text = (
-                "📊 **Bot Status**\n\n"
-                f"• **Total Characters:** {total_chars}\n"
-                f"• **Your Characters:** {len(user_chars)}\n"
-                f"{mass_session_info}"
-                f"• **Bot Owner:** {('Yes' if helpers.is_owner(message.from_user.id) else 'No')}\n"
-                f"• **Sudo User:** {('Yes' if is_sudo else 'No')}\n"
-                f"• **Upload Service:** Catbox.moe (Fast)\n"
-                f"• **Log Channel:** @capture_database\n"
-                f"• **Upload Flow:** Character → Anime → Rarity → Media → Confirm"
-            )
-            
-            await message.reply_text(status_text)
-            
-        except Exception as e:
-            logger.error(f"Error in status command: {e}")
-            await message.reply_text("❌ Error fetching status.")
-    
-    async def help_command(self, client: Client, message: Message):
-        """Handle /help command - show help information"""
-        help_text = (
-            "ℹ️ **Bot Help Guide**\n\n"
-            "**NEW Character Upload Flow:**\n"
-            "1. **Character Name** (Auto reply mode)\n"
-            "2. **Anime Name** (Auto reply mode)\n"
-            "3. **Rarity Selection** (Buttons)\n"
-            "4. **Sub-rarity** (If applicable, Buttons)\n"
-            "5. **Media Upload** (Send photo/video/audio/document)\n"
-            "6. **Confirmation** (Buttons)\n\n"
-            "**Available Rarities (14 Total):**\n"
-            "1. ⚪ Common\n"
-            "2. 🟢 Uncommon\n"
-            "3. 🔴 Rare\n"
-            "4. 🟡 Legendary\n"
-            "5. 🎐 Limited Edition\n"
-            "6. 💎 Premium\n"
-            "7. 🥵 Exotic\n"
-            "8. 🎬 Animated\n"
-            "9. 🌩️ Thundra\n"
-            "10. ☄️ Galvoria\n"
-            "11. 🌈 Neon\n"
-            "12. 🛡️ Supreme\n"
-            "13. 🔮 Crystal\n"
-            "14. 🎤 Celebrity\n\n"
-            "**Commands:**\n"
-            "• `/start` - Start the bot\n"
-            "• `/addchar` - Add a single character\n" 
-            "• `/cs` - Clear current upload session\n"
-            "• `/c [id]` - Check character by ID\n"
-            "• `/status` - Check bot statistics\n"
-            "• `/help` - Show this help message\n\n"
-            "**Supported Media:** Photos, Videos, Audio, Documents (max 50MB)\n"
-            "**Upload Service:** Catbox.moe (Fast - 5-8 seconds)\n"
-            "**Log Channel:** All uploaded characters are sent to @capture_database\n"
-            "**Authorization:** Only sudo users can upload characters"
-        )
-        
-        await message.reply_text(help_text)
-    
-    async def setlog1_command(self, client: Client, message: Message):
-        """Handle /setlog1 command - set first log channel (owner only)"""
-        if not helpers.is_owner(message.from_user.id):
-            await message.reply_text("❌ This command is only for bot owner.")
-            return
-        
-        try:
-            args = message.text.split()
-            if len(args) != 2:
-                await message.reply_text("❌ Usage: /setlog1 <chat_id or username>")
-                return
-            
-            chat_id = args[1]
-            # Try to convert to int if it's a numeric ID
-            try:
-                chat_id = int(chat_id)
-            except ValueError:
-                # It's a username, keep as string
-                pass
-            
-            await db.update_log_chat("1", chat_id)
-            
-            await message.reply_text(f"✅ Log Channel 1 set to: `{chat_id}`")
-            
-        except Exception as e:
-            logger.error(f"Error setting log1: {e}")
-            await message.reply_text("❌ Error setting log channel.")
-    
-    async def setlog2_command(self, client: Client, message: Message):
-        """Handle /setlog2 command - set second log channel (owner only)"""
-        if not helpers.is_owner(message.from_user.id):
-            await message.reply_text("❌ This command is only for bot owner.")
-            return
-        
-        try:
-            args = message.text.split()
-            if len(args) != 2:
-                await message.reply_text("❌ Usage: /setlog2 <chat_id or username>")
-                return
-            
-            chat_id = args[1]
-            try:
-                chat_id = int(chat_id)
-            except ValueError:
-                pass
-            
-            await db.update_log_chat("2", chat_id)
-            
-            await message.reply_text(f"✅ Log Channel 2 set to: `{chat_id}`")
-            
-        except Exception as e:
-            logger.error(f"Error setting log2: {e}")
-            await message.reply_text("❌ Error setting log channel.")
-    
-    async def showlogs_command(self, client: Client, message: Message):
-        """Handle /showlogs command - show current log channels (owner only)"""
-        if not helpers.is_owner(message.from_user.id):
-            await message.reply_text("❌ This command is only for bot owner.")
-            return
-        
-        try:
-            log_config = await db.get_log_config()
-            
-            log_text = "📋 **Current Log Channels**\n\n"
-            log_text += f"• **Log Channel 1:** `{log_config.get('log_chat_1', 'Not set')}`\n"
-            log_text += f"• **Log Channel 2:** `{log_config.get('log_chat_2', 'Not set')}`\n\n"
-            log_text += f"**Default:** {config.DEFAULT_LOG_CHANNEL}"
-            
-            await message.reply_text(log_text)
-            
-        except Exception as e:
-            logger.error(f"Error showing logs: {e}")
-            await message.reply_text("❌ Error fetching log configuration.")
-
-# ==================== CALLBACK HANDLERS ====================
-class CallbackHandlers:
-    """Handle all callback queries from inline keyboards"""
-    
-    def __init__(self, client: Client):
-        self.client = client
-    
-    async def handle_main_menu(self, client: Client, callback_query: CallbackQuery):
-        """Handle main menu callback queries"""
-        data = callback_query.data
-        
-        if data == "add_char":
-            await self.start_character_upload(callback_query)
-        elif data == "status":
-            await self.show_status(callback_query)
-        elif data == "help":
-            await self.show_help(callback_query)
-    
-    async def start_character_upload(self, callback_query: CallbackQuery):
-        """Start character upload from main menu"""
-        user_id = callback_query.from_user.id
-        
-        if not await helpers.is_sudo_user(user_id):
-            await callback_query.answer("❌ You are not authorized to use this bot.", show_alert=True)
-            return
-        
-        await callback_query.message.edit_text(
-            "📸 **To add a character, please use the /addchar command.**\n\n"
-            "**NEW Upload Flow:**\n"
-            "1. Character Name (Reply)\n"
-            "2. Anime Name (Reply)\n"
-            "3. Rarity Selection (Buttons)\n" 
-            "4. Sub-rarity (if applicable, Buttons)\n"
-            "5. Media Upload (Send file)\n"
-            "6. Confirmation (Buttons)\n\n"
-            "Use `/addchar` to start the process."
-        )
-    
-    async def show_status(self, callback_query: CallbackQuery):
-        """Show status from main menu"""
-        try:
-            total_chars = await db.get_character_count()
-            user_chars = await db.get_user_characters(callback_query.from_user.id)
-            
-            status_text = (
-                "📊 **Bot Status**\n\n"
-                f"• **Total Characters:** {total_chars}\n"
-                f"• **Your Characters:** {len(user_chars)}\n"
-                f"• **Log Channel:** @capture_database"
-            )
-            
-            await callback_query.message.edit_text(
-                status_text,
-                reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("🔙 Back", callback_data="back_main")]
-                ])
-            )
-            
-        except Exception as e:
-            logger.error(f"Error in status callback: {e}")
-            await callback_query.answer("Error fetching status", show_alert=True)
-    
-    async def show_help(self, callback_query: CallbackQuery):
-        """Show help from main menu"""
-        help_text = (
-            "ℹ️ **Bot Help Guide**\n\n"
-            "**NEW Character Upload Flow:**\n"
-            "1. **Character Name** (Reply to bot's message)\n"
-            "2. **Anime Name** (Reply to bot's message)\n"
-            "3. **Rarity Selection** (Buttons)\n"
-            "4. **Sub-rarity** (If applicable, Buttons)\n"
-            "5. **Media Upload** (Send photo/video/audio/document)\n"
-            "6. **Confirmation** (Buttons)\n\n"
-            "Use `/addchar` to start uploading characters.\n\n"
-            "**All uploaded characters are sent to @capture_database**"
-        )
-        
-        await callback_query.message.edit_text(
-            help_text,
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("🔙 Back", callback_data="back_main")]
-            ])
-        )
-    
-    async def handle_rarity_selection(self, client: Client, callback_query: CallbackQuery):
-        """Handle rarity selection callback"""
-        user_id = callback_query.from_user.id
-        session = await db.get_session(user_id)
-        
-        if not session:
-            await callback_query.answer("Session expired. Please start again with /addchar", show_alert=True)
-            return
-        
-        rarity_id = int(callback_query.data.split("_")[1])
-        rarity_name = config.RARITY_MAP[rarity_id]
-        
-        session.rarity = rarity_name
-        
-        # Check if rarity has subtypes (only Limited Edition - rarity 5)
-        if rarity_id in config.RARITIES_WITH_SUBTYPES:
-            session.state = CharacterStates.WAITING_SUBRARITY.value
-            if rarity_id == 5:  # Limited Edition
-                keyboard = keyboards.get_limited_subtypes_keyboard()
-                await callback_query.message.edit_text(
-                    f"✅ **Rarity Selected: {rarity_name}**\n\n"
-                    f"🎯 **Step 4: Select Limited Edition Subtype**",
-                    reply_markup=keyboard
-                )
-        else:
-            # No subtypes, proceed to media upload
-            session.state = CharacterStates.WAITING_MEDIA.value
-            await callback_query.message.edit_text(
-                f"✅ **Rarity Selected: {rarity_name}**\n\n"
-                "📸 **Step 5: Now please send the character media file**\n\n"
-                "**Supported formats:**\n"
-                "• 📷 Photos (JPEG, PNG, GIF)\n"
-                "• 🎥 Videos (MP4, MKV, AVI)\n"
-                "• 🎵 Audio files (MP3, WAV)\n" 
-                "• 📄 Documents (PDF, TXT, etc.)\n\n"
-                "**Max File Size:** 50MB\n\n"
-                "**Upload Service:** Catbox.moe (Fast - 5-8 seconds)\n\n"
-                "**Note:** Character will be sent to @capture_database"
-            )
-        
-        await db.save_session(session)
-        await callback_query.answer()
-    
-    async def handle_subrarity_selection(self, client: Client, callback_query: CallbackQuery):
-        """Handle sub-rarity selection callback (only for Limited Edition)"""
-        user_id = callback_query.from_user.id
-        session = await db.get_session(user_id)
-        
-        if not session:
-            await callback_query.answer("Session expired. Please start again with /addchar", show_alert=True)
-            return
-        
-        parts = callback_query.data.split("_")
-        subtype_key = parts[2]
-        
-        subrarity_name = config.LIMITED_SUBTYPES[subtype_key]
-        
-        session.subrarity = subrarity_name
-        session.state = CharacterStates.WAITING_MEDIA.value
-        await db.save_session(session)
-        
-        await callback_query.message.edit_text(
-            f"✅ **Rarity Selected: {session.rarity}**\n"
-            f"✅ **Sub-rarity Selected: {subrarity_name}**\n\n"
-            "📸 **Step 5: Now please send the character media file**\n\n"
-            "**Supported formats:**\n"
-            "• 📷 Photos (JPEG, PNG, GIF)\n"
-            "• 🎥 Videos (MP4, MKV, AVI)\n"
-            "• 🎵 Audio files (MP3, WAV)\n" 
-            "• 📄 Documents (PDF, TXT, etc.)\n\n"
-            "**Max File Size:** 50MB\n\n"
-            "**Upload Service:** Catbox.moe (Fast - 5-8 seconds)\n\n"
-            "**Note:** Character will be sent to @capture_database"
-        )
-        await callback_query.answer()
-    
-    async def handle_confirmation(self, client: Client, callback_query: CallbackQuery):
-        """Handle confirmation callback"""
-        user_id = callback_query.from_user.id
-        session = await db.get_session(user_id)
-        
-        if not session:
-            await callback_query.answer("Session expired. Please start again with /addchar", show_alert=True)
-            return
-        
-        if callback_query.data == "confirm_upload":
-            character_id = await db.get_next_character_id()
-            
-            character = Character(
-                char_name=session.char_name,
-                anime_name=session.anime_name,
-                rarity=session.rarity,
-                character_id=character_id,
-                media_url=session.media_url,
-                media_type=session.media_type,
-                subrarity=session.subrarity,
-                added_by=user_id
-            )
-            
-            try:
-                inserted_id = await db.insert_character(character)
-                
-                username = callback_query.from_user.username or callback_query.from_user.first_name or "Unknown"
-                await helpers.send_to_log_channels(
-                    client, character.to_dict(), username, user_id, db
-                )
-                
-                success_text = (
-                    "🎉 **Character successfully added to the database!**\n\n"
-                    f"👤 **Name:** {session.char_name}\n"
-                    f"🎞️ **Anime:** {session.anime_name}\n"
-                    f"🏅 **Rarity:** {session.rarity}" +
-                    (f"\n💠 **Sub-Rarity:** {session.subrarity}" if session.subrarity else "") +
-                    f"\n\n🆔 **Character ID:** `{character_id}`\n"
-                    f"📸 **Media:** Uploaded to Catbox\n"
-                    f"📢 **Posted to:** @capture_database\n\n"
-                    f"**Note:** Character IDs increase automatically — next one will be {character_id + 1}"
-                )
-                
-                await callback_query.message.edit_text(success_text)
-                
-                await db.delete_session(user_id)
-                
-            except Exception as e:
-                logger.error(f"Error saving character: {e}")
-                await callback_query.message.edit_text(
-                    "❌ **Error saving character to database.**\n\n"
-                    "Please try again or contact admin."
-                )
-        
-        elif callback_query.data == "reject_upload":
-            await callback_query.message.edit_text("❌ **Upload cancelled.**")
-            await db.delete_session(user_id)
-        
-        await callback_query.answer()
-    
-    async def handle_back_navigation(self, client: Client, callback_query: CallbackQuery):
-        """Handle back button navigation"""
-        user_id = callback_query.from_user.id
-        session = await db.get_session(user_id)
-        
-        back_to = callback_query.data.split("_")[1]
-        
-        if back_to == "main":
-            await callback_query.message.edit_text(
-                "👋 **Welcome to Character Upload Bot!**\n\n"
-                "I can help you upload and manage character data with rarity systems. "
-                "Use the buttons below to get started!",
-                reply_markup=keyboards.get_main_menu_keyboard()
-            )
-        
-        elif back_to == "start" and session:
-            session.state = CharacterStates.WAITING_CHAR_NAME.value
-            await db.save_session(session)
-            
-            await callback_query.message.reply_text(
-                "💬 **Please reply to this message with the character name:**\n\n"
-                "Please use the format: `Name [emoji]` if rarity has one\n"
-                "Example: `Ichigo Kurosaki 🗡️`",
-                reply_markup=helpers.force_reply()
-            )
-        
-        elif back_to == "rarity" and session:
-            session.state = CharacterStates.WAITING_RARITY.value
-            await db.save_session(session)
-            await callback_query.message.edit_text(
-                "🎯 **Select the character's rarity:**",
-                reply_markup=keyboards.get_rarity_keyboard()
-            )
-        
-        elif back_to == "subrarity" and session:
-            session.state = CharacterStates.WAITING_SUBRARITY.value
-            await db.save_session(session)
-            
-            if "Limited Edition" in session.rarity:
-                keyboard = keyboards.get_limited_subtypes_keyboard()
-                await callback_query.message.edit_text(
-                    f"🎯 **Select Limited Edition Subtype**\n\n"
-                    f"Rarity: {session.rarity}",
-                    reply_markup=keyboard
-                )
-        
-        await callback_query.answer()
-
-# ==================== CHARACTER MANAGEMENT HANDLERS ====================
-class CharacterManagementHandlers:
-    """Handlers for character management commands"""
-    
-    def __init__(self, client: Client):
-        self.client = client
-    
-    async def delchar_command(self, client: Client, message: Message):
-        """Handle /delchar command - delete character by ID"""
-        if not helpers.is_owner(message.from_user.id):
-            await message.reply_text("❌ This command is only for bot owner.")
-            return
-        
-        try:
-            args = message.text.split()
-            if len(args) != 2:
-                await message.reply_text(
-                    "🗑️ **Delete Character Command**\n\n"
-                    "**Usage:**\n"
-                    "`/delchar [character_id]`\n\n"
-                    "**Example:**\n"
-                    "`/delchar 1`"
-                )
-                return
-            
-            character_id = int(args[1])
-            character = await db.get_character_by_id(character_id)
-            
-            if not character:
-                await message.reply_text("❌ Character not found!")
-                return
-            
-            deleted = await db.delete_character(character_id)
-            
-            if deleted:
-                await message.reply_text("✅ Character deleted successfully!")
-                logger.info(f"Character {character_id} deleted by user {message.from_user.id}")
-            else:
-                await message.reply_text("❌ Failed to delete character!")
-                
-        except ValueError:
-            await message.reply_text("❌ Invalid character ID.")
-        except Exception as e:
-            logger.error(f"Error in delchar command: {e}")
-            await message.reply_text("❌ Error deleting character.")
-    
-    async def uchar_command(self, client: Client, message: Message):
-        """Handle /uchar command - update character details"""
-        if not helpers.is_owner(message.from_user.id):
-            await message.reply_text("❌ This command is only for bot owner.")
-            return
-        
-        try:
-            args = message.text.split()
-            if len(args) < 5:
-                await message.reply_text(
-                    "✏️ **Update Character Command**\n\n"
-                    "**Usage:**\n"
-                    "`/uchar [char_id] [name] [anime] [rarity_no] [optional_subrarity]`\n\n"
-                    "**Example:**\n"
-                    "`/uchar 1 Zoro OnePiece 4`\n"
-                    "`/uchar 1 Zoro OnePiece 5 valentine`\n\n"
-                    "**Rarity Numbers (1-14):**\n"
-                    "1: Common, 2: Uncommon, 3: Rare, 4: Legendary\n"
-                    "5: Limited Edition, 6: Premium, 7: Exotic, 8: Animated\n"
-                    "9: Thundra, 10: Galvoria, 11: Neon, 12: Supreme\n"
-                    "13: Crystal, 14: Celebrity"
-                )
-                return
-            
-            character_id = int(args[1])
-            char_name = args[2]
-            anime_name = args[3]
-            rarity_no = int(args[4])
-            subrarity = args[5] if len(args) > 5 else None
-            
-            if rarity_no not in config.RARITY_MAP:
-                await message.reply_text(f"❌ Invalid rarity number! Must be 1-{len(config.RARITY_MAP)}")
-                return
-            
-            character = await db.get_character_by_id(character_id)
-            if not character:
-                await message.reply_text("❌ Character not found!")
-                return
-            
-            rarity_name = config.RARITY_MAP[rarity_no]
-            
-            # Handle subrarity for Limited Edition (rarity 5)
-            if rarity_no in config.RARITIES_WITH_SUBTYPES and subrarity:
-                if rarity_no == 5:  # Limited Edition
-                    if subrarity not in config.LIMITED_SUBTYPES:
-                        await message.reply_text("❌ Invalid Limited Edition subtype!")
-                        return
-                    subrarity_name = config.LIMITED_SUBTYPES[subrarity]
-                else:
-                    subrarity_name = None
-            else:
-                subrarity_name = None
-            
-            updated = await db.update_character(
-                character_id=character_id,
-                char_name=char_name,
-                anime_name=anime_name,
-                rarity=rarity_name,
-                subrarity=subrarity_name
-            )
-            
-            if updated:
-                await message.reply_text("✅ Character updated successfully!")
-                logger.info(f"Character {character_id} updated by user {message.from_user.id}")
-            else:
-                await message.reply_text("❌ Failed to update character!")
-                
-        except ValueError as e:
-            await message.reply_text("❌ Invalid input.")
-        except Exception as e:
-            logger.error(f"Error in uchar command: {e}")
-            await message.reply_text("❌ Error updating character.")
-    
-    async def uimage_command(self, client: Client, message: Message):
-        """Handle /uimage command - update character media"""
-        if not helpers.is_owner(message.from_user.id):
-            await message.reply_text("❌ This command is only for bot owner.")
-            return
-        
-        try:
-            if not message.reply_to_message or not (
-                message.reply_to_message.photo or 
-                message.reply_to_message.video or 
-                message.reply_to_message.audio or 
-                message.reply_to_message.document
-            ):
-                await message.reply_text(
-                    "❌ **Please reply to a media file with this command!**\n\n"
-                    "**Usage:**\n"
-                    "1. Send a photo/video/audio/document\n"
-                    "2. Reply to it with: `/uimage [character_id]`\n\n"
-                    "**Example:**\n"
-                    "Send a photo, then reply: `/uimage 1`"
-                )
-                return
-            
-            args = message.text.split()
-            if len(args) != 2:
-                await message.reply_text("❌ Usage: Reply to media with `/uimage [character_id]`")
-                return
-            
-            character_id = int(args[1])
-            
-            character = await db.get_character_by_id(character_id)
-            if not character:
-                await message.reply_text("❌ Character not found!")
-                return
-            
-            status_msg = await message.reply_text("🔄 Starting media upload...")
-            
-            async def update_status(text: str):
-                try:
-                    await status_msg.edit_text(text)
-                except Exception as e:
-                    logger.warning(f"Failed to update status: {e}")
-            
-            media_url, media_type = await helpers.upload_media_with_fallback(
-                client, 
-                message.reply_to_message,
-                status_callback=update_status
-            )
-            
-            if not media_url:
-                await update_status("❌ Failed to upload media to Catbox!")
-                return
-            
-            updated = await db.update_character_media(character_id, media_url, media_type)
-            
-            if updated:
-                await update_status("✅ Character media updated successfully!")
-                logger.info(f"Character {character_id} media updated by user {message.from_user.id}")
-            else:
-                await update_status("❌ Failed to update character media!")
-                
-        except ValueError:
-            await message.reply_text("❌ Invalid character ID.")
-        except Exception as e:
-            logger.error(f"Error in uimage command: {e}")
-            await message.reply_text("❌ Error updating character media.")
-    
-    async def uinfo_command(self, client: Client, message: Message):
-        """Handle /uinfo command - show detailed character info"""
-        if not helpers.is_owner(message.from_user.id):
-            await message.reply_text("❌ This command is only for bot owner.")
-            return
-        
-        try:
-            args = message.text.split()
-            if len(args) != 2:
-                await message.reply_text(
-                    "🔍 **Character Info Command**\n\n"
-                    "**Usage:**\n"
-                    "`/uinfo [character_id]`\n\n"
-                    "**Example:**\n"
-                    "`/uinfo 1`"
-                )
-                return
-            
-            character_id = int(args[1])
-            character = await db.get_character_by_id(character_id)
-            
-            if not character:
-                await message.reply_text("❌ Character not found!")
-                return
-            
-            char_info = (
-                "🔍 **Character Detailed Info**\n\n"
-                f"🆔 **Character ID:** `{character['character_id']}`\n"
-                f"👤 **Name:** `{character['char_name']}`\n"
-                f"🎞️ **Anime:** `{character['anime_name']}`\n"
-                f"🏅 **Rarity:** `{character['rarity']}`\n"
-                f"💠 **Sub-Rarity:** `{character.get('subrarity', 'None')}`\n"
-                f"📸 **Media Type:** `{character.get('media_type', 'None')}`\n"
-                f"🔗 **Media URL:** `{character.get('media_url', 'None')}`\n"
-                f"🧍 **Added by:** `{character['added_by']}`\n"
-                f"🕐 **Timestamp:** `{character.get('timestamp', 'Unknown')}`\n\n"
-                "**Use this info to verify before updating with /uchar**"
-            )
-            
-            if character.get('media_url'):
-                if character.get('media_type') == 'photo':
-                    await client.send_photo(
-                        chat_id=message.chat.id,
-                        photo=character['media_url'],
-                        caption=char_info
-                    )
-                elif character.get('media_type') == 'video':
-                    await client.send_video(
-                        chat_id=message.chat.id,
-                        video=character['media_url'],
-                        caption=char_info
-                    )
-                elif character.get('media_type') == 'audio':
-                    await client.send_audio(
-                        chat_id=message.chat.id,
-                        audio=character['media_url'],
-                        caption=char_info
-                    )
-                else:
-                    await client.send_document(
-                        chat_id=message.chat.id,
-                        document=character['media_url'],
-                        caption=char_info
-                    )
-            else:
-                await message.reply_text(char_info)
-                
-        except ValueError:
-            await message.reply_text("❌ Invalid character ID.")
-        except Exception as e:
-            logger.error(f"Error in uinfo command: {e}")
-            await message.reply_text("❌ Error fetching character info.")
-
-# ==================== MASS UPLOAD HANDLERS ====================
-class MassUploadHandlers:
-    """Handlers for mass character upload functionality"""
-    
-    def __init__(self, client: Client):
-        self.client = client
-    
-    async def setchar_command(self, client: Client, message: Message):
-        """Handle /setchar command - start mass upload session"""
-        if not await helpers.is_sudo_user(message.from_user.id):
-            await message.reply_text("❌ You are not authorized to use this bot.")
-            return
-            
-        try:
-            args = message.text.split()
-            if len(args) < 3:
-                await message.reply_text(
-                    "🚀 **Mass Upload Session Setup**\n\n"
-                    "**Usage:**\n"
-                    "`/setchar <character_name> <anime_name>`\n\n"
-                    "**Example:**\n"
-                    "`/setchar Ichigo_Kurosaki Bleach`\n"
-                    "`/setchar \"Goku Ultra Instinct\" \"Dragon Ball Super\"`\n\n"
-                    "**Note:** Use underscores for spaces or quotes for multi-word names"
-                )
-                return
-            
-            char_name = args[1].replace('_', ' ').replace('"', '')
-            anime_name = ' '.join(args[2:]).replace('_', ' ').replace('"', '')
-            
-            existing_session = await db.get_mass_upload_session(message.from_user.id)
-            if existing_session:
-                await message.reply_text(
-                    "⚠️ **You already have an active mass upload session!**\n\n"
-                    f"**Current Session:** {existing_session.char_name} ({existing_session.anime_name})\n\n"
-                    "Use `/donechar` to end current session or `/currentchar` to view status."
-                )
-                return
-            
-            session = MassUploadSession(
-                user_id=message.from_user.id,
-                char_name=char_name,
-                anime_name=anime_name
-            )
-            
-            await db.save_mass_upload_session(session)
-            
-            await message.reply_text(
-                f"✅ **Mass Upload Session Started!**\n\n"
-                f"👤 **Character:** {char_name}\n"
-                f"🎞️ **Anime:** {anime_name}\n\n"
-                "**Now you can upload media with rarities:**\n"
-                "• Reply to a photo/video with `/madd <rarity> [subrarity]`\n"
-                "• Example: `/madd 4` (Legendary rarity)\n"
-                "• Example: `/madd 5 valentine` (Valentine Limited Edition)\n\n"
-                "**Available Commands:**\n"
-                "• `/currentchar` - Show session status\n"
-                "• `/undochar` - Remove last upload\n" 
-                "• `/bulkstatus` - Show upload statistics\n"
-                "• `/donechar` - End session\n\n"
-                "**Auto Emoji System:** Subrarities automatically add emojis to character names!\n"
-                "**Fast Upload:** Catbox uploads now take 5-8 seconds!\n"
-                "**Log Channel:** All characters sent to @capture_database"
-            )
-            
-        except Exception as e:
-            logger.error(f"Error in setchar command: {e}")
-            await message.reply_text("❌ Error starting mass upload session.")
-    
-    async def madd_command(self, client: Client, message: Message):
-        """Handle /madd command in mass upload context"""
-        if not await helpers.is_sudo_user(message.from_user.id):
-            await message.reply_text("❌ You are not authorized to use this bot.")
-            return
-            
-        try:
-            session = await db.get_mass_upload_session(message.from_user.id)
-            if not session:
-                await message.reply_text(
-                    "❌ **No active mass upload session!**\n\n"
-                    "Start a session first with `/setchar <name> <anime>`"
-                )
-                return
-            
-            if not message.reply_to_message or not (
-                message.reply_to_message.photo or 
-                message.reply_to_message.video or 
-                message.reply_to_message.audio or 
-                message.reply_to_message.document
-            ):
-                await message.reply_text(
-                    "❌ **Please reply to a media file with this command!**\n\n"
-                    "**Usage:**\n"
-                    "1. Send a photo/video/audio/document\n"
-                    "2. Reply to it with: `/madd <rarity> [subrarity]`\n\n"
-                    "**Examples:**\n"
-                    "• `/madd 4` - Legendary rarity\n"
-                    "• `/madd 5 valentine` - Valentine Limited Edition\n"
-                    "• `/madd 6` - Premium rarity"
-                )
-                return
-            
-            args = message.text.split()
-            if len(args) < 2:
-                await message.reply_text(
-                    "❌ **Invalid syntax!**\n\n"
-                    "**Usage:** `/madd <rarity> [subrarity]`\n"
-                    "**Example:** `/madd 5 valentine`"
-                )
-                return
-            
-            try:
-                rarity_num = int(args[1])
-                if rarity_num not in config.RARITY_MAP:
-                    await message.reply_text(f"❌ Invalid rarity number! Available: 1-{len(config.RARITY_MAP)}")
-                    return
-                
-                rarity_name = config.RARITY_MAP[rarity_num]
-                subrarity_key = args[2].lower() if len(args) > 2 else None
-                subrarity_name = None
-                emoji = None
-                
-                if subrarity_key:
-                    if rarity_num == 5:  # Limited Edition
-                        if subrarity_key in config.LIMITED_SUBTYPES:
-                            subrarity_name = config.LIMITED_SUBTYPES[subrarity_key]
-                            emoji = config.SUBRARITY_EMOJI_MAP.get(subrarity_key)
-                        else:
-                            await message.reply_text(
-                                f"❌ Invalid Limited Edition subtype! Available: {', '.join(config.LIMITED_SUBTYPES.keys())}"
-                            )
-                            return
-                    else:
-                        await message.reply_text("❌ Subrarity only available for Limited Edition (rarity 5)")
-                        return
-                
-                final_char_name = session.char_name
-                if emoji:
-                    final_char_name = f"{session.char_name} [{emoji}]"
-                
-            except ValueError:
-                await message.reply_text("❌ Rarity must be a number!")
-                return
-            
-            status_msg = await message.reply_text("🔄 Starting fast media upload...")
-            
-            async def update_status(text: str):
-                try:
-                    await status_msg.edit_text(text)
-                except Exception as e:
-                    logger.warning(f"Failed to update status: {e}")
-            
-            media_url, media_type = await helpers.upload_media_with_fallback(
-                client, 
-                message.reply_to_message,
-                status_callback=update_status
-            )
-            
-            if not media_url:
-                await update_status("❌ Failed to upload media to Catbox!")
-                return
-            
-            character_id = await db.get_next_character_id()
-            character = Character(
-                char_name=final_char_name,
-                anime_name=session.anime_name,
-                rarity=rarity_name,
-                character_id=character_id,
-                media_url=media_url,
-                media_type=media_type,
-                subrarity=subrarity_name,
-                added_by=message.from_user.id
-            )
-            
-            try:
-                inserted_id = await db.insert_character(character)
-                
-                session.add_character({
-                    "character_id": character_id,
-                    "rarity": rarity_name,
-                    "subrarity": subrarity_name,
-                    "media_url": media_url,
-                    "media_type": media_type,
-                    "timestamp": character.timestamp
-                })
-                await db.save_mass_upload_session(session)
-                
-                username = message.from_user.username or message.from_user.first_name or "Unknown"
-                await helpers.send_to_log_channels(
-                    client, character.to_dict(), username, message.from_user.id, db
-                )
-                
-                success_text = (
-                    f"✅ **Character #{character_id} Added!**\n\n"
-                    f"👤 **Name:** {final_char_name}\n"
-                    f"🎞️ **Anime:** {session.anime_name}\n"
-                    f"🏅 **Rarity:** {rarity_name}\n"
-                )
-                
-                if subrarity_name:
-                    success_text += f"💠 **Sub-Rarity:** {subrarity_name}\n"
-                
-                success_text += (
-                    f"📸 **Media:** Uploaded successfully\n"
-                    f"📢 **Posted to:** @capture_database\n\n"
-                    f"**Session Progress:** {session.get_character_count()} characters uploaded\n"
-                    f"**Next ID:** {character_id + 1}"
-                )
-                
-                await update_status(success_text)
-                
-            except Exception as e:
-                logger.error(f"Error saving character in mass upload: {e}")
-                await update_status("❌ Error saving character to database!")
-                
-        except Exception as e:
-            logger.error(f"Error in mass upload madd: {e}")
-            await message.reply_text("❌ Error processing character upload.")
-    
-    async def donechar_command(self, client: Client, message: Message):
-        """Handle /donechar command - end mass upload session"""
-        try:
-            session = await db.get_mass_upload_session(message.from_user.id)
-            if not session:
-                await message.reply_text("❌ No active mass upload session found!")
-                return
-            
-            total_chars = session.get_character_count()
-            
-            await db.delete_mass_upload_session(message.from_user.id)
-            
-            summary_text = (
-                f"🎉 **Mass Upload Session Complete!**\n\n"
-                f"👤 **Character:** {session.char_name}\n"
-                f"🎞️ **Anime:** {session.anime_name}\n"
-                f"📊 **Total Uploaded:** {total_chars} characters\n"
-                f"⏱️ **Session Duration:** {helpers.format_session_duration(session.created_at)}\n\n"
-                "All characters have been saved to the database and posted to @capture_database."
-            )
-            
-            await message.reply_text(summary_text)
-            
-        except Exception as e:
-            logger.error(f"Error in donechar command: {e}")
-            await message.reply_text("❌ Error ending mass upload session.")
-    
-    async def currentchar_command(self, client: Client, message: Message):
-        """Handle /currentchar command - show current session status"""
-        try:
-            session = await db.get_mass_upload_session(message.from_user.id)
-            if not session:
-                await message.reply_text(
-                    "❌ **No active mass upload session!**\n\n"
-                    "Start a session with `/setchar <name> <anime>`"
-                )
-                return
-            
-            session_info = session.get_session_summary()
-            
-            if session.uploaded_characters:
-                session_info += "\n\n**📋 Uploaded Characters:**\n"
-                for i, char in enumerate(session.uploaded_characters[-10:], 1):
-                    char_text = f"`{char['character_id']}` - {char['rarity']}"
-                    if char.get('subrarity'):
-                        char_text += f" ({char['subrarity']})"
-                    session_info += f"{i}. {char_text}\n"
-                
-                if len(session.uploaded_characters) > 10:
-                    session_info += f"\n... and {len(session.uploaded_characters) - 10} more"
-            
-            session_info += "\n\n**📢 All characters posted to @capture_database**"
-            
-            await message.reply_text(session_info)
-            
-        except Exception as e:
-            logger.error(f"Error in currentchar command: {e}")
-            await message.reply_text("❌ Error fetching session information.")
-    
-    async def undochar_command(self, client: Client, message: Message):
-        """Handle /undochar command - remove last uploaded character"""
-        try:
-            session = await db.get_mass_upload_session(message.from_user.id)
-            if not session:
-                await message.reply_text("❌ No active mass upload session!")
-                return
-            
-            if not session.uploaded_characters:
-                await message.reply_text("❌ No characters to undo!")
-                return
-            
-            last_char = session.remove_last_character()
-            if not last_char:
-                await message.reply_text("❌ No characters to undo!")
-                return
-            
-            deleted = await db.delete_character(last_char['character_id'])
-            
-            if deleted:
-                await db.save_mass_upload_session(session)
-                await message.reply_text(
-                    f"✅ **Last character undone!**\n\n"
-                    f"🗑️ **Removed:** Character `{last_char['character_id']}`\n"
-                    f"🏅 **Rarity:** {last_char['rarity']}\n"
-                    f"📊 **Remaining:** {session.get_character_count()} characters in session"
-                )
-            else:
-                await message.reply_text("❌ Failed to delete character from database!")
-                
-        except Exception as e:
-            logger.error(f"Error in undochar command: {e}")
-            await message.reply_text("❌ Error undoing last character.")
-    
-    async def bulkstatus_command(self, client: Client, message: Message):
-        """Handle /bulkstatus command - show bulk upload statistics"""
-        try:
-            session = await db.get_mass_upload_session(message.from_user.id)
-            if not session:
-                await message.reply_text("❌ No active mass upload session!")
-                return
-            
-            total_chars = session.get_character_count()
-            rarity_count = {}
-            
-            for char in session.uploaded_characters:
-                rarity = char['rarity']
-                rarity_count[rarity] = rarity_count.get(rarity, 0) + 1
-            
-            status_text = (
-                f"📊 **Mass Upload Statistics**\n\n"
-                f"👤 **Character:** {session.char_name}\n"
-                f"🎞️ **Anime:** {session.anime_name}\n"
-                f"📈 **Total Uploaded:** {total_chars} characters\n"
-                f"⏱️ **Session Active:** {helpers.format_session_duration(session.created_at)}\n"
-                f"📢 **Posted to:** @capture_database\n\n"
-            )
-            
-            if rarity_count:
-                status_text += "**📋 Rarity Breakdown:**\n"
-                for rarity, count in rarity_count.items():
-                    status_text += f"• {rarity}: {count}\n"
-            
-            await message.reply_text(status_text)
-            
-        except Exception as e:
-            logger.error(f"Error in bulkstatus command: {e}")
-            await message.reply_text("❌ Error fetching bulk upload statistics.")
-
-# ==================== SUDO HANDLERS ====================
-class SudoHandlers:
-    """Handlers for sudo user management"""
-    
-    def __init__(self, client: Client):
-        self.client = client
-    
-    async def addsudo_command(self, client: Client, message: Message):
-        """Handle /addsudo command - add sudo user (owner only)"""
-        if not helpers.is_owner(message.from_user.id):
-            await message.reply_text("❌ This command is only for bot owner.")
-            return
-        
-        try:
-            args = message.text.split()
-            if len(args) != 2:
-                await message.reply_text(
-                    "👑 **Add Sudo User**\n\n"
-                    "**Usage:**\n"
-                    "`/addsudo <user_id>`\n\n"
-                    "**Example:**\n"
-                    "`/addsudo 123456789`\n\n"
-                    "**Note:** You can get user ID by forwarding user's message to @userinfobot"
-                )
-                return
-            
-            user_id = int(args[1])
-            
-            if await db.is_sudo_user(user_id):
-                await message.reply_text("❌ User is already a sudo user!")
-                return
-            
-            success = await db.add_sudo_user(user_id)
-            
-            if success:
-                try:
-                    username = await helpers.get_username_from_id(client, user_id)
-                    await message.reply_text(f"✅ **Sudo user added successfully!**\n\nUser: {username}\nID: `{user_id}`")
-                except:
-                    await message.reply_text(f"✅ **Sudo user added successfully!**\n\nUser ID: `{user_id}`")
-                
-                logger.info(f"Sudo user {user_id} added by {message.from_user.id}")
-            else:
-                await message.reply_text("❌ Failed to add sudo user!")
-                
-        except ValueError:
-            await message.reply_text("❌ Invalid user ID.")
-        except Exception as e:
-            logger.error(f"Error in addsudo command: {e}")
-            await message.reply_text("❌ Error adding sudo user.")
-    
-    async def rmsudo_command(self, client: Client, message: Message):
-        """Handle /rmsudo command - remove sudo user (owner only)"""
-        if not helpers.is_owner(message.from_user.id):
-            await message.reply_text("❌ This command is only for bot owner.")
-            return
-        
-        try:
-            args = message.text.split()
-            if len(args) != 2:
-                await message.reply_text(
-                    "🗑️ **Remove Sudo User**\n\n"
-                    "**Usage:**\n"
-                    "`/rmsudo <user_id>`\n\n"
-                    "**Example:**\n"
-                    "`/rmsudo 123456789`"
-                )
-                return
-            
-            user_id = int(args[1])
-            
-            if not await db.is_sudo_user(user_id):
-                await message.reply_text("❌ User is not a sudo user!")
-                return
-            
-            if user_id == config.OWNER_ID:
-                await message.reply_text("❌ Cannot remove bot owner from sudo users!")
-                return
-            
-            success = await db.remove_sudo_user(user_id)
-            
-            if success:
-                try:
-                    username = await helpers.get_username_from_id(client, user_id)
-                    await message.reply_text(f"✅ **Sudo user removed successfully!**\n\nUser: {username}\nID: `{user_id}`")
-                except:
-                    await message.reply_text(f"✅ **Sudo user removed successfully!**\n\nUser ID: `{user_id}`")
-                
-                logger.info(f"Sudo user {user_id} removed by {message.from_user.id}")
-            else:
-                await message.reply_text("❌ Failed to remove sudo user!")
-                
-        except ValueError:
-            await message.reply_text("❌ Invalid user ID.")
-        except Exception as e:
-            logger.error(f"Error in rmsudo command: {e}")
-            await message.reply_text("❌ Error removing sudo user.")
-    
-    async def staff_command(self, client: Client, message: Message):
-        """Handle /staff command - show all sudo users"""
-        if not await helpers.is_sudo_user(message.from_user.id):
-            await message.reply_text("❌ You are not authorized to view staff list.")
-            return
-        
-        try:
-            sudo_users = await db.get_sudo_users()
-            
-            staff_text = "👑 **Bot Staff Members**\n\n"
-            
-            owner_username = await helpers.get_username_from_id(client, config.OWNER_ID)
-            staff_text += f"👑 **Owner:** {owner_username} (`{config.OWNER_ID}`)\n\n"
-            
-            if sudo_users:
-                staff_text += "**Sudo Users:**\n"
-                for user_id in sudo_users:
-                    if user_id != config.OWNER_ID:
-                        username = await helpers.get_username_from_id(client, user_id)
-                        staff_text += f"• {username} (`{user_id}`)\n"
-            else:
-                staff_text += "**Sudo Users:** None\n"
-            
-            staff_text += f"\n**Total Staff:** {len(sudo_users) + 1} users"
-            
-            await message.reply_text(staff_text)
-            
-        except Exception as e:
-            logger.error(f"Error in staff command: {e}")
-            await message.reply_text("❌ Error fetching staff list.")
-
-# ==================== MAIN BOT CLASS ====================
-class UploadBot:
-    """Main bot class that orchestrates all components"""
+# ==================== MAIN COMMAND HANDLERS ====================
+class SimpleUploadBot:
+    """Main bot class with simplified upload system"""
     
     def __init__(self):
         self.client = Client(
@@ -2356,227 +684,725 @@ class UploadBot:
         self._register_handlers()
     
     def _register_handlers(self):
-        """Register all message and callback handlers"""
-        # Initialize handler classes
-        command_handlers = CommandHandlers(self.client)
-        callback_handlers = CallbackHandlers(self.client)
-        char_management_handlers = CharacterManagementHandlers(self.client)
-        mass_upload_handlers = MassUploadHandlers(self.client)
-        sudo_handlers = SudoHandlers(self.client)
+        """Register all message handlers"""
         
-        # Register command handlers
-        self.client.on_message(filters.command("start"))(command_handlers.start_command)
-        self.client.on_message(filters.command("addchar"))(command_handlers.addchar_command)
-        self.client.on_message(filters.command("cs"))(command_handlers.cs_command)
-        self.client.on_message(filters.command(["c", "check"]))(command_handlers.check_command)
-        self.client.on_message(filters.command("status"))(command_handlers.status_command)
-        self.client.on_message(filters.command("help"))(command_handlers.help_command)
-        self.client.on_message(filters.command("setlog1"))(command_handlers.setlog1_command)
-        self.client.on_message(filters.command("setlog2"))(command_handlers.setlog2_command)
-        self.client.on_message(filters.command("showlogs"))(command_handlers.showlogs_command)
-        
-        # Register character management handlers
-        self.client.on_message(filters.command("delchar"))(char_management_handlers.delchar_command)
-        self.client.on_message(filters.command("uchar"))(char_management_handlers.uchar_command)
-        self.client.on_message(filters.command("uimage"))(char_management_handlers.uimage_command)
-        self.client.on_message(filters.command("uinfo"))(char_management_handlers.uinfo_command)
-        
-        # Register mass upload handlers
-        self.client.on_message(filters.command("setchar"))(mass_upload_handlers.setchar_command)
-        self.client.on_message(filters.command("madd"))(mass_upload_handlers.madd_command)
-        self.client.on_message(filters.command("donechar"))(mass_upload_handlers.donechar_command)
-        self.client.on_message(filters.command("currentchar"))(mass_upload_handlers.currentchar_command)
-        self.client.on_message(filters.command("undochar"))(mass_upload_handlers.undochar_command)
-        self.client.on_message(filters.command("bulkstatus"))(mass_upload_handlers.bulkstatus_command)
-        
-        # Register sudo handlers
-        self.client.on_message(filters.command("addsudo"))(sudo_handlers.addsudo_command)
-        self.client.on_message(filters.command("rmsudo"))(sudo_handlers.rmsudo_command)
-        self.client.on_message(filters.command("staff"))(sudo_handlers.staff_command)
-        
-        # Register callback handler
-        @self.client.on_callback_query()
-        async def handle_all_callbacks(client: Client, callback_query: CallbackQuery):
-            data = callback_query.data
+        @self.client.on_message(filters.command("start"))
+        async def start_command(client: Client, message: Message):
+            """Handle /start command"""
+            welcome_text = (
+                "👋 **Welcome to Character Upload Bot!**\n\n"
+                "**Simple Upload System:**\n"
+                "Just reply to any media file (photo/video/audio/document) with:\n"
+                "`/upload Character_Name Anime_Name Rarity_Number [subrarity]`\n\n"
+                "**Example:**\n"
+                "`/upload \"Ichigo Kurosaki\" Bleach 5 valentine`\n"
+                "`/upload Naruto Naruto 4`\n\n"
+                "**Available Rarities (1-14):**\n"
+                "1. ⚪ Common\n"
+                "2. 🟢 Uncommon\n"
+                "3. 🔴 Rare\n"
+                "4. 🟡 Legendary\n"
+                "5. 🎐 Limited Edition (with subtypes)\n"
+                "6. 💎 Premium\n"
+                "7. 🥵 Exotic\n"
+                "8. 🎬 Animated\n"
+                "9. 🌩️ Thundra\n"
+                "10. ☄️ Galvoria\n"
+                "11. 🌈 Neon\n"
+                "12. 🛡️ Supreme\n"
+                "13. 🔮 Crystal\n"
+                "14. 🎤 Celebrity\n\n"
+                "**Limited Edition Subtypes:**\n"
+                "valentine, christmas, halloween, summer, winter, basketball, police, newyear, easter, wedding, karate\n\n"
+                "**All uploads are posted to:** @capture_database\n\n"
+                "**Other Commands:**\n"
+                "• `/edit ID new_name new_anime rarity` - Edit character\n"
+                "• `/editmedia ID` - Edit character media (reply to media)\n"
+                "• `/search query` - Search characters\n"
+                "• `/info ID` - View character details\n"
+                "• `/delete ID` - Delete character (owner only)\n"
+                "• `/stats` - View bot statistics\n"
+                "• `/help` - Show this help message"
+            )
             
-            try:
-                if data in ["add_char", "status", "help"]:
-                    await callback_handlers.handle_main_menu(client, callback_query)
-                elif data.startswith("rarity_"):
-                    await callback_handlers.handle_rarity_selection(client, callback_query)
-                elif data.startswith("subrarity_"):
-                    await callback_handlers.handle_subrarity_selection(client, callback_query)
-                elif data in ["confirm_upload", "reject_upload"]:
-                    await callback_handlers.handle_confirmation(client, callback_query)
-                elif data.startswith("back_"):
-                    await callback_handlers.handle_back_navigation(client, callback_query)
-                    
-            except Exception as e:
-                logger.error(f"Error handling callback {data}: {e}")
-                await callback_query.answer("An error occurred. Please try again.", show_alert=True)
+            await message.reply_text(welcome_text)
         
-        # Register message handlers for character upload flow
-        self.client.on_message(filters.private & (filters.text | filters.media | filters.document | filters.audio))(self._handle_message)
-    
-    async def _handle_message(self, client: Client, message: Message):
-        """Handle non-command messages for character upload flow"""
-        if message.text and message.text.startswith('/'):
-            return
-        
-        user_id = message.from_user.id
-        
-        if not await helpers.is_sudo_user(user_id):
-            await message.reply_text("❌ You are not authorized to use this bot. Contact admin.")
-            return
-        
-        mass_session = await db.get_mass_upload_session(user_id)
-        if mass_session:
-            return
+        @self.client.on_message(filters.command("upload"))
+        async def upload_command(client: Client, message: Message):
+            """Handle /upload command - SIMPLE UPLOAD SYSTEM"""
+            user_id = message.from_user.id
             
-        session = await db.get_session(user_id)
-        
-        if not session:
-            return
-        
-        try:
-            logger.info(f"Processing message in state: {session.state} for user {user_id}")
+            # Check authorization
+            if not await helpers.is_sudo_user(user_id):
+                await message.reply_text("❌ You are not authorized to upload characters.")
+                return
             
-            if session.state == CharacterStates.WAITING_CHAR_NAME.value:
-                await self._handle_char_name(client, message, session)
-            elif session.state == CharacterStates.WAITING_ANIME_NAME.value:
-                await self._handle_anime_name(client, message, session)
-            elif session.state == CharacterStates.WAITING_MEDIA.value:
-                await self._handle_media_upload(client, message, session)
+            # Check if message is a reply to media
+            if not message.reply_to_message or not (
+                message.reply_to_message.photo or 
+                message.reply_to_message.video or 
+                message.reply_to_message.audio or 
+                message.reply_to_message.document
+            ):
+                await message.reply_text(
+                    "❌ **Please reply to a media file with this command!**\n\n"
+                    "**Usage:** Reply to a photo/video/audio/document with:\n"
+                    "`/upload \"Character Name\" \"Anime Name\" Rarity_Number [subrarity]`\n\n"
+                    "**Examples:**\n"
+                    "• `/upload \"Ichigo Kurosaki\" Bleach 4`\n"
+                    "• `/upload \"Goku\" \"Dragon Ball\" 5 valentine`"
+                )
+                return
+            
+            # Parse arguments
+            args = message.text.split()
+            if len(args) < 4:
+                await message.reply_text(
+                    "❌ **Invalid syntax!**\n\n"
+                    "**Usage:** `/upload \"Character Name\" \"Anime Name\" Rarity_Number [subrarity]`\n\n"
+                    "**Note:** Use quotes for names with spaces\n"
+                    "**Example:** `/upload \"Monkey D. Luffy\" OnePiece 3`"
+                )
+                return
+            
+            # Parse character name (support quotes)
+            char_name = ""
+            anime_name = ""
+            rarity_input = ""
+            
+            # Simple parsing logic
+            text = message.text
+            # Remove command
+            text = text.replace('/upload', '', 1).strip()
+            
+            # Parse character name (might be in quotes)
+            if text.startswith('"'):
+                # Find closing quote
+                end_quote = text.find('"', 1)
+                if end_quote == -1:
+                    await message.reply_text("❌ Invalid format. Missing closing quote for character name.")
+                    return
+                char_name = text[1:end_quote]
+                text = text[end_quote + 1:].strip()
             else:
-                logger.warning(f"Unknown state: {session.state}")
+                # Take first word as character name
+                parts = text.split()
+                char_name = parts[0]
+                text = ' '.join(parts[1:])
+            
+            # Parse anime name (might be in quotes)
+            if text.startswith('"'):
+                end_quote = text.find('"', 1)
+                if end_quote == -1:
+                    await message.reply_text("❌ Invalid format. Missing closing quote for anime name.")
+                    return
+                anime_name = text[1:end_quote]
+                text = text[end_quote + 1:].strip()
+            else:
+                # Take first word as anime name
+                parts = text.split()
+                if not parts:
+                    await message.reply_text("❌ Missing anime name.")
+                    return
+                anime_name = parts[0]
+                text = ' '.join(parts[1:])
+            
+            # The rest is rarity (and optional subrarity)
+            rarity_input = text.strip()
+            
+            if not char_name or not anime_name or not rarity_input:
+                await message.reply_text("❌ Missing required parameters.")
+                return
+            
+            # Parse rarity
+            rarity_name, subrarity = helpers.parse_rarity(rarity_input)
+            if not rarity_name:
+                await message.reply_text("❌ Invalid rarity number. Must be 1-14.")
+                return
+            
+            # Check for file size
+            file_size = 0
+            if message.reply_to_message.photo:
+                file_size = message.reply_to_message.photo.file_size or 0
+            elif message.reply_to_message.video:
+                file_size = message.reply_to_message.video.file_size or 0
+            elif message.reply_to_message.audio:
+                file_size = message.reply_to_message.audio.file_size or 0
+            elif message.reply_to_message.document:
+                file_size = message.reply_to_message.document.file_size or 0
                 
-        except Exception as e:
-            logger.error(f"Error handling message in state {session.state}: {e}")
-            await message.reply_text("❌ An error occurred. Please try again with /addchar")
-            await db.delete_session(user_id)
-    
-    async def _handle_char_name(self, client: Client, message: Message, session: UserSession):
-        """Handle character name input"""
-        if not message.text:
-            await message.reply_text("❌ Please send the character name as text.")
-            return
-        
-        session.char_name = message.text.strip()
-        session.state = CharacterStates.WAITING_ANIME_NAME.value
-        await db.save_session(session)
-        
-        logger.info(f"Character name saved for user {session.user_id}: {session.char_name}")
-        
-        await message.reply_text(
-            "✅ **Character name saved!**\n\n"
-            "💬 **Step 2: What anime does this character belong to?**\n\n"
-            "Please send the anime name:",
-            reply_markup=helpers.force_reply()
-        )
-    
-    async def _handle_anime_name(self, client: Client, message: Message, session: UserSession):
-        """Handle anime name input"""
-        if not message.text:
-            await message.reply_text("❌ Please send the anime name as text.")
-            return
-        
-        session.anime_name = message.text.strip()
-        session.state = CharacterStates.WAITING_RARITY.value
-        await db.save_session(session)
-        
-        logger.info(f"Anime name saved for user {session.user_id}: {session.anime_name}")
-        
-        await message.reply_text(
-            "✅ **Anime name saved!**\n\n"
-            "🎯 **Step 3: Select the character's rarity:**",
-            reply_markup=keyboards.get_rarity_keyboard()
-        )
-    
-    async def _handle_media_upload(self, client: Client, message: Message, session: UserSession):
-        """Handle media upload"""
-        if not (message.photo or message.video or message.audio or message.document):
-            await message.reply_text(
-                "❌ **Please send a valid media file!**\n\n"
-                "**Step 5: Media Upload**\n\n"
-                "Supported formats:\n"
-                "• 📷 Photos (JPEG, PNG, GIF)\n"
-                "• 🎥 Videos (MP4, MKV, AVI)\n" 
-                "• 🎵 Audio files (MP3, WAV)\n"
-                "• 📄 Documents (PDF, TXT, etc.)\n\n"
-                "**Max File Size:** 50MB\n\n"
-                "**Upload Service:** Catbox.moe (Fast - 5-8 seconds)\n\n"
-                "**Note:** Character will be posted to @capture_database"
-            )
-            return
-        
-        file_size = 0
-        if message.photo:
-            file_size = message.photo.file_size or 0
-        elif message.video:
-            file_size = message.video.file_size or 0
-        elif message.audio:
-            file_size = message.audio.file_size or 0
-        elif message.document:
-            file_size = message.document.file_size or 0
+            if file_size > config.MAX_FILE_SIZE:
+                await message.reply_text(
+                    f"❌ File too large. Maximum size is {config.MAX_FILE_SIZE // (1024*1024)}MB."
+                )
+                return
             
-        if file_size > config.MAX_FILE_SIZE:
-            await message.reply_text(
-                f"❌ File too large. Maximum size is {config.MAX_FILE_SIZE // (1024*1024)}MB."
-            )
-            return
-        
-        status_msg = await message.reply_text("🔄 Starting fast media upload...")
-        
-        async def update_status(text: str):
-            try:
-                await status_msg.edit_text(text)
-            except Exception as e:
-                logger.warning(f"Failed to update status: {e}")
-        
-        try:
-            await update_status("📥 Processing your media file...")
+            # Start upload process
+            status_msg = await message.reply_text("🔄 Starting upload process...")
             
-            media_url, media_type = await helpers.upload_media_with_fallback(
+            async def update_status(text: str):
+                try:
+                    await status_msg.edit_text(text)
+                except Exception as e:
+                    logger.warning(f"Failed to update status: {e}")
+            
+            # Upload media
+            await update_status("📥 Uploading media to Catbox...")
+            
+            media_url, media_type = await helpers.upload_media(
                 client, 
-                message,
+                message.reply_to_message,
                 status_callback=update_status
             )
             
             if not media_url:
-                await update_status(
-                    "❌ **Failed to upload media to Catbox.**\n\n"
-                    "This could be due to:\n"
-                    "• File size too large\n" 
-                    "• Unsupported file format\n"
-                    "• Network issues\n"
-                    "• Catbox service downtime\n\n"
-                    "Please try again with a different file or check the file size."
+                await update_status("❌ Failed to upload media. Please try again.")
+                return
+            
+            # Save to database
+            character_id = await db.get_next_character_id()
+            character = Character(
+                char_name=char_name,
+                anime_name=anime_name,
+                rarity=rarity_name,
+                character_id=character_id,
+                media_url=media_url,
+                media_type=media_type,
+                subrarity=subrarity,
+                added_by=user_id
+            )
+            
+            try:
+                inserted_id = await db.insert_character(character)
+                
+                # Send to log channel
+                username = message.from_user.username or message.from_user.first_name or "Unknown"
+                await helpers.send_to_log_channel(
+                    client, character.to_dict(), username, user_id
+                )
+                
+                # Success message
+                success_text = (
+                    f"✅ **Character #{character_id} Uploaded Successfully!**\n\n"
+                    f"👤 **Name:** {char_name}\n"
+                    f"🎞️ **Anime:** {anime_name}\n"
+                    f"🏅 **Rarity:** {rarity_name}\n"
+                )
+                
+                if subrarity:
+                    success_text += f"💠 **Sub-Rarity:** {subrarity}\n"
+                
+                success_text += (
+                    f"\n📸 **Media:** Uploaded to Catbox\n"
+                    f"📢 **Posted to:** @capture_database\n"
+                    f"🆔 **Character ID:** `{character_id}`\n\n"
+                    f"**Use this ID to edit or delete the character.**"
+                )
+                
+                await update_status(success_text)
+                
+            except Exception as e:
+                logger.error(f"Error saving character: {e}")
+                await update_status("❌ Error saving character to database. Please try again.")
+        
+        @self.client.on_message(filters.command("edit"))
+        async def edit_command(client: Client, message: Message):
+            """Handle /edit command - edit character details"""
+            user_id = message.from_user.id
+            
+            # Check authorization
+            if not await helpers.is_sudo_user(user_id):
+                await message.reply_text("❌ You are not authorized to edit characters.")
+                return
+            
+            args = message.text.split()
+            if len(args) < 5:
+                await message.reply_text(
+                    "✏️ **Edit Character**\n\n"
+                    "**Usage:** `/edit ID \"New Name\" \"New Anime\" Rarity [subrarity]`\n\n"
+                    "**Examples:**\n"
+                    "• `/edit 123 \"Naruto Uzumaki\" Naruto 4`\n"
+                    "• `/edit 123 \"Sakura\" Naruto 5 valentine`\n\n"
+                    "**Note:** Use quotes for names with spaces"
                 )
                 return
             
-            session.media_url = media_url
-            session.media_type = media_type
-            session.state = CharacterStates.WAITING_CONFIRMATION.value
-            await db.save_session(session)
+            try:
+                character_id = int(args[1])
+                
+                # Simple parsing similar to upload
+                text = message.text
+                # Remove command and ID
+                text = text.replace(f'/edit {args[1]}', '', 1).strip()
+                
+                # Parse new character name
+                new_char_name = ""
+                if text.startswith('"'):
+                    end_quote = text.find('"', 1)
+                    if end_quote == -1:
+                        await message.reply_text("❌ Missing closing quote for character name.")
+                        return
+                    new_char_name = text[1:end_quote]
+                    text = text[end_quote + 1:].strip()
+                else:
+                    parts = text.split()
+                    new_char_name = parts[0]
+                    text = ' '.join(parts[1:])
+                
+                # Parse new anime name
+                new_anime_name = ""
+                if text.startswith('"'):
+                    end_quote = text.find('"', 1)
+                    if end_quote == -1:
+                        await message.reply_text("❌ Missing closing quote for anime name.")
+                        return
+                    new_anime_name = text[1:end_quote]
+                    text = text[end_quote + 1:].strip()
+                else:
+                    parts = text.split()
+                    if not parts:
+                        await message.reply_text("❌ Missing anime name.")
+                        return
+                    new_anime_name = parts[0]
+                    text = ' '.join(parts[1:])
+                
+                # Parse rarity
+                rarity_input = text.strip()
+                new_rarity, new_subrarity = helpers.parse_rarity(rarity_input)
+                
+                if not new_rarity:
+                    await message.reply_text("❌ Invalid rarity. Must be 1-14.")
+                    return
+                
+                # Check if character exists
+                character = await db.get_character_by_id(character_id)
+                if not character:
+                    await message.reply_text("❌ Character not found!")
+                    return
+                
+                # Update character
+                updated = await db.update_character(
+                    character_id=character_id,
+                    char_name=new_char_name,
+                    anime_name=new_anime_name,
+                    rarity=new_rarity,
+                    subrarity=new_subrarity
+                )
+                
+                if updated:
+                    await message.reply_text(f"✅ Character `{character_id}` updated successfully!")
+                    logger.info(f"Character {character_id} edited by user {user_id}")
+                else:
+                    await message.reply_text("❌ Failed to update character.")
+                    
+            except ValueError:
+                await message.reply_text("❌ Invalid character ID. Must be a number.")
+            except Exception as e:
+                logger.error(f"Error in edit command: {e}")
+                await message.reply_text("❌ Error updating character. Please check the format.")
+        
+        @self.client.on_message(filters.command("editmedia"))
+        async def editmedia_command(client: Client, message: Message):
+            """Handle /editmedia command - edit character media"""
+            user_id = message.from_user.id
             
-            preview = helpers.format_character_preview(session)
-            await update_status(
-                f"{preview}\n\n"
-                "✅ **Media uploaded successfully to Catbox!**\n\n"
-                "**Step 6: Please confirm to add this character to the database:**\n\n"
-                "**Note:** Character will be posted to @capture_database"
+            # Check authorization
+            if not await helpers.is_sudo_user(user_id):
+                await message.reply_text("❌ You are not authorized to edit character media.")
+                return
+            
+            # Check if message is a reply to media
+            if not message.reply_to_message or not (
+                message.reply_to_message.photo or 
+                message.reply_to_message.video or 
+                message.reply_to_message.audio or 
+                message.reply_to_message.document
+            ):
+                await message.reply_text(
+                    "❌ **Please reply to a media file with this command!**\n\n"
+                    "**Usage:** Reply to media with:\n"
+                    "`/editmedia Character_ID`\n\n"
+                    "**Example:**\n"
+                    "Send a photo, then reply: `/editmedia 123`"
+                )
+                return
+            
+            args = message.text.split()
+            if len(args) != 2:
+                await message.reply_text("❌ Usage: Reply to media with `/editmedia ID`")
+                return
+            
+            try:
+                character_id = int(args[1])
+                
+                # Check if character exists
+                character = await db.get_character_by_id(character_id)
+                if not character:
+                    await message.reply_text("❌ Character not found!")
+                    return
+                
+                # Check file size
+                file_size = 0
+                if message.reply_to_message.photo:
+                    file_size = message.reply_to_message.photo.file_size or 0
+                elif message.reply_to_message.video:
+                    file_size = message.reply_to_message.video.file_size or 0
+                elif message.reply_to_message.audio:
+                    file_size = message.reply_to_message.audio.file_size or 0
+                elif message.reply_to_message.document:
+                    file_size = message.reply_to_message.document.file_size or 0
+                    
+                if file_size > config.MAX_FILE_SIZE:
+                    await message.reply_text(
+                        f"❌ File too large. Maximum size is {config.MAX_FILE_SIZE // (1024*1024)}MB."
+                    )
+                    return
+                
+                status_msg = await message.reply_text("🔄 Uploading new media...")
+                
+                # Upload new media
+                media_url, media_type = await helpers.upload_media(
+                    client, 
+                    message.reply_to_message
+                )
+                
+                if not media_url:
+                    await status_msg.edit_text("❌ Failed to upload media.")
+                    return
+                
+                # Update character media
+                updated = await db.update_character_media(character_id, media_url, media_type)
+                
+                if updated:
+                    await status_msg.edit_text(f"✅ Media updated for character `{character_id}`!")
+                    logger.info(f"Character {character_id} media updated by user {user_id}")
+                else:
+                    await status_msg.edit_text("❌ Failed to update media.")
+                    
+            except ValueError:
+                await message.reply_text("❌ Invalid character ID. Must be a number.")
+            except Exception as e:
+                logger.error(f"Error in editmedia command: {e}")
+                await message.reply_text("❌ Error updating media.")
+        
+        @self.client.on_message(filters.command(["search", "find"]))
+        async def search_command(client: Client, message: Message):
+            """Handle /search command - find characters"""
+            args = message.text.split()
+            if len(args) < 2:
+                await message.reply_text(
+                    "🔍 **Search Characters**\n\n"
+                    "**Usage:** `/search query`\n\n"
+                    "**Examples:**\n"
+                    "• `/search naruto`\n"
+                    "• `/search bleach`\n"
+                    "• `/search ichigo`"
+                )
+                return
+            
+            query = ' '.join(args[1:])
+            await message.reply_text(f"🔍 Searching for: `{query}`...")
+            
+            try:
+                results = await db.search_characters(query, limit=15)
+                
+                if not results:
+                    await message.reply_text("❌ No characters found.")
+                    return
+                
+                if len(results) == 1:
+                    # Show single result with details
+                    char = results[0]
+                    char_info = helpers.format_character_info(char)
+                    
+                    if char.get('media_url'):
+                        try:
+                            if char.get('media_type') == 'photo':
+                                await client.send_photo(
+                                    chat_id=message.chat.id,
+                                    photo=char['media_url'],
+                                    caption=f"**Search Result:**\n\n{char_info}"
+                                )
+                            elif char.get('media_type') == 'video':
+                                await client.send_video(
+                                    chat_id=message.chat.id,
+                                    video=char['media_url'],
+                                    caption=f"**Search Result:**\n\n{char_info}"
+                                )
+                            elif char.get('media_type') == 'audio':
+                                await client.send_audio(
+                                    chat_id=message.chat.id,
+                                    audio=char['media_url'],
+                                    caption=f"**Search Result:**\n\n{char_info}"
+                                )
+                            else:
+                                await client.send_document(
+                                    chat_id=message.chat.id,
+                                    document=char['media_url'],
+                                    caption=f"**Search Result:**\n\n{char_info}"
+                                )
+                        except:
+                            await message.reply_text(f"**Search Result:**\n\n{char_info}")
+                    else:
+                        await message.reply_text(f"**Search Result:**\n\n{char_info}")
+                else:
+                    # Show list of results
+                    result_text = f"🔍 **Search Results for:** `{query}`\n\n"
+                    
+                    for i, char in enumerate(results[:10], 1):
+                        result_text += f"{i}. **{char['char_name']}** - {char['anime_name']} - {char['rarity']} (ID: `{char['character_id']}`)\n"
+                    
+                    if len(results) > 10:
+                        result_text += f"\n... and {len(results) - 10} more results"
+                    
+                    result_text += "\n\n**Use** `/info ID` **to view details of a specific character.**"
+                    
+                    await message.reply_text(result_text)
+                    
+            except Exception as e:
+                logger.error(f"Error in search command: {e}")
+                await message.reply_text("❌ Error searching characters.")
+        
+        @self.client.on_message(filters.command(["info", "view", "check"]))
+        async def info_command(client: Client, message: Message):
+            """Handle /info command - view character details"""
+            args = message.text.split()
+            if len(args) != 2:
+                await message.reply_text(
+                    "ℹ️ **Character Info**\n\n"
+                    "**Usage:** `/info ID`\n\n"
+                    "**Example:** `/info 123`"
+                )
+                return
+            
+            try:
+                character_id = int(args[1])
+                character = await db.get_character_by_id(character_id)
+                
+                if not character:
+                    await message.reply_text("❌ Character not found!")
+                    return
+                
+                char_info = helpers.format_character_info(character)
+                uploaded_by = await helpers.get_username_from_id(client, character['added_by'])
+                char_info += f"👤 **Uploaded by:** {uploaded_by}"
+                
+                # Add edit buttons if user is sudo
+                if await helpers.is_sudo_user(message.from_user.id):
+                    keyboard = InlineKeyboardMarkup([
+                        [
+                            InlineKeyboardButton("✏️ Edit Details", callback_data=f"edit_{character_id}"),
+                            InlineKeyboardButton("🖼️ Edit Media", callback_data=f"editmedia_{character_id}")
+                        ]
+                    ])
+                else:
+                    keyboard = None
+                
+                if character.get('media_url'):
+                    try:
+                        if character.get('media_type') == 'photo':
+                            await client.send_photo(
+                                chat_id=message.chat.id,
+                                photo=character['media_url'],
+                                caption=char_info,
+                                reply_markup=keyboard
+                            )
+                        elif character.get('media_type') == 'video':
+                            await client.send_video(
+                                chat_id=message.chat.id,
+                                video=character['media_url'],
+                                caption=char_info,
+                                reply_markup=keyboard
+                            )
+                        elif character.get('media_type') == 'audio':
+                            await client.send_audio(
+                                chat_id=message.chat.id,
+                                audio=character['media_url'],
+                                caption=char_info,
+                                reply_markup=keyboard
+                            )
+                        else:
+                            await client.send_document(
+                                chat_id=message.chat.id,
+                                document=character['media_url'],
+                                caption=char_info,
+                                reply_markup=keyboard
+                            )
+                    except Exception as e:
+                        logger.warning(f"Failed to send media: {e}")
+                        char_info += f"\n\n📸 **Media URL:** {character['media_url']}"
+                        await message.reply_text(char_info, reply_markup=keyboard)
+                else:
+                    await message.reply_text(char_info, reply_markup=keyboard)
+                    
+            except ValueError:
+                await message.reply_text("❌ Invalid character ID. Must be a number.")
+            except Exception as e:
+                logger.error(f"Error in info command: {e}")
+                await message.reply_text("❌ Error fetching character info.")
+        
+        @self.client.on_message(filters.command(["delete", "remove", "del"]))
+        async def delete_command(client: Client, message: Message):
+            """Handle /delete command - remove character"""
+            # Only owner can delete
+            if not helpers.is_owner(message.from_user.id):
+                await message.reply_text("❌ Only the bot owner can delete characters.")
+                return
+            
+            args = message.text.split()
+            if len(args) != 2:
+                await message.reply_text(
+                    "🗑️ **Delete Character**\n\n"
+                    "**Usage:** `/delete ID`\n\n"
+                    "**Example:** `/delete 123`"
+                )
+                return
+            
+            try:
+                character_id = int(args[1])
+                character = await db.get_character_by_id(character_id)
+                
+                if not character:
+                    await message.reply_text("❌ Character not found!")
+                    return
+                
+                # Show confirmation
+                keyboard = InlineKeyboardMarkup([
+                    [
+                        InlineKeyboardButton("✅ Yes, Delete", callback_data=f"confirm_delete_{character_id}"),
+                        InlineKeyboardButton("❌ Cancel", callback_data="cancel_delete")
+                    ]
+                ])
+                
+                await message.reply_text(
+                    f"⚠️ **Are you sure you want to delete this character?**\n\n"
+                    f"**Name:** {character['char_name']}\n"
+                    f"**Anime:** {character['anime_name']}\n"
+                    f"**ID:** `{character_id}`\n\n"
+                    f"**This action cannot be undone!**",
+                    reply_markup=keyboard
+                )
+                
+            except ValueError:
+                await message.reply_text("❌ Invalid character ID. Must be a number.")
+            except Exception as e:
+                logger.error(f"Error in delete command: {e}")
+                await message.reply_text("❌ Error processing delete request.")
+        
+        @self.client.on_message(filters.command(["stats", "status"]))
+        async def stats_command(client: Client, message: Message):
+            """Handle /stats command - view bot statistics"""
+            try:
+                total_chars = await db.get_character_count()
+                user_chars = await db.get_user_characters(message.from_user.id)
+                is_sudo = await helpers.is_sudo_user(message.from_user.id)
+                
+                stats_text = (
+                    "📊 **Bot Statistics**\n\n"
+                    f"• **Total Characters:** {total_chars}\n"
+                    f"• **Your Uploads:** {len(user_chars)}\n"
+                    f"• **Your Status:** {'✅ Sudo User' if is_sudo else '❌ Regular User'}\n"
+                    f"• **Log Channel:** {config.LOG_CHANNEL}\n"
+                    f"• **Max File Size:** {config.MAX_FILE_SIZE // (1024*1024)}MB\n\n"
+                    "**Commands:**\n"
+                    "• `/upload` - Upload character\n"
+                    "• `/edit` - Edit character\n"
+                    "• `/search` - Search characters\n"
+                    "• `/info` - View character info\n"
+                    "• `/help` - Show help"
+                )
+                
+                await message.reply_text(stats_text)
+                
+            except Exception as e:
+                logger.error(f"Error in stats command: {e}")
+                await message.reply_text("❌ Error fetching statistics.")
+        
+        @self.client.on_message(filters.command("help"))
+        async def help_command(client: Client, message: Message):
+            """Handle /help command"""
+            help_text = (
+                "ℹ️ **Character Upload Bot Help**\n\n"
+                "**📤 UPLOAD COMMAND:**\n"
+                "Reply to any media file with:\n"
+                "`/upload \"Character Name\" \"Anime Name\" Rarity [subrarity]`\n\n"
+                "**Examples:**\n"
+                "• `/upload \"Ichigo Kurosaki\" Bleach 4`\n"
+                "• `/upload \"Goku\" \"Dragon Ball\" 5 valentine`\n\n"
+                "**🔄 EDIT COMMANDS:**\n"
+                "• `/edit ID \"New Name\" \"New Anime\" Rarity [subrarity]`\n"
+                "• `/editmedia ID` (reply to new media)\n\n"
+                "**🔍 SEARCH COMMANDS:**\n"
+                "• `/search query` - Search by name or anime\n"
+                "• `/info ID` - View character details\n\n"
+                "**⚙️ OTHER COMMANDS:**\n"
+                "• `/stats` - View bot statistics\n"
+                "• `/help` - Show this message\n\n"
+                "**🎯 RARITIES (1-14):**\n"
+                "1. ⚪ Common\n"
+                "2. 🟢 Uncommon\n"
+                "3. 🔴 Rare\n"
+                "4. 🟡 Legendary\n"
+                "5. 🎐 Limited Edition\n"
+                "6. 💎 Premium\n"
+                "7. 🥵 Exotic\n"
+                "8. 🎬 Animated\n"
+                "9. 🌩️ Thundra\n"
+                "10. ☄️ Galvoria\n"
+                "11. 🌈 Neon\n"
+                "12. 🛡️ Supreme\n"
+                "13. 🔮 Crystal\n"
+                "14. 🎤 Celebrity\n\n"
+                "**All uploads are automatically posted to:** @capture_database"
             )
             
-            await message.reply_text(
-                "📋 **Please confirm your character details:**",
-                reply_markup=keyboards.get_confirmation_keyboard()
-            )
+            await message.reply_text(help_text)
+        
+        # Callback query handler for inline buttons
+        @self.client.on_callback_query()
+        async def handle_callbacks(client: Client, callback_query):
+            data = callback_query.data
             
-        except Exception as e:
-            logger.error(f"Error handling media upload: {e}")
-            await update_status(
-                "❌ Error processing media. Please try again with a different file."
-            )
+            try:
+                if data.startswith("edit_"):
+                    character_id = int(data.split("_")[1])
+                    await callback_query.message.edit_text(
+                        f"✏️ **Edit Character #{character_id}**\n\n"
+                        "Please use the `/edit` command:\n"
+                        "`/edit ID \"New Name\" \"New Anime\" Rarity [subrarity]`\n\n"
+                        f"**Example:**\n"
+                        f"`/edit {character_id} \"New Name\" \"New Anime\" 5 valentine`"
+                    )
+                    await callback_query.answer()
+                
+                elif data.startswith("editmedia_"):
+                    character_id = int(data.split("_")[1])
+                    await callback_query.message.edit_text(
+                        f"🖼️ **Edit Media for Character #{character_id}**\n\n"
+                        "Please reply to a media file with:\n"
+                        f"`/editmedia {character_id}`"
+                    )
+                    await callback_query.answer()
+                
+                elif data.startswith("confirm_delete_"):
+                    character_id = int(data.split("_")[2])
+                    
+                    deleted = await db.delete_character(character_id)
+                    if deleted:
+                        await callback_query.message.edit_text(f"✅ Character `{character_id}` deleted successfully!")
+                        logger.info(f"Character {character_id} deleted by user {callback_query.from_user.id}")
+                    else:
+                        await callback_query.message.edit_text(f"❌ Failed to delete character `{character_id}`")
+                    
+                    await callback_query.answer()
+                
+                elif data == "cancel_delete":
+                    await callback_query.message.edit_text("❌ Delete cancelled.")
+                    await callback_query.answer()
+                    
+            except Exception as e:
+                logger.error(f"Error handling callback: {e}")
+                await callback_query.answer("An error occurred.", show_alert=True)
     
     async def start(self):
         """Start the bot"""
@@ -2589,11 +1415,9 @@ class UploadBot:
             
             me = await self.client.get_me()
             logger.info(f"Logged in as @{me.username} (ID: {me.id})")
+            logger.info(f"Log channel: {config.LOG_CHANNEL}")
             
-            # Show startup message
-            logger.info(f"Default log channel: {config.DEFAULT_LOG_CHANNEL}")
-            logger.info(f"Using rarity system with {len(config.RARITY_MAP)} rarities")
-            
+            # Keep the bot running
             await asyncio.Event().wait()
             
         except Exception as e:
@@ -2615,7 +1439,7 @@ class UploadBot:
 # ==================== MAIN FUNCTION ====================
 async def main():
     """Main entry point"""
-    bot = UploadBot()
+    bot = SimpleUploadBot()
     
     try:
         await bot.start()
