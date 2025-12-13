@@ -1,5 +1,6 @@
 # ==================== COMPLETE CHARACTER UPLOAD BOT - SINGLE FILE ====================
 import os
+import sys
 import logging
 import asyncio
 import aiohttp
@@ -17,7 +18,7 @@ from pyrogram.types import (
 from pymongo import MongoClient
 from pymongo.errors import PyMongoError
 
-# Configure logging
+# Configure logging for Heroku
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
@@ -28,39 +29,48 @@ logger = logging.getLogger(__name__)
 class Config:
     """Configuration class for bot settings"""
     
-    # Telegram API credentials
+    # Get environment variables from Heroku
     API_ID = int(os.getenv("API_ID", 26676741))
     API_HASH = os.getenv("API_HASH", "6fbc29f23c15bdb0c7fbbefe65c9193a")
     BOT_TOKEN = os.getenv("BOT_TOKEN", "8496337458:AAF7ORldWpN-C6hpzSDt1bPCOeGVxfbU4qg")
     
     # MongoDB configuration
-    MONGO_URI = os.getenv("MONGO_URI", "mongodb+srv://erenxironman09:erenxironman09@catcherbot.koejwre.mongodb.net/?appName=catcherbot")
+    MONGO_URI = os.getenv("MONGODB_URI", os.getenv("MONGO_URI", "mongodb+srv://erenxironman09:erenxironman09@catcherbot.koejwre.mongodb.net/?appName=catcherbot"))
     DATABASE_NAME = os.getenv("DATABASE_NAME", "catcherbot")
     
     # Bot owner ID (for admin commands)
     OWNER_ID = int(os.getenv("OWNER_ID", 7878477646))
     
+    # Default log channel - @capture_database
+    DEFAULT_LOG_CHANNEL = "@capture_database"
+    
     # Upload service configuration
-    UPLOAD_TIMEOUT = 60  # Reduced from 300 to 60 seconds for faster timeout
+    UPLOAD_TIMEOUT = 60
     MAX_FILE_SIZE = 50 * 1024 * 1024  # 50MB max file size
     
     # Mass upload configuration
-    MAX_BATCH_SIZE = 50  # Maximum characters per batch
-    BATCH_PROCESSING_TIMEOUT = 300  # 5 minutes per batch
+    MAX_BATCH_SIZE = 50
+    BATCH_PROCESSING_TIMEOUT = 300
     
-    # Rarity mappings
+    # Updated rarity mappings as per request
     RARITY_MAP = {
-        1: "⚪️ Common",
-        2: "🟠 Rare", 
-        3: "🟡 Legendary",
-        4: "💮 Exclusive",
-        5: "🔮 Limited Edition",
-        6: "✨ Celestial",
-        7: "👑 Eternal",
-        8: "🎥 Cinematic",
-        9: "🪔 Diwali",
+        1: "⚪ Common",
+        2: "🟢 Uncommon",
+        3: "🔴 Rare",
+        4: "🟡 Legendary",
+        5: "🎐 Limited Edition",
+        6: "💎 Premium",
+        7: "🥵 Exotic",
+        8: "🎬 Animated",
+        9: "🌩️ Thundra",
+        10: "☄️ Galvoria",
+        11: "🌈 Neon",
+        12: "🛡️ Supreme",
+        13: "🔮 Crystal",
+        14: "🎤 Celebrity"
     }
     
+    # Subtypes for Limited Edition (rarity 5)
     LIMITED_SUBTYPES = {
         "valentine": "💝 Valentine",
         "christmas": "🎄 Christmas", 
@@ -73,18 +83,6 @@ class Config:
         "easter": "🐰 Easter",
         "wedding": "💒 Wedding",
         "karate": "🥋 Karate",
-    }
-    
-    CELESTIAL_SUBTYPES = {
-        "dragonic": "🐉 Dragonic",
-        "egypt": "🏜 Egypt",
-        "special": "🎗 Special",
-        "nun": "🌑 Nun",
-        "viking": "🛡 Viking",
-        "demon": "🃏 Demon",
-        "nurse": "💊 Nurse",
-        "cake": "🍰 Cake",
-        "monster": "🍾 Monster",
     }
     
     # Subrarity to emoji mapping for auto-emoji system
@@ -100,19 +98,10 @@ class Config:
         "easter": "🐰",
         "wedding": "💒",
         "karate": "🥋",
-        "dragonic": "🐉",
-        "egypt": "🏜",
-        "special": "🎗",
-        "nun": "🌑",
-        "viking": "🛡",
-        "demon": "🃏",
-        "nurse": "💊",
-        "cake": "🍰",
-        "monster": "🍾",
     }
     
-    # Rarities that have sub-types
-    RARITIES_WITH_SUBTYPES = [5, 6]  # Limited Edition and Celestial
+    # Rarities that have sub-types (only Limited Edition now)
+    RARITIES_WITH_SUBTYPES = [5]
 
 config = Config()
 
@@ -358,6 +347,12 @@ class MongoDB:
                     lambda: self.counters.insert_one({"_id": "character_id", "seq": 0})
                 )
             
+            # Initialize log channel to @capture_database if not set
+            log_config = await self.get_log_config()
+            if not log_config.get('log_chat_1'):
+                # Try to get chat ID for @capture_database
+                logger.info("Setting default log channel to @capture_database")
+            
             logger.info("Connected to MongoDB successfully")
             
         except PyMongoError as e:
@@ -593,10 +588,10 @@ class MongoDB:
             )
             if config_data:
                 return config_data
-            return {"log_chat_1": None, "log_chat_2": None}
+            return {"log_chat_1": config.DEFAULT_LOG_CHANNEL, "log_chat_2": None}
         except PyMongoError as e:
             logger.error(f"Error fetching log config: {e}")
-            return {"log_chat_1": None, "log_chat_2": None}
+            return {"log_chat_1": config.DEFAULT_LOG_CHANNEL, "log_chat_2": None}
     
     async def update_log_chat(self, chat_type: str, chat_id: int):
         """Update log chat configuration"""
@@ -673,7 +668,7 @@ class Keyboards:
     
     @staticmethod
     def get_rarity_keyboard() -> InlineKeyboardMarkup:
-        """Generate rarity selection keyboard"""
+        """Generate rarity selection keyboard with 14 rarities, 3 per row"""
         buttons = []
         row = []
         
@@ -682,10 +677,11 @@ class Keyboards:
                 rarity_name, 
                 callback_data=f"rarity_{rarity_id}"
             ))
-            if len(row) == 2:
+            if len(row) == 3:  # 3 buttons per row for better layout
                 buttons.append(row)
                 row = []
         
+        # Add remaining buttons if any
         if row:
             buttons.append(row)
         
@@ -704,29 +700,7 @@ class Keyboards:
                 subtype_name,
                 callback_data=f"subrarity_limited_{subtype_key}"
             ))
-            if len(row) == 2:
-                buttons.append(row)
-                row = []
-        
-        if row:
-            buttons.append(row)
-        
-        buttons.append([InlineKeyboardButton("🔙 Back", callback_data="back_rarity")])
-        
-        return InlineKeyboardMarkup(buttons)
-    
-    @staticmethod
-    def get_celestial_subtypes_keyboard() -> InlineKeyboardMarkup:
-        """Generate Celestial subtypes keyboard"""
-        buttons = []
-        row = []
-        
-        for subtype_key, subtype_name in config.CELESTIAL_SUBTYPES.items():
-            row.append(InlineKeyboardButton(
-                subtype_name,
-                callback_data=f"subrarity_celestial_{subtype_key}"
-            ))
-            if len(row) == 2:
+            if len(row) == 3:  # 3 per row
                 buttons.append(row)
                 row = []
         
@@ -952,7 +926,7 @@ class Helpers:
         user_id: int,
         db: MongoDB
     ) -> bool:
-        """Send character data to configured log channels"""
+        """Send character data to configured log channels (default: @capture_database)"""
         try:
             log_config = await db.get_log_config()
             log_message = Helpers.format_log_message(character_data, username, user_id)
@@ -960,96 +934,51 @@ class Helpers:
             success = True
             sent_to = []
             
-            # Send to log_chat_1
-            if log_config.get('log_chat_1'):
+            # Send to @capture_database (log_chat_1)
+            log_chat = log_config.get('log_chat_1', config.DEFAULT_LOG_CHANNEL)
+            if log_chat:
                 try:
                     if character_data.get('media_url') and character_data.get('media_type'):
                         try:
                             if character_data.get('media_type') == 'photo':
                                 await client.send_photo(
-                                    chat_id=log_config['log_chat_1'],
+                                    chat_id=log_chat,
                                     photo=character_data['media_url'],
                                     caption=log_message
                                 )
                             elif character_data.get('media_type') == 'video':
                                 await client.send_video(
-                                    chat_id=log_config['log_chat_1'],
+                                    chat_id=log_chat,
                                     video=character_data['media_url'],
                                     caption=log_message
                                 )
                             elif character_data.get('media_type') == 'audio':
                                 await client.send_audio(
-                                    chat_id=log_config['log_chat_1'],
+                                    chat_id=log_chat,
                                     audio=character_data['media_url'],
                                     caption=log_message
                                 )
                             else:
                                 await client.send_document(
-                                    chat_id=log_config['log_chat_1'],
+                                    chat_id=log_chat,
                                     document=character_data['media_url'],
                                     caption=log_message
                                 )
                         except Exception as e:
-                            logger.warning(f"Failed to send media to log_chat_1: {e}")
+                            logger.warning(f"Failed to send media to log channel: {e}")
                             log_message += f"\n\n📸 **Media URL:** {character_data['media_url']}"
                             await client.send_message(
-                                chat_id=log_config['log_chat_1'],
+                                chat_id=log_chat,
                                 text=log_message
                             )
                     else:
                         await client.send_message(
-                            chat_id=log_config['log_chat_1'],
+                            chat_id=log_chat,
                             text=log_message
                         )
-                    sent_to.append("Log Channel 1")
+                    sent_to.append("Capture Database (@capture_database)")
                 except Exception as e:
-                    logger.error(f"Failed to send to log_chat_1: {e}")
-                    success = False
-            
-            # Send to log_chat_2  
-            if log_config.get('log_chat_2'):
-                try:
-                    if character_data.get('media_url') and character_data.get('media_type'):
-                        try:
-                            if character_data.get('media_type') == 'photo':
-                                await client.send_photo(
-                                    chat_id=log_config['log_chat_2'],
-                                    photo=character_data['media_url'],
-                                    caption=log_message
-                                )
-                            elif character_data.get('media_type') == 'video':
-                                await client.send_video(
-                                    chat_id=log_config['log_chat_2'],
-                                    video=character_data['media_url'],
-                                    caption=log_message
-                                )
-                            elif character_data.get('media_type') == 'audio':
-                                await client.send_audio(
-                                    chat_id=log_config['log_chat_2'],
-                                    audio=character_data['media_url'],
-                                    caption=log_message
-                                )
-                            else:
-                                await client.send_document(
-                                    chat_id=log_config['log_chat_2'],
-                                    document=character_data['media_url'],
-                                    caption=log_message
-                                )
-                        except Exception as e:
-                            logger.warning(f"Failed to send media to log_chat_2: {e}")
-                            log_message += f"\n\n📸 **Media URL:** {character_data['media_url']}"
-                            await client.send_message(
-                                chat_id=log_config['log_chat_2'],
-                                text=log_message
-                            )
-                    else:
-                        await client.send_message(
-                            chat_id=log_config['log_chat_2'],
-                            text=log_message
-                        )
-                    sent_to.append("Log Channel 2")
-                except Exception as e:
-                    logger.error(f"Failed to send to log_chat_2: {e}")
+                    logger.error(f"Failed to send to @capture_database: {e}")
                     success = False
             
             if not sent_to:
@@ -1129,7 +1058,7 @@ class CommandHandlers:
             "• 📄 Documents (PDF, TXT, etc.)\n\n"
             "**Max File Size:** 50MB\n\n"
             "**Upload Service:** Catbox.moe (Fast - 5-8 seconds)\n\n"
-            "**Auto Reply Mode:** The bot will automatically set reply mode for text inputs!"
+            "**Log Channel:** All uploaded characters are sent to @capture_database"
         )
         
         await message.reply_text(
@@ -1285,6 +1214,7 @@ class CommandHandlers:
                 f"• **Bot Owner:** {('Yes' if helpers.is_owner(message.from_user.id) else 'No')}\n"
                 f"• **Sudo User:** {('Yes' if is_sudo else 'No')}\n"
                 f"• **Upload Service:** Catbox.moe (Fast)\n"
+                f"• **Log Channel:** @capture_database\n"
                 f"• **Upload Flow:** Character → Anime → Rarity → Media → Confirm"
             )
             
@@ -1305,16 +1235,31 @@ class CommandHandlers:
             "4. **Sub-rarity** (If applicable, Buttons)\n"
             "5. **Media Upload** (Send photo/video/audio/document)\n"
             "6. **Confirmation** (Buttons)\n\n"
+            "**Available Rarities (14 Total):**\n"
+            "1. ⚪ Common\n"
+            "2. 🟢 Uncommon\n"
+            "3. 🔴 Rare\n"
+            "4. 🟡 Legendary\n"
+            "5. 🎐 Limited Edition\n"
+            "6. 💎 Premium\n"
+            "7. 🥵 Exotic\n"
+            "8. 🎬 Animated\n"
+            "9. 🌩️ Thundra\n"
+            "10. ☄️ Galvoria\n"
+            "11. 🌈 Neon\n"
+            "12. 🛡️ Supreme\n"
+            "13. 🔮 Crystal\n"
+            "14. 🎤 Celebrity\n\n"
             "**Commands:**\n"
             "• `/start` - Start the bot\n"
-            "• `/addchar` - Add a single character (NEW FLOW)\n" 
+            "• `/addchar` - Add a single character\n" 
             "• `/cs` - Clear current upload session\n"
             "• `/c [id]` - Check character by ID\n"
             "• `/status` - Check bot statistics\n"
             "• `/help` - Show this help message\n\n"
             "**Supported Media:** Photos, Videos, Audio, Documents (max 50MB)\n"
             "**Upload Service:** Catbox.moe (Fast - 5-8 seconds)\n"
-            "**Auto Reply:** The bot automatically sets reply mode for text inputs\n"
+            "**Log Channel:** All uploaded characters are sent to @capture_database\n"
             "**Authorization:** Only sudo users can upload characters"
         )
         
@@ -1329,16 +1274,21 @@ class CommandHandlers:
         try:
             args = message.text.split()
             if len(args) != 2:
-                await message.reply_text("❌ Usage: /setlog1 <chat_id>")
+                await message.reply_text("❌ Usage: /setlog1 <chat_id or username>")
                 return
             
-            chat_id = int(args[1])
+            chat_id = args[1]
+            # Try to convert to int if it's a numeric ID
+            try:
+                chat_id = int(chat_id)
+            except ValueError:
+                # It's a username, keep as string
+                pass
+            
             await db.update_log_chat("1", chat_id)
             
             await message.reply_text(f"✅ Log Channel 1 set to: `{chat_id}`")
             
-        except ValueError:
-            await message.reply_text("❌ Invalid chat ID.")
         except Exception as e:
             logger.error(f"Error setting log1: {e}")
             await message.reply_text("❌ Error setting log channel.")
@@ -1352,16 +1302,19 @@ class CommandHandlers:
         try:
             args = message.text.split()
             if len(args) != 2:
-                await message.reply_text("❌ Usage: /setlog2 <chat_id>")
+                await message.reply_text("❌ Usage: /setlog2 <chat_id or username>")
                 return
             
-            chat_id = int(args[1])
+            chat_id = args[1]
+            try:
+                chat_id = int(chat_id)
+            except ValueError:
+                pass
+            
             await db.update_log_chat("2", chat_id)
             
             await message.reply_text(f"✅ Log Channel 2 set to: `{chat_id}`")
             
-        except ValueError:
-            await message.reply_text("❌ Invalid chat ID.")
         except Exception as e:
             logger.error(f"Error setting log2: {e}")
             await message.reply_text("❌ Error setting log channel.")
@@ -1377,7 +1330,8 @@ class CommandHandlers:
             
             log_text = "📋 **Current Log Channels**\n\n"
             log_text += f"• **Log Channel 1:** `{log_config.get('log_chat_1', 'Not set')}`\n"
-            log_text += f"• **Log Channel 2:** `{log_config.get('log_chat_2', 'Not set')}`"
+            log_text += f"• **Log Channel 2:** `{log_config.get('log_chat_2', 'Not set')}`\n\n"
+            log_text += f"**Default:** {config.DEFAULT_LOG_CHANNEL}"
             
             await message.reply_text(log_text)
             
@@ -1432,7 +1386,8 @@ class CallbackHandlers:
             status_text = (
                 "📊 **Bot Status**\n\n"
                 f"• **Total Characters:** {total_chars}\n"
-                f"• **Your Characters:** {len(user_chars)}"
+                f"• **Your Characters:** {len(user_chars)}\n"
+                f"• **Log Channel:** @capture_database"
             )
             
             await callback_query.message.edit_text(
@@ -1457,7 +1412,8 @@ class CallbackHandlers:
             "4. **Sub-rarity** (If applicable, Buttons)\n"
             "5. **Media Upload** (Send photo/video/audio/document)\n"
             "6. **Confirmation** (Buttons)\n\n"
-            "Use `/addchar` to start uploading characters."
+            "Use `/addchar` to start uploading characters.\n\n"
+            "**All uploaded characters are sent to @capture_database**"
         )
         
         await callback_query.message.edit_text(
@@ -1481,23 +1437,18 @@ class CallbackHandlers:
         
         session.rarity = rarity_name
         
+        # Check if rarity has subtypes (only Limited Edition - rarity 5)
         if rarity_id in config.RARITIES_WITH_SUBTYPES:
             session.state = CharacterStates.WAITING_SUBRARITY.value
-            if rarity_id == 5:
+            if rarity_id == 5:  # Limited Edition
                 keyboard = keyboards.get_limited_subtypes_keyboard()
                 await callback_query.message.edit_text(
                     f"✅ **Rarity Selected: {rarity_name}**\n\n"
                     f"🎯 **Step 4: Select Limited Edition Subtype**",
                     reply_markup=keyboard
                 )
-            elif rarity_id == 6:
-                keyboard = keyboards.get_celestial_subtypes_keyboard()
-                await callback_query.message.edit_text(
-                    f"✅ **Rarity Selected: {rarity_name}**\n\n"
-                    f"🎯 **Step 4: Select Celestial Subtype**",
-                    reply_markup=keyboard
-                )
         else:
+            # No subtypes, proceed to media upload
             session.state = CharacterStates.WAITING_MEDIA.value
             await callback_query.message.edit_text(
                 f"✅ **Rarity Selected: {rarity_name}**\n\n"
@@ -1508,14 +1459,15 @@ class CallbackHandlers:
                 "• 🎵 Audio files (MP3, WAV)\n" 
                 "• 📄 Documents (PDF, TXT, etc.)\n\n"
                 "**Max File Size:** 50MB\n\n"
-                "**Upload Service:** Catbox.moe (Fast - 5-8 seconds)"
+                "**Upload Service:** Catbox.moe (Fast - 5-8 seconds)\n\n"
+                "**Note:** Character will be sent to @capture_database"
             )
         
         await db.save_session(session)
         await callback_query.answer()
     
     async def handle_subrarity_selection(self, client: Client, callback_query: CallbackQuery):
-        """Handle sub-rarity selection callback"""
+        """Handle sub-rarity selection callback (only for Limited Edition)"""
         user_id = callback_query.from_user.id
         session = await db.get_session(user_id)
         
@@ -1524,13 +1476,9 @@ class CallbackHandlers:
             return
         
         parts = callback_query.data.split("_")
-        rarity_type = parts[1]
         subtype_key = parts[2]
         
-        if rarity_type == "limited":
-            subrarity_name = config.LIMITED_SUBTYPES[subtype_key]
-        else:
-            subrarity_name = config.CELESTIAL_SUBTYPES[subtype_key]
+        subrarity_name = config.LIMITED_SUBTYPES[subtype_key]
         
         session.subrarity = subrarity_name
         session.state = CharacterStates.WAITING_MEDIA.value
@@ -1546,7 +1494,8 @@ class CallbackHandlers:
             "• 🎵 Audio files (MP3, WAV)\n" 
             "• 📄 Documents (PDF, TXT, etc.)\n\n"
             "**Max File Size:** 50MB\n\n"
-            "**Upload Service:** Catbox.moe (Fast - 5-8 seconds)"
+            "**Upload Service:** Catbox.moe (Fast - 5-8 seconds)\n\n"
+            "**Note:** Character will be sent to @capture_database"
         )
         await callback_query.answer()
     
@@ -1588,7 +1537,8 @@ class CallbackHandlers:
                     f"🏅 **Rarity:** {session.rarity}" +
                     (f"\n💠 **Sub-Rarity:** {session.subrarity}" if session.subrarity else "") +
                     f"\n\n🆔 **Character ID:** `{character_id}`\n"
-                    f"📸 **Media:** Uploaded to Catbox\n\n"
+                    f"📸 **Media:** Uploaded to Catbox\n"
+                    f"📢 **Posted to:** @capture_database\n\n"
                     f"**Note:** Character IDs increase automatically — next one will be {character_id + 1}"
                 )
                 
@@ -1651,13 +1601,6 @@ class CallbackHandlers:
                 keyboard = keyboards.get_limited_subtypes_keyboard()
                 await callback_query.message.edit_text(
                     f"🎯 **Select Limited Edition Subtype**\n\n"
-                    f"Rarity: {session.rarity}",
-                    reply_markup=keyboard
-                )
-            elif "Celestial" in session.rarity:
-                keyboard = keyboards.get_celestial_subtypes_keyboard()
-                await callback_query.message.edit_text(
-                    f"🎯 **Select Celestial Subtype**\n\n"
                     f"Rarity: {session.rarity}",
                     reply_markup=keyboard
                 )
@@ -1725,11 +1668,12 @@ class CharacterManagementHandlers:
                     "`/uchar [char_id] [name] [anime] [rarity_no] [optional_subrarity]`\n\n"
                     "**Example:**\n"
                     "`/uchar 1 Zoro OnePiece 4`\n"
-                    "`/uchar 1 Zoro OnePiece 5 1`\n\n"
-                    "**Rarity Numbers:**\n"
-                    "1: Common, 2: Rare, 3: Legendary, 4: Exclusive\n"
-                    "5: Limited Edition, 6: Celestial, 7: Eternal\n"
-                    "8: Cinematic, 9: Diwali"
+                    "`/uchar 1 Zoro OnePiece 5 valentine`\n\n"
+                    "**Rarity Numbers (1-14):**\n"
+                    "1: Common, 2: Uncommon, 3: Rare, 4: Legendary\n"
+                    "5: Limited Edition, 6: Premium, 7: Exotic, 8: Animated\n"
+                    "9: Thundra, 10: Galvoria, 11: Neon, 12: Supreme\n"
+                    "13: Crystal, 14: Celebrity"
                 )
                 return
             
@@ -1740,7 +1684,7 @@ class CharacterManagementHandlers:
             subrarity = args[5] if len(args) > 5 else None
             
             if rarity_no not in config.RARITY_MAP:
-                await message.reply_text("❌ Invalid rarity number!")
+                await message.reply_text(f"❌ Invalid rarity number! Must be 1-{len(config.RARITY_MAP)}")
                 return
             
             character = await db.get_character_by_id(character_id)
@@ -1750,17 +1694,15 @@ class CharacterManagementHandlers:
             
             rarity_name = config.RARITY_MAP[rarity_no]
             
+            # Handle subrarity for Limited Edition (rarity 5)
             if rarity_no in config.RARITIES_WITH_SUBTYPES and subrarity:
-                if rarity_no == 5:
+                if rarity_no == 5:  # Limited Edition
                     if subrarity not in config.LIMITED_SUBTYPES:
                         await message.reply_text("❌ Invalid Limited Edition subtype!")
                         return
                     subrarity_name = config.LIMITED_SUBTYPES[subrarity]
-                elif rarity_no == 6:
-                    if subrarity not in config.CELESTIAL_SUBTYPES:
-                        await message.reply_text("❌ Invalid Celestial subtype!")
-                        return
-                    subrarity_name = config.CELESTIAL_SUBTYPES[subrarity]
+                else:
+                    subrarity_name = None
             else:
                 subrarity_name = None
             
@@ -1977,15 +1919,16 @@ class MassUploadHandlers:
                 f"🎞️ **Anime:** {anime_name}\n\n"
                 "**Now you can upload media with rarities:**\n"
                 "• Reply to a photo/video with `/madd <rarity> [subrarity]`\n"
-                "• Example: `/madd 4` (Normal rarity)\n"
-                "• Example: `/madd 5 hall` (Halloween subrarity)\n\n"
+                "• Example: `/madd 4` (Legendary rarity)\n"
+                "• Example: `/madd 5 valentine` (Valentine Limited Edition)\n\n"
                 "**Available Commands:**\n"
                 "• `/currentchar` - Show session status\n"
                 "• `/undochar` - Remove last upload\n" 
                 "• `/bulkstatus` - Show upload statistics\n"
                 "• `/donechar` - End session\n\n"
                 "**Auto Emoji System:** Subrarities automatically add emojis to character names!\n"
-                "**Fast Upload:** Catbox uploads now take 5-8 seconds!"
+                "**Fast Upload:** Catbox uploads now take 5-8 seconds!\n"
+                "**Log Channel:** All characters sent to @capture_database"
             )
             
         except Exception as e:
@@ -2019,9 +1962,9 @@ class MassUploadHandlers:
                     "1. Send a photo/video/audio/document\n"
                     "2. Reply to it with: `/madd <rarity> [subrarity]`\n\n"
                     "**Examples:**\n"
-                    "• `/madd 4` - Normal rarity\n"
-                    "• `/madd 5 hall` - Halloween Limited Edition\n"
-                    "• `/madd 6 dragonic` - Dragonic Celestial"
+                    "• `/madd 4` - Legendary rarity\n"
+                    "• `/madd 5 valentine` - Valentine Limited Edition\n"
+                    "• `/madd 6` - Premium rarity"
                 )
                 return
             
@@ -2030,7 +1973,7 @@ class MassUploadHandlers:
                 await message.reply_text(
                     "❌ **Invalid syntax!**\n\n"
                     "**Usage:** `/madd <rarity> [subrarity]`\n"
-                    "**Example:** `/madd 5 hall`"
+                    "**Example:** `/madd 5 valentine`"
                 )
                 return
             
@@ -2046,7 +1989,7 @@ class MassUploadHandlers:
                 emoji = None
                 
                 if subrarity_key:
-                    if rarity_num == 5:
+                    if rarity_num == 5:  # Limited Edition
                         if subrarity_key in config.LIMITED_SUBTYPES:
                             subrarity_name = config.LIMITED_SUBTYPES[subrarity_key]
                             emoji = config.SUBRARITY_EMOJI_MAP.get(subrarity_key)
@@ -2055,17 +1998,8 @@ class MassUploadHandlers:
                                 f"❌ Invalid Limited Edition subtype! Available: {', '.join(config.LIMITED_SUBTYPES.keys())}"
                             )
                             return
-                    elif rarity_num == 6:
-                        if subrarity_key in config.CELESTIAL_SUBTYPES:
-                            subrarity_name = config.CELESTIAL_SUBTYPES[subrarity_key]
-                            emoji = config.SUBRARITY_EMOJI_MAP.get(subrarity_key)
-                        else:
-                            await message.reply_text(
-                                f"❌ Invalid Celestial subtype! Available: {', '.join(config.CELESTIAL_SUBTYPES.keys())}"
-                            )
-                            return
                     else:
-                        await message.reply_text("❌ Subrarity only available for Limited Edition (5) and Celestial (6)")
+                        await message.reply_text("❌ Subrarity only available for Limited Edition (rarity 5)")
                         return
                 
                 final_char_name = session.char_name
@@ -2135,7 +2069,8 @@ class MassUploadHandlers:
                     success_text += f"💠 **Sub-Rarity:** {subrarity_name}\n"
                 
                 success_text += (
-                    f"📸 **Media:** Uploaded successfully\n\n"
+                    f"📸 **Media:** Uploaded successfully\n"
+                    f"📢 **Posted to:** @capture_database\n\n"
                     f"**Session Progress:** {session.get_character_count()} characters uploaded\n"
                     f"**Next ID:** {character_id + 1}"
                 )
@@ -2168,7 +2103,7 @@ class MassUploadHandlers:
                 f"🎞️ **Anime:** {session.anime_name}\n"
                 f"📊 **Total Uploaded:** {total_chars} characters\n"
                 f"⏱️ **Session Duration:** {helpers.format_session_duration(session.created_at)}\n\n"
-                "All characters have been saved to the database and are now available."
+                "All characters have been saved to the database and posted to @capture_database."
             )
             
             await message.reply_text(summary_text)
@@ -2200,6 +2135,8 @@ class MassUploadHandlers:
                 
                 if len(session.uploaded_characters) > 10:
                     session_info += f"\n... and {len(session.uploaded_characters) - 10} more"
+            
+            session_info += "\n\n**📢 All characters posted to @capture_database**"
             
             await message.reply_text(session_info)
             
@@ -2261,7 +2198,8 @@ class MassUploadHandlers:
                 f"👤 **Character:** {session.char_name}\n"
                 f"🎞️ **Anime:** {session.anime_name}\n"
                 f"📈 **Total Uploaded:** {total_chars} characters\n"
-                f"⏱️ **Session Active:** {helpers.format_session_duration(session.created_at)}\n\n"
+                f"⏱️ **Session Active:** {helpers.format_session_duration(session.created_at)}\n"
+                f"📢 **Posted to:** @capture_database\n\n"
             )
             
             if rarity_count:
@@ -2566,7 +2504,8 @@ class UploadBot:
                 "• 🎵 Audio files (MP3, WAV)\n"
                 "• 📄 Documents (PDF, TXT, etc.)\n\n"
                 "**Max File Size:** 50MB\n\n"
-                "**Upload Service:** Catbox.moe (Fast - 5-8 seconds)"
+                "**Upload Service:** Catbox.moe (Fast - 5-8 seconds)\n\n"
+                "**Note:** Character will be posted to @capture_database"
             )
             return
         
@@ -2624,7 +2563,8 @@ class UploadBot:
             await update_status(
                 f"{preview}\n\n"
                 "✅ **Media uploaded successfully to Catbox!**\n\n"
-                "**Step 6: Please confirm to add this character to the database:**"
+                "**Step 6: Please confirm to add this character to the database:**\n\n"
+                "**Note:** Character will be posted to @capture_database"
             )
             
             await message.reply_text(
@@ -2649,6 +2589,10 @@ class UploadBot:
             
             me = await self.client.get_me()
             logger.info(f"Logged in as @{me.username} (ID: {me.id})")
+            
+            # Show startup message
+            logger.info(f"Default log channel: {config.DEFAULT_LOG_CHANNEL}")
+            logger.info(f"Using rarity system with {len(config.RARITY_MAP)} rarities")
             
             await asyncio.Event().wait()
             
@@ -2684,4 +2628,3 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-
