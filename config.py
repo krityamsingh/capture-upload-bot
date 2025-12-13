@@ -20,7 +20,7 @@ class Config:
     # ───────────────────────────
     MONGO_URI = os.getenv(
         "MONGO_URI",
-        "mongodb+srv://erenxironman09:erenxironman09@catcherbot.koejwre.mongodb.net/?appName=catcherbot"
+        "mongodb+srv://Capture:capture@cluster0.7jqepnf.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0"
     )
     DATABASE_NAME = os.getenv("DATABASE_NAME", "telegram_upload_bot")
 
@@ -112,5 +112,6 @@ class Config:
 
 # Export config instance
 config = Config()
+
 
 
