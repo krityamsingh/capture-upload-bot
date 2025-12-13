@@ -48,19 +48,13 @@ class Config:
     # Updated rarity mappings
     RARITY_MAP = {
         1: "⚪ Common",
-        2: "🟢 Uncommon",
-        3: "🔴 Rare",
-        4: "🟡 Legendary",
+        2: "🔴 Rare",
+        3: "🟡 Legendary",
+        4: "🥵 Exotic",
         5: "🎐 Limited Edition",
-        6: "💎 Premium",
-        7: "🥵 Exotic",
-        8: "🎬 Animated",
-        9: "🌩️ Thundra",
-        10: "☄️ Galvoria",
-        11: "🌈 Neon",
-        12: "🛡️ Supreme",
-        13: "🔮 Crystal",
-        14: "🎤 Celebrity"
+        6: "🌩️ Thundra",
+        7: "🎤 Celebrity",
+        8: "🎬 Animated"
     }
     
     # Subtypes for Limited Edition (rarity 5)
@@ -699,19 +693,13 @@ class SimpleUploadBot:
                 "`/upload Naruto Naruto 4`\n\n"
                 "**Available Rarities (1-14):**\n"
                 "1. ⚪ Common\n"
-                "2. 🟢 Uncommon\n"
-                "3. 🔴 Rare\n"
-                "4. 🟡 Legendary\n"
-                "5. 🎐 Limited Edition (with subtypes)\n"
-                "6. 💎 Premium\n"
-                "7. 🥵 Exotic\n"
+                "2. 🔴 Rare\n"
+                "3. 🟡 Legendary\n"
+                "4. 🥵 Exotic\n"
+                "5. 🎐 Limited Edition\n"
+                "6. 🌩️ Thundra\n"
+                "7. 🎤 Celebrity\n\n"
                 "8. 🎬 Animated\n"
-                "9. 🌩️ Thundra\n"
-                "10. ☄️ Galvoria\n"
-                "11. 🌈 Neon\n"
-                "12. 🛡️ Supreme\n"
-                "13. 🔮 Crystal\n"
-                "14. 🎤 Celebrity\n\n"
                 "**Limited Edition Subtypes:**\n"
                 "valentine, christmas, halloween, summer, winter, basketball, police, newyear, easter, wedding, karate\n\n"
                 "**All uploads are posted to:** @capture_database\n\n"
@@ -1340,19 +1328,13 @@ class SimpleUploadBot:
                 "• `/help` - Show this message\n\n"
                 "**🎯 RARITIES (1-14):**\n"
                 "1. ⚪ Common\n"
-                "2. 🟢 Uncommon\n"
-                "3. 🔴 Rare\n"
-                "4. 🟡 Legendary\n"
+                "2. 🔴 Rare\n"
+                "3. 🟡 Legendary\n"
+                "4. 🥵 Exotic\n"
                 "5. 🎐 Limited Edition\n"
-                "6. 💎 Premium\n"
-                "7. 🥵 Exotic\n"
+                "6. 🌩️ Thundra\n"
+                "7. 🎤 Celebrity\n\n"
                 "8. 🎬 Animated\n"
-                "9. 🌩️ Thundra\n"
-                "10. ☄️ Galvoria\n"
-                "11. 🌈 Neon\n"
-                "12. 🛡️ Supreme\n"
-                "13. 🔮 Crystal\n"
-                "14. 🎤 Celebrity\n\n"
                 "**All uploads are automatically posted to:** @capture_database"
             )
             
@@ -1452,4 +1434,5 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
