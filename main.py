@@ -698,7 +698,7 @@ class SimpleUploadBot:
                 "4. 🥵 Exotic\n"
                 "5. 🎐 Limited Edition\n"
                 "6. 🌩️ Thundra\n"
-                "7. 🎤 Celebrity\n\n"
+                "7. 🎤 Celebrity\n"
                 "8. 🎬 Animated\n"
                 "**Limited Edition Subtypes:**\n"
                 "valentine, christmas, halloween, summer, winter, basketball, police, newyear, easter, wedding, karate\n\n"
@@ -1333,7 +1333,7 @@ class SimpleUploadBot:
                 "4. 🥵 Exotic\n"
                 "5. 🎐 Limited Edition\n"
                 "6. 🌩️ Thundra\n"
-                "7. 🎤 Celebrity\n\n"
+                "7. 🎤 Celebrity\n"
                 "8. 🎬 Animated\n"
                 "**All uploads are automatically posted to:** @capture_database"
             )
@@ -1434,5 +1434,6 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
