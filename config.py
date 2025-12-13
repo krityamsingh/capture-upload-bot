@@ -44,25 +44,19 @@ class Config:
     # ───────────────────────────
     RARITY_MAP = {
         1: "⚪ Common",
-        2: "🟢 Uncommon",
-        3: "🔴 Rare",
-        4: "🟡 Legendary",
+        2: "🔴 Rare",
+        3: "🟡 Legendary",
+        4: "🥵 Exotic",
         5: "🎐 Limited Edition",
-        6: "💎 Premium",
-        7: "🥵 Exotic",
-        8: "🎬 Animated",
-        9: "🌩️ Thundra",
-        10: "☄️ Galvoria",
-        11: "🌈 Neon",
-        12: "🛡️ Supreme",
-        13: "🔮 Crystal",
-        14: "🎤 Celebrity",
+        6: "🌩️ Thundra",
+        7: "🎤 Celebrity",
+        8: "🎬 Animated"
     }
 
     # ───────────────────────────
     # Rarities that support sub-types
     # ───────────────────────────
-    RARITIES_WITH_SUBTYPES = [5, 6, 7, 12, 13, 14]
+    RARITIES_WITH_SUBTYPES = [5, 7,]
 
     # ───────────────────────────
     # Subtype Groups
@@ -75,19 +69,6 @@ class Config:
         "winter": "❄️ Winter",
         "newyear": "🎆 New Year",
         "wedding": "💒 Wedding",
-    }
-
-    PREMIUM_SUBTYPES = {
-        "gold": "🥇 Gold",
-        "diamond": "💠 Diamond",
-        "royal": "👑 Royal",
-        "dark": "🌑 Dark",
-    }
-
-    SUPREME_SUBTYPES = {
-        "mythic": "🛡️ Mythic",
-        "ancient": "📜 Ancient",
-        "celestial": "✨ Celestial",
     }
 
     CELEBRITY_SUBTYPES = {
@@ -131,4 +112,5 @@ class Config:
 
 # Export config instance
 config = Config()
+
 
