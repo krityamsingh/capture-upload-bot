@@ -241,6 +241,60 @@ class MongoDB:
             logger.error(f"Error inserting character: {e}")
             raise
     
+    async def insert_character_with_id(self, character: Character) -> str:
+        """Insert a character with specific ID (for filling gaps)"""
+        try:
+            # Check if character ID already exists
+            existing = await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: self.characters.find_one({"character_id": character.character_id})
+            )
+            
+            if existing:
+                raise ValueError(f"Character ID {character.character_id} already exists")
+            
+            result = await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: self.characters.insert_one(character.to_dict())
+            )
+            
+            # Update counter if needed (to maintain sequence)
+            current_counter = await self.get_current_counter()
+            if character.character_id >= current_counter:
+                await self.update_counter(character.character_id + 1)
+            
+            return str(result.inserted_id)
+        except PyMongoError as e:
+            logger.error(f"Error inserting character with ID: {e}")
+            raise
+    
+    async def get_current_counter(self) -> int:
+        """Get current counter value without incrementing"""
+        try:
+            result = await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: self.counters.find_one({"_id": "character_id"})
+            )
+            return result["seq"] if result else 0
+        except PyMongoError as e:
+            logger.error(f"Error getting current counter: {e}")
+            return 0
+    
+    async def update_counter(self, new_value: int) -> bool:
+        """Update the counter to a specific value"""
+        try:
+            result = await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: self.counters.update_one(
+                    {"_id": "character_id"},
+                    {"$set": {"seq": new_value}}
+                )
+            )
+            return result.modified_count > 0
+        except PyMongoError as e:
+            logger.error(f"Error updating counter: {e}")
+            return False
+    
     async def get_character_count(self) -> int:
         """Get total number of characters in database"""
         return await asyncio.get_event_loop().run_in_executor(
@@ -662,6 +716,9 @@ class MongoDB:
     async def get_deleted_characters(self) -> List[int]:
         """Get list of deleted character IDs (gaps in sequence)"""
         try:
+            # Get current counter
+            current_counter = await self.get_current_counter()
+            
             # Get all existing character IDs
             characters = await asyncio.get_event_loop().run_in_executor(
                 None,
@@ -670,20 +727,26 @@ class MongoDB:
             
             existing_ids = {char['character_id'] for char in characters}
             
-            # Get max ID
-            max_id = await self.get_next_character_id() - 1
-            
-            # Find gaps
+            # Find gaps from 1 to current_counter-1
             deleted_ids = []
-            for i in range(1, max_id + 1):
+            for i in range(1, current_counter):
                 if i not in existing_ids:
                     deleted_ids.append(i)
             
-            return deleted_ids
+            return sorted(deleted_ids)
             
         except PyMongoError as e:
             logger.error(f"Error getting deleted characters: {e}")
             return []
+    
+    async def get_first_deleted_id(self) -> Optional[int]:
+        """Get the first deleted character ID"""
+        try:
+            deleted_ids = await self.get_deleted_characters()
+            return deleted_ids[0] if deleted_ids else None
+        except PyMongoError as e:
+            logger.error(f"Error getting first deleted ID: {e}")
+            return None
 
 # Global database instance
 db = MongoDB()
@@ -1125,14 +1188,23 @@ class Helpers:
             return None, None
     
     @staticmethod
-    def parse_reupload_arguments(text: str) -> tuple[Optional[str], Optional[str], Optional[str], Optional[str]]:
-        """Parse reupload arguments (can be partial updates)"""
+    async def parse_fill_arguments(text: str) -> tuple[Optional[str], Optional[str], Optional[str], Optional[str], Optional[int]]:
+        """Parse fill command arguments"""
         try:
             parts = text.strip().split()
             if not parts:
-                return None, None, None, None
+                return None, None, None, None, None
             
-            # Check if first part is a command keyword
+            # Check if first part is a character ID
+            char_id = None
+            try:
+                if parts[0].isdigit():
+                    char_id = int(parts[0])
+                    parts = parts[1:]
+            except:
+                pass
+            
+            # Parse remaining parts for name, anime, rarity
             char_name = None
             anime_name = None
             rarity_input = None
@@ -1140,51 +1212,34 @@ class Helpers:
             
             i = 0
             while i < len(parts):
-                if parts[i] in ["name", "char", "character"]:
-                    # Next part(s) is character name
-                    if i + 1 < len(parts):
-                        char_name = parts[i + 1]
+                if parts[i] in ["name", "char", "character"] and i + 1 < len(parts):
+                    char_name = parts[i + 1]
+                    i += 2
+                elif parts[i] in ["anime", "series"] and i + 1 < len(parts):
+                    anime_name = parts[i + 1]
+                    i += 2
+                elif parts[i] in ["rarity", "rank", "level"] and i + 1 < len(parts):
+                    rarity_input = parts[i + 1]
+                    if i + 2 < len(parts) and parts[i + 2] in config.LIMITED_SUBTYPES:
+                        subrarity = parts[i + 2]
+                        i += 3
+                    else:
                         i += 2
-                    else:
-                        return None, None, None, None
-                
-                elif parts[i] in ["anime", "series"]:
-                    # Next part(s) is anime name
-                    if i + 1 < len(parts):
-                        anime_name = parts[i + 1]
-                        i += 2
-                    else:
-                        return None, None, None, None
-                
-                elif parts[i] in ["rarity", "rank", "level"]:
-                    # Next part(s) is rarity
-                    if i + 1 < len(parts):
-                        rarity_input = parts[i + 1]
-                        if i + 2 < len(parts) and parts[i + 2] in config.LIMITED_SUBTYPES:
-                            subrarity = parts[i + 2]
-                            i += 3
-                        else:
-                            i += 2
-                    else:
-                        return None, None, None, None
-                
                 else:
-                    # If no keyword, assume it's full format: name anime rarity
+                    # If no keyword, assume format: name anime rarity
                     if len(parts) >= 3:
                         char_name = parts[0]
                         anime_name = parts[1]
                         rarity_input = parts[2]
                         if len(parts) > 3:
                             subrarity = parts[3]
-                        break
-                    else:
-                        return None, None, None, None
+                    break
             
-            return char_name, anime_name, rarity_input, subrarity
+            return char_name, anime_name, rarity_input, subrarity, char_id
             
         except Exception as e:
-            logger.error(f"Error parsing reupload arguments: {e}")
-            return None, None, None, None
+            logger.error(f"Error parsing fill arguments: {e}")
+            return None, None, None, None, None
 
 helpers = Helpers()
 
@@ -1215,6 +1270,9 @@ class SimpleUploadBot:
                 "**Example:**\n"
                 "`/upload \"Ichigo Kurosaki\" Bleach 5 valentine`\n"
                 "`/upload Naruto Naruto 4`\n\n"
+                "**Fill Deleted IDs:**\n"
+                "`/fill` - Upload to first deleted ID (automatic)\n"
+                "`/fill ID \"Character\" \"Anime\" Rarity` - Upload to specific deleted ID\n\n"
                 "**Available Rarities (1-14):**\n"
                 "1. ⚪ Common\n"
                 "2. 🟢 Uncommon\n"
@@ -1242,7 +1300,7 @@ class SimpleUploadBot:
                 "**📝 Character Commands:**\n"
                 "• `/edit ID new_name new_anime rarity` - Edit character\n"
                 "• `/editmedia ID` - Edit character media (reply to media)\n"
-                "• `/reupload ID [args]` - Reupload/update character (reply to media)\n"
+                "• `/fill` - Fill deleted character IDs (reply to media)\n"
                 "• `/search query` - Search characters\n"
                 "• `/info ID` - View character details\n"
                 "• `/delete ID` - Delete character (owner only)\n\n"
@@ -1259,6 +1317,418 @@ class SimpleUploadBot:
             )
             
             await message.reply_text(welcome_text)
+        
+        @self.client.on_message(filters.command("fill"))
+        async def fill_command(client: Client, message: Message):
+            """Handle /fill command - upload character to deleted ID"""
+            user_id = message.from_user.id
+            
+            # Check authorization
+            if not await helpers.is_sudo_user(user_id):
+                await message.reply_text("❌ You are not authorized to fill deleted character IDs.")
+                return
+            
+            # Check if message is a reply to media
+            if not message.reply_to_message or not (
+                message.reply_to_message.photo or 
+                message.reply_to_message.video or 
+                message.reply_to_message.audio or 
+                message.reply_to_message.document
+            ):
+                await message.reply_text(
+                    "🔄 **Fill Deleted Character ID**\n\n"
+                    "**Usage:** Reply to a media file with:\n"
+                    "`/fill` - Automatically use first deleted ID\n"
+                    "`/fill ID \"Character Name\" \"Anime Name\" Rarity [subrarity]` - Specify ID and details\n\n"
+                    "**Examples:**\n"
+                    "• `/fill` (reply to media) - Auto fill first deleted ID\n"
+                    "• `/fill 5 \"New Character\" \"New Anime\" 4` (reply to media)\n"
+                    "• `/fill name \"Character\" anime \"Anime\" rarity 5` (reply to media)\n\n"
+                    "**Note:** You can only fill IDs that are deleted (gaps in sequence)."
+                )
+                return
+            
+            args = message.text.split()
+            
+            # Parse arguments
+            text = message.text.replace('/fill', '', 1).strip()
+            char_name, anime_name, rarity_input, subrarity, specified_id = await helpers.parse_fill_arguments(text)
+            
+            # Determine character ID to use
+            character_id = None
+            
+            if specified_id:
+                # Check if specified ID is valid
+                character_id = specified_id
+                
+                # Check if ID already exists
+                existing_char = await db.get_character_by_id(character_id)
+                if existing_char:
+                    await message.reply_text(f"❌ Character ID `{character_id}` already exists!")
+                    return
+                
+                # Check if ID is in valid range (positive integer)
+                if character_id <= 0:
+                    await message.reply_text("❌ Character ID must be a positive number.")
+                    return
+            else:
+                # Get first deleted ID
+                character_id = await db.get_first_deleted_id()
+                if not character_id:
+                    await message.reply_text(
+                        "✅ **No deleted character IDs found!**\n\n"
+                        "All character IDs are currently in use.\n"
+                        "Use `/upload` to create a new character with the next available ID."
+                    )
+                    return
+            
+            # Parse character details
+            if char_name and anime_name and rarity_input:
+                # Use provided details
+                pass
+            elif len(args) >= 4:
+                # Parse in traditional format
+                text = message.text
+                # Remove command
+                text = text.replace('/fill', '', 1).strip()
+                
+                # Check if first part is ID
+                if text and text[0].isdigit():
+                    # Already handled above
+                    pass
+                else:
+                    # Parse character name (support quotes)
+                    char_name = ""
+                    anime_name = ""
+                    
+                    if text.startswith('"'):
+                        # Find closing quote
+                        end_quote = text.find('"', 1)
+                        if end_quote == -1:
+                            await message.reply_text("❌ Invalid format. Missing closing quote for character name.")
+                            return
+                        char_name = text[1:end_quote]
+                        text = text[end_quote + 1:].strip()
+                    else:
+                        # Take first word as character name
+                        parts = text.split()
+                        char_name = parts[0]
+                        text = ' '.join(parts[1:])
+                    
+                    # Parse anime name (might be in quotes)
+                    if text.startswith('"'):
+                        end_quote = text.find('"', 1)
+                        if end_quote == -1:
+                            await message.reply_text("❌ Invalid format. Missing closing quote for anime name.")
+                            return
+                        anime_name = text[1:end_quote]
+                        text = text[end_quote + 1:].strip()
+                    else:
+                        # Take first word as anime name
+                        parts = text.split()
+                        if not parts:
+                            await message.reply_text("❌ Missing anime name.")
+                            return
+                        anime_name = parts[0]
+                        text = ' '.join(parts[1:])
+                    
+                    # The rest is rarity (and optional subrarity)
+                    rarity_input = text.strip()
+            else:
+                # Need more details
+                await message.reply_text(
+                    "❌ **Missing character details!**\n\n"
+                    "**Usage:** `/fill ID \"Character Name\" \"Anime Name\" Rarity [subrarity]`\n\n"
+                    "**Examples:**\n"
+                    "• `/fill 5 \"New Character\" \"New Anime\" 4`\n"
+                    "• `/fill 5 \"Character\" Anime 5 valentine`\n\n"
+                    "Or use keyword format:\n"
+                    "• `/fill 5 name \"Character\" anime \"Anime\" rarity 5`"
+                )
+                return
+            
+            if not char_name or not anime_name or not rarity_input:
+                await message.reply_text("❌ Missing required parameters (name, anime, or rarity).")
+                return
+            
+            # Parse rarity
+            rarity_name, parsed_subrarity = helpers.parse_rarity(rarity_input)
+            if not rarity_name:
+                await message.reply_text("❌ Invalid rarity number. Must be 1-14.")
+                return
+            
+            # Use subrarity from parsing if provided
+            if parsed_subrarity:
+                subrarity = parsed_subrarity
+            
+            # Check for file size
+            file_size = 0
+            if message.reply_to_message.photo:
+                file_size = message.reply_to_message.photo.file_size or 0
+            elif message.reply_to_message.video:
+                file_size = message.reply_to_message.video.file_size or 0
+            elif message.reply_to_message.audio:
+                file_size = message.reply_to_message.audio.file_size or 0
+            elif message.reply_to_message.document:
+                file_size = message.reply_to_message.document.file_size or 0
+                
+            if file_size > config.MAX_FILE_SIZE:
+                await message.reply_text(
+                    f"❌ File too large. Maximum size is {config.MAX_FILE_SIZE // (1024*1024)}MB."
+                )
+                return
+            
+            # Start upload process
+            status_msg = await message.reply_text("🔄 Starting fill process...")
+            
+            async def update_status(text: str):
+                try:
+                    await status_msg.edit_text(text)
+                except Exception as e:
+                    logger.warning(f"Failed to update status: {e}")
+            
+            # Upload media
+            await update_status(f"📥 Uploading media to Catbox for ID {character_id}...")
+            
+            media_url, media_type = await helpers.upload_media(
+                client, 
+                message.reply_to_message,
+                status_callback=update_status
+            )
+            
+            if not media_url:
+                await update_status("❌ Failed to upload media. Please try again.")
+                return
+            
+            # Create character with specific ID
+            character = Character(
+                char_name=char_name,
+                anime_name=anime_name,
+                rarity=rarity_name,
+                character_id=character_id,
+                media_url=media_url,
+                media_type=media_type,
+                subrarity=subrarity,
+                added_by=user_id
+            )
+            
+            try:
+                inserted_id = await db.insert_character_with_id(character)
+                
+                # Send to log channel
+                username = message.from_user.username or message.from_user.first_name or "Unknown"
+                await helpers.send_to_log_channel(
+                    client, character.to_dict(), username, user_id
+                )
+                
+                # Success message
+                success_text = (
+                    f"✅ **Character #{character_id} Added to Fill Gap!**\n\n"
+                    f"👤 **Name:** {char_name}\n"
+                    f"🎞️ **Anime:** {anime_name}\n"
+                    f"🏅 **Rarity:** {rarity_name}\n"
+                )
+                
+                if subrarity:
+                    success_text += f"💠 **Sub-Rarity:** {subrarity}\n"
+                
+                success_text += (
+                    f"\n📸 **Media:** Uploaded to Catbox\n"
+                    f"📢 **Posted to:** @capture_database\n"
+                    f"🆔 **Character ID:** `{character_id}`\n\n"
+                    f"**Note:** This character was **NOT** automatically added to your harem.\n"
+                    f"Use `/addharem {character_id}` to add it to your collection.\n\n"
+                    f"**This ID was previously deleted and has now been filled.**"
+                )
+                
+                await update_status(success_text)
+                logger.info(f"Character {character_id} filled by user {user_id}")
+                
+            except ValueError as e:
+                await update_status(f"❌ Error: {str(e)}")
+            except Exception as e:
+                logger.error(f"Error filling character: {e}")
+                await update_status("❌ Error saving character to database. Please try again.")
+        
+        @self.client.on_message(filters.command("upload"))
+        async def upload_command(client: Client, message: Message):
+            """Handle /upload command - SIMPLE UPLOAD SYSTEM"""
+            user_id = message.from_user.id
+            
+            # Check authorization
+            if not await helpers.is_sudo_user(user_id):
+                await message.reply_text("❌ You are not authorized to upload characters.")
+                return
+            
+            # Check if message is a reply to media
+            if not message.reply_to_message or not (
+                message.reply_to_message.photo or 
+                message.reply_to_message.video or 
+                message.reply_to_message.audio or 
+                message.reply_to_message.document
+            ):
+                await message.reply_text(
+                    "❌ **Please reply to a media file with this command!**\n\n"
+                    "**Usage:** Reply to a photo/video/audio/document with:\n"
+                    "`/upload \"Character Name\" \"Anime Name\" Rarity_Number [subrarity]`\n\n"
+                    "**Examples:**\n"
+                    "• `/upload \"Ichigo Kurosaki\" Bleach 4`\n"
+                    "• `/upload \"Goku\" \"Dragon Ball\" 5 valentine`"
+                )
+                return
+            
+            # Parse arguments
+            args = message.text.split()
+            if len(args) < 4:
+                await message.reply_text(
+                    "❌ **Invalid syntax!**\n\n"
+                    "**Usage:** `/upload \"Character Name\" \"Anime Name\" Rarity_Number [subrarity]`\n\n"
+                    "**Note:** Use quotes for names with spaces\n"
+                    "**Example:** `/upload \"Monkey D. Luffy\" OnePiece 3`"
+                )
+                return
+            
+            # Parse character name (support quotes)
+            char_name = ""
+            anime_name = ""
+            rarity_input = ""
+            
+            # Simple parsing logic
+            text = message.text
+            # Remove command
+            text = text.replace('/upload', '', 1).strip()
+            
+            # Parse character name (might be in quotes)
+            if text.startswith('"'):
+                # Find closing quote
+                end_quote = text.find('"', 1)
+                if end_quote == -1:
+                    await message.reply_text("❌ Invalid format. Missing closing quote for character name.")
+                    return
+                char_name = text[1:end_quote]
+                text = text[end_quote + 1:].strip()
+            else:
+                # Take first word as character name
+                parts = text.split()
+                char_name = parts[0]
+                text = ' '.join(parts[1:])
+            
+            # Parse anime name (might be in quotes)
+            if text.startswith('"'):
+                end_quote = text.find('"', 1)
+                if end_quote == -1:
+                    await message.reply_text("❌ Invalid format. Missing closing quote for anime name.")
+                    return
+                anime_name = text[1:end_quote]
+                text = text[end_quote + 1:].strip()
+            else:
+                # Take first word as anime name
+                parts = text.split()
+                if not parts:
+                    await message.reply_text("❌ Missing anime name.")
+                    return
+                anime_name = parts[0]
+                text = ' '.join(parts[1:])
+            
+            # The rest is rarity (and optional subrarity)
+            rarity_input = text.strip()
+            
+            if not char_name or not anime_name or not rarity_input:
+                await message.reply_text("❌ Missing required parameters.")
+                return
+            
+            # Parse rarity
+            rarity_name, subrarity = helpers.parse_rarity(rarity_input)
+            if not rarity_name:
+                await message.reply_text("❌ Invalid rarity number. Must be 1-14.")
+                return
+            
+            # Check for file size
+            file_size = 0
+            if message.reply_to_message.photo:
+                file_size = message.reply_to_message.photo.file_size or 0
+            elif message.reply_to_message.video:
+                file_size = message.reply_to_message.video.file_size or 0
+            elif message.reply_to_message.audio:
+                file_size = message.reply_to_message.audio.file_size or 0
+            elif message.reply_to_message.document:
+                file_size = message.reply_to_message.document.file_size or 0
+                
+            if file_size > config.MAX_FILE_SIZE:
+                await message.reply_text(
+                    f"❌ File too large. Maximum size is {config.MAX_FILE_SIZE // (1024*1024)}MB."
+                )
+                return
+            
+            # Start upload process
+            status_msg = await message.reply_text("🔄 Starting upload process...")
+            
+            async def update_status(text: str):
+                try:
+                    await status_msg.edit_text(text)
+                except Exception as e:
+                    logger.warning(f"Failed to update status: {e}")
+            
+            # Upload media
+            await update_status("📥 Uploading media to Catbox...")
+            
+            media_url, media_type = await helpers.upload_media(
+                client, 
+                message.reply_to_message,
+                status_callback=update_status
+            )
+            
+            if not media_url:
+                await update_status("❌ Failed to upload media. Please try again.")
+                return
+            
+            # Save to database with next available ID
+            character_id = await db.get_next_character_id()
+            character = Character(
+                char_name=char_name,
+                anime_name=anime_name,
+                rarity=rarity_name,
+                character_id=character_id,
+                media_url=media_url,
+                media_type=media_type,
+                subrarity=subrarity,
+                added_by=user_id
+            )
+            
+            try:
+                inserted_id = await db.insert_character(character)
+                
+                # Send to log channel
+                username = message.from_user.username or message.from_user.first_name or "Unknown"
+                await helpers.send_to_log_channel(
+                    client, character.to_dict(), username, user_id
+                )
+                
+                # Success message
+                success_text = (
+                    f"✅ **Character #{character_id} Uploaded Successfully!**\n\n"
+                    f"👤 **Name:** {char_name}\n"
+                    f"🎞️ **Anime:** {anime_name}\n"
+                    f"🏅 **Rarity:** {rarity_name}\n"
+                )
+                
+                if subrarity:
+                    success_text += f"💠 **Sub-Rarity:** {subrarity}\n"
+                
+                success_text += (
+                    f"\n📸 **Media:** Uploaded to Catbox\n"
+                    f"📢 **Posted to:** @capture_database\n"
+                    f"🆔 **Character ID:** `{character_id}`\n\n"
+                    f"**Note:** This character was **NOT** automatically added to your harem.\n"
+                    f"Use `/addharem {character_id}` to add it to your collection.\n\n"
+                    f"**Use this ID to edit or delete the character.**"
+                )
+                
+                await update_status(success_text)
+                
+            except Exception as e:
+                logger.error(f"Error saving character: {e}")
+                await update_status("❌ Error saving character to database. Please try again.")
         
         @self.client.on_message(filters.command("backup"))
         async def backup_command(client: Client, message: Message):
@@ -1420,350 +1890,6 @@ class SimpleUploadBot:
             except Exception as e:
                 logger.error(f"Error in backupharem command: {e}")
                 await status_msg.edit_text("❌ Error creating harem backup.")
-        
-        @self.client.on_message(filters.command("reupload"))
-        async def reupload_command(client: Client, message: Message):
-            """Handle /reupload command - update character with new media/details"""
-            user_id = message.from_user.id
-            
-            # Check authorization
-            if not await helpers.is_sudo_user(user_id):
-                await message.reply_text("❌ You are not authorized to reupload characters.")
-                return
-            
-            # Check if message is a reply to media
-            if not message.reply_to_message or not (
-                message.reply_to_message.photo or 
-                message.reply_to_message.video or 
-                message.reply_to_message.audio or 
-                message.reply_to_message.document
-            ):
-                await message.reply_text(
-                    "🔄 **Reupload Character**\n\n"
-                    "**Usage:** Reply to a media file with:\n"
-                    "`/reupload character_id` - Update media only\n"
-                    "`/reupload character_id name \"New Name\"` - Update name only\n"
-                    "`/reupload character_id anime \"New Anime\"` - Update anime only\n"
-                    "`/reupload character_id rarity 5` - Update rarity only\n"
-                    "`/reupload character_id \"New Name\" \"New Anime\" 5 valentine` - Update everything\n\n"
-                    "**Examples:**\n"
-                    "• `/reupload 123` (reply to media) - Update media\n"
-                    "• `/reupload 123 name \"New Character Name\"` - Update name\n"
-                    "• `/reupload 123 anime \"New Anime\" rarity 5` - Update anime and rarity\n"
-                    "• `/reupload 123 \"Full Name\" \"Full Anime\" 5 valentine` (reply to media) - Full update"
-                )
-                return
-            
-            args = message.text.split()
-            if len(args) < 2:
-                await message.reply_text("❌ Usage: Reply to media with `/reupload character_id [args]`")
-                return
-            
-            try:
-                character_id = int(args[1])
-                
-                # Check if character exists
-                character = await db.get_character_by_id(character_id)
-                if not character:
-                    await message.reply_text("❌ Character not found!")
-                    return
-                
-                # Parse additional arguments if provided
-                new_char_name = character['char_name']
-                new_anime_name = character['anime_name']
-                new_rarity = character['rarity']
-                new_subrarity = character.get('subrarity')
-                
-                update_type = "media"  # Default is media update
-                
-                if len(args) > 2:
-                    # Parse arguments
-                    text_args = ' '.join(args[2:])
-                    parsed_name, parsed_anime, parsed_rarity, parsed_subrarity = helpers.parse_reupload_arguments(text_args)
-                    
-                    if parsed_name:
-                        new_char_name = parsed_name
-                        update_type = "media and name"
-                    
-                    if parsed_anime:
-                        new_anime_name = parsed_anime
-                        update_type = "media and anime" if update_type == "media" else f"{update_type} and anime"
-                    
-                    if parsed_rarity:
-                        rarity_name, subrarity = helpers.parse_rarity(parsed_rarity)
-                        if rarity_name:
-                            new_rarity = rarity_name
-                            if subrarity:
-                                new_subrarity = subrarity
-                            update_type = "media and rarity" if update_type == "media" else f"{update_type} and rarity"
-                        else:
-                            await message.reply_text("❌ Invalid rarity.")
-                            return
-                
-                # Start upload process
-                status_msg = await message.reply_text("🔄 Starting reupload process...")
-                
-                async def update_status(text: str):
-                    try:
-                        await status_msg.edit_text(text)
-                    except Exception as e:
-                        logger.warning(f"Failed to update status: {e}")
-                
-                # Upload new media
-                await update_status("📥 Uploading new media to Catbox...")
-                
-                media_url, media_type = await helpers.upload_media(
-                    client, 
-                    message.reply_to_message,
-                    status_callback=update_status
-                )
-                
-                if not media_url:
-                    await update_status("❌ Failed to upload media. Please try again.")
-                    return
-                
-                # Update character in database
-                updated = False
-                
-                if len(args) > 2:
-                    # Update character details
-                    await update_status("🔄 Updating character details...")
-                    updated = await db.update_character(
-                        character_id=character_id,
-                        char_name=new_char_name,
-                        anime_name=new_anime_name,
-                        rarity=new_rarity,
-                        subrarity=new_subrarity
-                    )
-                    
-                    if not updated:
-                        await update_status("❌ Failed to update character details.")
-                        return
-                
-                # Update character media
-                await update_status("🔄 Updating character media...")
-                media_updated = await db.update_character_media(character_id, media_url, media_type)
-                
-                if not media_updated:
-                    await update_status("❌ Failed to update character media.")
-                    return
-                
-                # Send to log channel
-                username = message.from_user.username or message.from_user.first_name or "Unknown"
-                updated_character = await db.get_character_by_id(character_id)
-                
-                if updated_character:
-                    await helpers.send_to_log_channel(
-                        client, updated_character, username, user_id
-                    )
-                
-                # Success message
-                success_text = (
-                    f"✅ **Character #{character_id} Reuploaded Successfully!**\n\n"
-                    f"👤 **Name:** {new_char_name}\n"
-                    f"🎞️ **Anime:** {new_anime_name}\n"
-                    f"🏅 **Rarity:** {new_rarity}\n"
-                )
-                
-                if new_subrarity:
-                    success_text += f"💠 **Sub-Rarity:** {new_subrarity}\n"
-                
-                success_text += (
-                    f"\n📸 **Media:** Updated on Catbox\n"
-                    f"📢 **Posted to:** @capture_database\n"
-                    f"🆔 **Character ID:** `{character_id}`\n"
-                    f"🔄 **Updated:** {update_type}\n\n"
-                    f"**Character has been successfully updated!**"
-                )
-                
-                await update_status(success_text)
-                logger.info(f"Character {character_id} reuploaded by user {user_id}")
-                
-            except ValueError:
-                await message.reply_text("❌ Invalid character ID. Must be a number.")
-            except Exception as e:
-                logger.error(f"Error in reupload command: {e}")
-                await message.reply_text("❌ Error reuploading character.")
-        
-        @self.client.on_message(filters.command("upload"))
-        async def upload_command(client: Client, message: Message):
-            """Handle /upload command - SIMPLE UPLOAD SYSTEM"""
-            user_id = message.from_user.id
-            
-            # Check authorization
-            if not await helpers.is_sudo_user(user_id):
-                await message.reply_text("❌ You are not authorized to upload characters.")
-                return
-            
-            # Check if message is a reply to media
-            if not message.reply_to_message or not (
-                message.reply_to_message.photo or 
-                message.reply_to_message.video or 
-                message.reply_to_message.audio or 
-                message.reply_to_message.document
-            ):
-                await message.reply_text(
-                    "❌ **Please reply to a media file with this command!**\n\n"
-                    "**Usage:** Reply to a photo/video/audio/document with:\n"
-                    "`/upload \"Character Name\" \"Anime Name\" Rarity_Number [subrarity]`\n\n"
-                    "**Examples:**\n"
-                    "• `/upload \"Ichigo Kurosaki\" Bleach 4`\n"
-                    "• `/upload \"Goku\" \"Dragon Ball\" 5 valentine`"
-                )
-                return
-            
-            # Parse arguments
-            args = message.text.split()
-            if len(args) < 4:
-                await message.reply_text(
-                    "❌ **Invalid syntax!**\n\n"
-                    "**Usage:** `/upload \"Character Name\" \"Anime Name\" Rarity_Number [subrarity]`\n\n"
-                    "**Note:** Use quotes for names with spaces\n"
-                    "**Example:** `/upload \"Monkey D. Luffy\" OnePiece 3`"
-                )
-                return
-            
-            # Parse character name (support quotes)
-            char_name = ""
-            anime_name = ""
-            rarity_input = ""
-            
-            # Simple parsing logic
-            text = message.text
-            # Remove command
-            text = text.replace('/upload', '', 1).strip()
-            
-            # Parse character name (might be in quotes)
-            if text.startswith('"'):
-                # Find closing quote
-                end_quote = text.find('"', 1)
-                if end_quote == -1:
-                    await message.reply_text("❌ Invalid format. Missing closing quote for character name.")
-                    return
-                char_name = text[1:end_quote]
-                text = text[end_quote + 1:].strip()
-            else:
-                # Take first word as character name
-                parts = text.split()
-                char_name = parts[0]
-                text = ' '.join(parts[1:])
-            
-            # Parse anime name (might be in quotes)
-            if text.startswith('"'):
-                end_quote = text.find('"', 1)
-                if end_quote == -1:
-                    await message.reply_text("❌ Invalid format. Missing closing quote for anime name.")
-                    return
-                anime_name = text[1:end_quote]
-                text = text[end_quote + 1:].strip()
-            else:
-                # Take first word as anime name
-                parts = text.split()
-                if not parts:
-                    await message.reply_text("❌ Missing anime name.")
-                    return
-                anime_name = parts[0]
-                text = ' '.join(parts[1:])
-            
-            # The rest is rarity (and optional subrarity)
-            rarity_input = text.strip()
-            
-            if not char_name or not anime_name or not rarity_input:
-                await message.reply_text("❌ Missing required parameters.")
-                return
-            
-            # Parse rarity
-            rarity_name, subrarity = helpers.parse_rarity(rarity_input)
-            if not rarity_name:
-                await message.reply_text("❌ Invalid rarity number. Must be 1-14.")
-                return
-            
-            # Check for file size
-            file_size = 0
-            if message.reply_to_message.photo:
-                file_size = message.reply_to_message.photo.file_size or 0
-            elif message.reply_to_message.video:
-                file_size = message.reply_to_message.video.file_size or 0
-            elif message.reply_to_message.audio:
-                file_size = message.reply_to_message.audio.file_size or 0
-            elif message.reply_to_message.document:
-                file_size = message.reply_to_message.document.file_size or 0
-                
-            if file_size > config.MAX_FILE_SIZE:
-                await message.reply_text(
-                    f"❌ File too large. Maximum size is {config.MAX_FILE_SIZE // (1024*1024)}MB."
-                )
-                return
-            
-            # Start upload process
-            status_msg = await message.reply_text("🔄 Starting upload process...")
-            
-            async def update_status(text: str):
-                try:
-                    await status_msg.edit_text(text)
-                except Exception as e:
-                    logger.warning(f"Failed to update status: {e}")
-            
-            # Upload media
-            await update_status("📥 Uploading media to Catbox...")
-            
-            media_url, media_type = await helpers.upload_media(
-                client, 
-                message.reply_to_message,
-                status_callback=update_status
-            )
-            
-            if not media_url:
-                await update_status("❌ Failed to upload media. Please try again.")
-                return
-            
-            # Save to database
-            character_id = await db.get_next_character_id()
-            character = Character(
-                char_name=char_name,
-                anime_name=anime_name,
-                rarity=rarity_name,
-                character_id=character_id,
-                media_url=media_url,
-                media_type=media_type,
-                subrarity=subrarity,
-                added_by=user_id
-            )
-            
-            try:
-                inserted_id = await db.insert_character(character)
-                
-                # Send to log channel
-                username = message.from_user.username or message.from_user.first_name or "Unknown"
-                await helpers.send_to_log_channel(
-                    client, character.to_dict(), username, user_id
-                )
-                
-                # Success message
-                success_text = (
-                    f"✅ **Character #{character_id} Uploaded Successfully!**\n\n"
-                    f"👤 **Name:** {char_name}\n"
-                    f"🎞️ **Anime:** {anime_name}\n"
-                    f"🏅 **Rarity:** {rarity_name}\n"
-                )
-                
-                if subrarity:
-                    success_text += f"💠 **Sub-Rarity:** {subrarity}\n"
-                
-                success_text += (
-                    f"\n📸 **Media:** Uploaded to Catbox\n"
-                    f"📢 **Posted to:** @capture_database\n"
-                    f"🆔 **Character ID:** `{character_id}`\n\n"
-                    f"**Note:** This character was **NOT** automatically added to your harem.\n"
-                    f"Use `/addharem {character_id}` to add it to your collection.\n\n"
-                    f"**Use this ID to edit or delete the character.**"
-                )
-                
-                await update_status(success_text)
-                
-            except Exception as e:
-                logger.error(f"Error saving character: {e}")
-                await update_status("❌ Error saving character to database. Please try again.")
         
         @self.client.on_message(filters.command("add"))
         async def add_sudo_command(client: Client, message: Message):
@@ -2501,7 +2627,6 @@ class SimpleUploadBot:
                     buttons = []
                     buttons.append(InlineKeyboardButton("✏️ Edit Details", callback_data=f"edit_{character_id}"))
                     buttons.append(InlineKeyboardButton("🖼️ Edit Media", callback_data=f"editmedia_{character_id}"))
-                    buttons.append(InlineKeyboardButton("🔄 Reupload", callback_data=f"reupload_{character_id}"))
                     
                     if not in_harem:
                         buttons.append(InlineKeyboardButton("💝 Add to Harem", callback_data=f"addharem_{character_id}"))
@@ -2624,11 +2749,13 @@ class SimpleUploadBot:
                 # Get deleted characters count
                 deleted_ids = await db.get_deleted_characters()
                 deleted_count = len(deleted_ids)
+                current_counter = await db.get_current_counter()
                 
                 stats_text = (
                     "📊 **Bot Statistics**\n\n"
                     f"• **Total Characters:** {total_chars}\n"
-                    f"• **Deleted Characters:** {deleted_count}\n"
+                    f"• **Deleted IDs:** {deleted_count}\n"
+                    f"• **Current Counter:** {current_counter}\n"
                     f"• **Sudo Users:** {sudo_count}\n"
                     f"• **Your Uploads:** {len(user_chars)}\n"
                     f"• **Your Harem Size:** {len(user_harem)}\n"
@@ -2636,8 +2763,8 @@ class SimpleUploadBot:
                     f"• **Log Channel:** {config.LOG_CHANNEL}\n"
                     f"• **Max File Size:** {config.MAX_FILE_SIZE // (1024*1024)}MB\n\n"
                     "**Commands:**\n"
-                    "• `/upload` - Upload character\n"
-                    "• `/reupload` - Reupload/update character\n"
+                    "• `/upload` - Upload new character\n"
+                    "• `/fill` - Fill deleted character IDs\n"
                     "• `/edit` - Edit character\n"
                     "• `/search` - Search characters\n"
                     "• `/info` - View character info\n"
@@ -2662,12 +2789,9 @@ class SimpleUploadBot:
                 "**Examples:**\n"
                 "• `/upload \"Ichigo Kurosaki\" Bleach 4`\n"
                 "• `/upload \"Goku\" \"Dragon Ball\" 5 valentine`\n\n"
-                "**🔄 REUPLOAD COMMAND:**\n"
-                "Reply to media with `/reupload ID` to update media\n"
-                "Add arguments to update details:\n"
-                "• `/reupload ID name \"New Name\"`\n"
-                "• `/reupload ID anime \"New Anime\" rarity 5`\n"
-                "• `/reupload ID \"Full Name\" \"Full Anime\" 5 valentine`\n\n"
+                "**🔁 FILL DELETED IDs:**\n"
+                "Reply to media with `/fill` to use first deleted ID\n"
+                "Or specify ID: `/fill ID \"Character\" \"Anime\" Rarity`\n\n"
                 "**🔄 EDIT COMMANDS:**\n"
                 "• `/edit ID \"New Name\" \"New Anime\" Rarity [subrarity]`\n"
                 "• `/editmedia ID` (reply to new media)\n\n"
@@ -2732,20 +2856,6 @@ class SimpleUploadBot:
                         f"🖼️ **Edit Media for Character #{character_id}**\n\n"
                         "Please reply to a media file with:\n"
                         f"`/editmedia {character_id}`"
-                    )
-                    await callback_query.answer()
-                
-                elif data.startswith("reupload_"):
-                    character_id = int(data.split("_")[1])
-                    await callback_query.message.edit_text(
-                        f"🔄 **Reupload Character #{character_id}**\n\n"
-                        "Please reply to a media file with:\n"
-                        f"`/reupload {character_id}`\n\n"
-                        "**Optional arguments:**\n"
-                        f"• `/reupload {character_id} name \"New Name\"`\n"
-                        f"• `/reupload {character_id} anime \"New Anime\"`\n"
-                        f"• `/reupload {character_id} rarity 5`\n"
-                        f"• `/reupload {character_id} \"Full Name\" \"Full Anime\" 5 valentine`"
                     )
                     await callback_query.answer()
                 
