@@ -609,6 +609,81 @@ class MongoDB:
         except Exception as e:
             logger.error(f"Error restoring user harem: {e}")
             return False, 0, 0
+    
+    async def get_all_harem_users(self) -> List[int]:
+        """Get all user IDs with harem data"""
+        try:
+            user_ids = await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: list(self.harem.distinct("user_id"))
+            )
+            return user_ids
+        except PyMongoError as e:
+            logger.error(f"Error getting all harem users: {e}")
+            return []
+    
+    # Get character by various fields
+    async def get_characters_by_name(self, char_name: str) -> List[Dict[str, Any]]:
+        """Get characters by name"""
+        try:
+            characters = await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: list(self.characters.find({"char_name": {"$regex": f"^{char_name}$", "$options": "i"}}))
+            )
+            return characters
+        except PyMongoError as e:
+            logger.error(f"Error getting characters by name: {e}")
+            return []
+    
+    async def get_characters_by_anime(self, anime_name: str) -> List[Dict[str, Any]]:
+        """Get characters by anime"""
+        try:
+            characters = await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: list(self.characters.find({"anime_name": {"$regex": f"^{anime_name}$", "$options": "i"}}))
+            )
+            return characters
+        except PyMongoError as e:
+            logger.error(f"Error getting characters by anime: {e}")
+            return []
+    
+    async def get_characters_by_rarity(self, rarity: str) -> List[Dict[str, Any]]:
+        """Get characters by rarity"""
+        try:
+            characters = await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: list(self.characters.find({"rarity": rarity}))
+            )
+            return characters
+        except PyMongoError as e:
+            logger.error(f"Error getting characters by rarity: {e}")
+            return []
+    
+    async def get_deleted_characters(self) -> List[int]:
+        """Get list of deleted character IDs (gaps in sequence)"""
+        try:
+            # Get all existing character IDs
+            characters = await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: list(self.characters.find({}, {"character_id": 1}))
+            )
+            
+            existing_ids = {char['character_id'] for char in characters}
+            
+            # Get max ID
+            max_id = await self.get_next_character_id() - 1
+            
+            # Find gaps
+            deleted_ids = []
+            for i in range(1, max_id + 1):
+                if i not in existing_ids:
+                    deleted_ids.append(i)
+            
+            return deleted_ids
+            
+        except PyMongoError as e:
+            logger.error(f"Error getting deleted characters: {e}")
+            return []
 
 # Global database instance
 db = MongoDB()
@@ -722,16 +797,60 @@ class BackupSystem:
             return None, str(e)
     
     @staticmethod
-    async def create_user_harem_backup(user_id: int) -> tuple[Optional[bytes], Optional[str]]:
-        """Create backup of user's harem"""
+    async def create_all_harem_backup() -> tuple[Optional[bytes], Optional[str]]:
+        """Create backup of all users' harem data in a zip"""
         try:
-            # Get harem backup data
-            harem_backup = await db.backup_user_harem(user_id)
-            if not harem_backup:
+            # Get all users with harem data
+            user_ids = await db.get_all_harem_users()
+            
+            if not user_ids:
+                return None, "No harem data found"
+            
+            # Create zip in memory
+            zip_buffer = io.BytesIO()
+            with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
+                backup_count = 0
+                
+                for user_id in user_ids:
+                    try:
+                        # Create backup for each user
+                        backup = await db.backup_user_harem(user_id)
+                        if backup:
+                            # Convert to JSON
+                            json_str = json.dumps(backup, indent=2, ensure_ascii=False)
+                            filename = f"harem_backup_{user_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+                            zip_file.writestr(filename, json_str)
+                            backup_count += 1
+                    except Exception as e:
+                        logger.error(f"Error backing up harem for user {user_id}: {e}")
+                        continue
+            
+            if backup_count == 0:
+                return None, "Failed to create any harem backups"
+            
+            # Reset buffer position
+            zip_buffer.seek(0)
+            
+            # Generate filename
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = f"all_harem_backups_{timestamp}.zip"
+            
+            return zip_buffer.getvalue(), filename
+            
+        except Exception as e:
+            logger.error(f"Error creating all harem backup: {e}")
+            return None, str(e)
+    
+    @staticmethod
+    async def create_specific_harem_backup(user_id: int) -> tuple[Optional[bytes], Optional[str]]:
+        """Create backup of specific user's harem"""
+        try:
+            backup = await db.backup_user_harem(user_id)
+            if not backup:
                 return None, "Failed to create harem backup"
             
-            # Create JSON file in memory
-            json_str = json.dumps(harem_backup, indent=2, ensure_ascii=False)
+            # Convert to JSON
+            json_str = json.dumps(backup, indent=2, ensure_ascii=False)
             json_bytes = json_str.encode('utf-8')
             
             # Generate filename
@@ -741,7 +860,7 @@ class BackupSystem:
             return json_bytes, filename
             
         except Exception as e:
-            logger.error(f"Error creating harem backup: {e}")
+            logger.error(f"Error creating specific harem backup: {e}")
             return None, str(e)
     
     @staticmethod
@@ -1004,6 +1123,68 @@ class Helpers:
             
         except (ValueError, IndexError):
             return None, None
+    
+    @staticmethod
+    def parse_reupload_arguments(text: str) -> tuple[Optional[str], Optional[str], Optional[str], Optional[str]]:
+        """Parse reupload arguments (can be partial updates)"""
+        try:
+            parts = text.strip().split()
+            if not parts:
+                return None, None, None, None
+            
+            # Check if first part is a command keyword
+            char_name = None
+            anime_name = None
+            rarity_input = None
+            subrarity = None
+            
+            i = 0
+            while i < len(parts):
+                if parts[i] in ["name", "char", "character"]:
+                    # Next part(s) is character name
+                    if i + 1 < len(parts):
+                        char_name = parts[i + 1]
+                        i += 2
+                    else:
+                        return None, None, None, None
+                
+                elif parts[i] in ["anime", "series"]:
+                    # Next part(s) is anime name
+                    if i + 1 < len(parts):
+                        anime_name = parts[i + 1]
+                        i += 2
+                    else:
+                        return None, None, None, None
+                
+                elif parts[i] in ["rarity", "rank", "level"]:
+                    # Next part(s) is rarity
+                    if i + 1 < len(parts):
+                        rarity_input = parts[i + 1]
+                        if i + 2 < len(parts) and parts[i + 2] in config.LIMITED_SUBTYPES:
+                            subrarity = parts[i + 2]
+                            i += 3
+                        else:
+                            i += 2
+                    else:
+                        return None, None, None, None
+                
+                else:
+                    # If no keyword, assume it's full format: name anime rarity
+                    if len(parts) >= 3:
+                        char_name = parts[0]
+                        anime_name = parts[1]
+                        rarity_input = parts[2]
+                        if len(parts) > 3:
+                            subrarity = parts[3]
+                        break
+                    else:
+                        return None, None, None, None
+            
+            return char_name, anime_name, rarity_input, subrarity
+            
+        except Exception as e:
+            logger.error(f"Error parsing reupload arguments: {e}")
+            return None, None, None, None
 
 helpers = Helpers()
 
@@ -1056,10 +1237,12 @@ class SimpleUploadBot:
                 "• `/add user_id` - Add sudo user (owner only)\n"
                 "• `/remove user_id` - Remove sudo user (owner only)\n"
                 "• `/sudos` - List all sudo users\n"
-                "• `/backup` - Backup entire database (owner only)\n\n"
+                "• `/backup` - Backup entire database (owner only)\n"
+                "• `/backupharem [user_id]` - Backup all/specific user harem (owner only)\n\n"
                 "**📝 Character Commands:**\n"
                 "• `/edit ID new_name new_anime rarity` - Edit character\n"
                 "• `/editmedia ID` - Edit character media (reply to media)\n"
+                "• `/reupload ID [args]` - Reupload/update character (reply to media)\n"
                 "• `/search query` - Search characters\n"
                 "• `/info ID` - View character details\n"
                 "• `/delete ID` - Delete character (owner only)\n\n"
@@ -1076,6 +1259,331 @@ class SimpleUploadBot:
             )
             
             await message.reply_text(welcome_text)
+        
+        @self.client.on_message(filters.command("backup"))
+        async def backup_command(client: Client, message: Message):
+            """Handle /backup command - create database backup (owner only)"""
+            user_id = message.from_user.id
+            
+            # Check if owner
+            if not helpers.is_owner(user_id):
+                await message.reply_text("❌ Only bot owners can create backups.")
+                return
+            
+            status_msg = await message.reply_text("🔄 Creating database backup...")
+            
+            try:
+                # Create backup
+                backup_data, filename = await helpers.backup_system.create_full_backup()
+                
+                if not backup_data:
+                    await status_msg.edit_text("❌ Failed to create backup. Please check logs.")
+                    logger.error("Backup data creation failed")
+                    return
+                
+                await status_msg.edit_text("✅ Backup created! Sending to your DM...")
+                
+                # Get file size
+                file_size = len(backup_data)
+                file_size_mb = file_size / (1024 * 1024)
+                
+                # Send backup to owner's DM
+                try:
+                    await client.send_document(
+                        chat_id=user_id,
+                        document=backup_data,
+                        file_name=filename,
+                        caption=f"📦 **Database Backup**\n\n"
+                               f"🗓️ **Created:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+                               f"📊 **File Size:** {file_size_mb:.2f} MB\n"
+                               f"👤 **Requested by:** {message.from_user.mention}\n\n"
+                               f"**Instructions:**\n"
+                               f"• Save this file securely\n"
+                               f"• Contains all characters, sudo users, and harem data"
+                    )
+                    await status_msg.edit_text("✅ Backup sent to your DM!")
+                    logger.info(f"Backup created and sent to owner {user_id} (Size: {file_size_mb:.2f} MB)")
+                    
+                except Exception as e:
+                    logger.error(f"Failed to send backup to DM: {e}")
+                    # Try sending in chat if DM fails
+                    try:
+                        await client.send_document(
+                            chat_id=message.chat.id,
+                            document=backup_data,
+                            file_name=filename,
+                            caption=f"📦 **Database Backup**\n\nSize: {file_size_mb:.2f} MB"
+                        )
+                        await status_msg.edit_text("✅ Backup created! (Sent in chat because DM failed)")
+                    except Exception as e2:
+                        logger.error(f"Failed to send backup in chat: {e2}")
+                        await status_msg.edit_text("❌ Failed to send backup. File might be too large.")
+                    
+            except Exception as e:
+                logger.error(f"Error in backup command: {e}")
+                await status_msg.edit_text("❌ Error creating backup.")
+        
+        @self.client.on_message(filters.command("backupharem"))
+        async def backup_harem_command(client: Client, message: Message):
+            """Handle /backupharem command - backup all or specific user harem"""
+            user_id = message.from_user.id
+            
+            # Check if owner
+            if not helpers.is_owner(user_id):
+                await message.reply_text("❌ Only bot owners can backup harem data.")
+                return
+            
+            args = message.text.split()
+            status_msg = await message.reply_text("🔄 Preparing harem backup...")
+            
+            try:
+                # If no argument, backup all users
+                if len(args) == 1:
+                    backup_data, filename = await helpers.backup_system.create_all_harem_backup()
+                    backup_type = "All Users"
+                else:
+                    # Try to parse user ID or username
+                    target = args[1]
+                    target_user_id = None
+                    
+                    # Check if it's a user ID (numeric)
+                    if target.isdigit():
+                        target_user_id = int(target)
+                    else:
+                        # Check if it's a username (with or without @)
+                        if target.startswith('@'):
+                            target = target[1:]
+                        
+                        try:
+                            # Try to get user by username
+                            user = await client.get_users(target)
+                            target_user_id = user.id
+                        except Exception as e:
+                            await status_msg.edit_text(f"❌ Invalid user: {target}")
+                            return
+                    
+                    if not target_user_id:
+                        await status_msg.edit_text("❌ Could not find user.")
+                        return
+                    
+                    # Check if user exists in harem
+                    user_harem = await db.get_user_harem(target_user_id)
+                    if not user_harem:
+                        await status_msg.edit_text(f"❌ User {target_user_id} has no harem data.")
+                        return
+                    
+                    backup_data, filename = await helpers.backup_system.create_specific_harem_backup(target_user_id)
+                    backup_type = f"User {target_user_id}"
+                
+                if not backup_data:
+                    await status_msg.edit_text("❌ Failed to create harem backup.")
+                    return
+                
+                await status_msg.edit_text(f"✅ {backup_type} harem backup created! Sending to your DM...")
+                
+                # Get file size
+                file_size = len(backup_data)
+                file_size_mb = file_size / (1024 * 1024)
+                
+                # Send backup to owner's DM
+                try:
+                    await client.send_document(
+                        chat_id=user_id,
+                        document=backup_data,
+                        file_name=filename,
+                        caption=f"💾 **Harem Backup - {backup_type}**\n\n"
+                               f"🗓️ **Created:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+                               f"📊 **File Size:** {file_size_mb:.2f} MB\n"
+                               f"👤 **Requested by:** {message.from_user.mention}\n\n"
+                               f"**Instructions:**\n"
+                               f"• Save this file securely\n"
+                               f"• Use `/haremupload` to restore data"
+                    )
+                    await status_msg.edit_text(f"✅ {backup_type} harem backup sent to your DM!")
+                    logger.info(f"Harem backup created for {backup_type} by owner {user_id}")
+                    
+                except Exception as e:
+                    logger.error(f"Failed to send harem backup to DM: {e}")
+                    # Try sending in chat
+                    try:
+                        await client.send_document(
+                            chat_id=message.chat.id,
+                            document=backup_data,
+                            file_name=filename,
+                            caption=f"💾 **Harem Backup - {backup_type}**\n\nSize: {file_size_mb:.2f} MB"
+                        )
+                        await status_msg.edit_text(f"✅ {backup_type} harem backup created! (Sent in chat)")
+                    except Exception as e2:
+                        logger.error(f"Failed to send harem backup in chat: {e2}")
+                        await status_msg.edit_text("❌ Failed to send backup. File might be too large.")
+                    
+            except Exception as e:
+                logger.error(f"Error in backupharem command: {e}")
+                await status_msg.edit_text("❌ Error creating harem backup.")
+        
+        @self.client.on_message(filters.command("reupload"))
+        async def reupload_command(client: Client, message: Message):
+            """Handle /reupload command - update character with new media/details"""
+            user_id = message.from_user.id
+            
+            # Check authorization
+            if not await helpers.is_sudo_user(user_id):
+                await message.reply_text("❌ You are not authorized to reupload characters.")
+                return
+            
+            # Check if message is a reply to media
+            if not message.reply_to_message or not (
+                message.reply_to_message.photo or 
+                message.reply_to_message.video or 
+                message.reply_to_message.audio or 
+                message.reply_to_message.document
+            ):
+                await message.reply_text(
+                    "🔄 **Reupload Character**\n\n"
+                    "**Usage:** Reply to a media file with:\n"
+                    "`/reupload character_id` - Update media only\n"
+                    "`/reupload character_id name \"New Name\"` - Update name only\n"
+                    "`/reupload character_id anime \"New Anime\"` - Update anime only\n"
+                    "`/reupload character_id rarity 5` - Update rarity only\n"
+                    "`/reupload character_id \"New Name\" \"New Anime\" 5 valentine` - Update everything\n\n"
+                    "**Examples:**\n"
+                    "• `/reupload 123` (reply to media) - Update media\n"
+                    "• `/reupload 123 name \"New Character Name\"` - Update name\n"
+                    "• `/reupload 123 anime \"New Anime\" rarity 5` - Update anime and rarity\n"
+                    "• `/reupload 123 \"Full Name\" \"Full Anime\" 5 valentine` (reply to media) - Full update"
+                )
+                return
+            
+            args = message.text.split()
+            if len(args) < 2:
+                await message.reply_text("❌ Usage: Reply to media with `/reupload character_id [args]`")
+                return
+            
+            try:
+                character_id = int(args[1])
+                
+                # Check if character exists
+                character = await db.get_character_by_id(character_id)
+                if not character:
+                    await message.reply_text("❌ Character not found!")
+                    return
+                
+                # Parse additional arguments if provided
+                new_char_name = character['char_name']
+                new_anime_name = character['anime_name']
+                new_rarity = character['rarity']
+                new_subrarity = character.get('subrarity')
+                
+                update_type = "media"  # Default is media update
+                
+                if len(args) > 2:
+                    # Parse arguments
+                    text_args = ' '.join(args[2:])
+                    parsed_name, parsed_anime, parsed_rarity, parsed_subrarity = helpers.parse_reupload_arguments(text_args)
+                    
+                    if parsed_name:
+                        new_char_name = parsed_name
+                        update_type = "media and name"
+                    
+                    if parsed_anime:
+                        new_anime_name = parsed_anime
+                        update_type = "media and anime" if update_type == "media" else f"{update_type} and anime"
+                    
+                    if parsed_rarity:
+                        rarity_name, subrarity = helpers.parse_rarity(parsed_rarity)
+                        if rarity_name:
+                            new_rarity = rarity_name
+                            if subrarity:
+                                new_subrarity = subrarity
+                            update_type = "media and rarity" if update_type == "media" else f"{update_type} and rarity"
+                        else:
+                            await message.reply_text("❌ Invalid rarity.")
+                            return
+                
+                # Start upload process
+                status_msg = await message.reply_text("🔄 Starting reupload process...")
+                
+                async def update_status(text: str):
+                    try:
+                        await status_msg.edit_text(text)
+                    except Exception as e:
+                        logger.warning(f"Failed to update status: {e}")
+                
+                # Upload new media
+                await update_status("📥 Uploading new media to Catbox...")
+                
+                media_url, media_type = await helpers.upload_media(
+                    client, 
+                    message.reply_to_message,
+                    status_callback=update_status
+                )
+                
+                if not media_url:
+                    await update_status("❌ Failed to upload media. Please try again.")
+                    return
+                
+                # Update character in database
+                updated = False
+                
+                if len(args) > 2:
+                    # Update character details
+                    await update_status("🔄 Updating character details...")
+                    updated = await db.update_character(
+                        character_id=character_id,
+                        char_name=new_char_name,
+                        anime_name=new_anime_name,
+                        rarity=new_rarity,
+                        subrarity=new_subrarity
+                    )
+                    
+                    if not updated:
+                        await update_status("❌ Failed to update character details.")
+                        return
+                
+                # Update character media
+                await update_status("🔄 Updating character media...")
+                media_updated = await db.update_character_media(character_id, media_url, media_type)
+                
+                if not media_updated:
+                    await update_status("❌ Failed to update character media.")
+                    return
+                
+                # Send to log channel
+                username = message.from_user.username or message.from_user.first_name or "Unknown"
+                updated_character = await db.get_character_by_id(character_id)
+                
+                if updated_character:
+                    await helpers.send_to_log_channel(
+                        client, updated_character, username, user_id
+                    )
+                
+                # Success message
+                success_text = (
+                    f"✅ **Character #{character_id} Reuploaded Successfully!**\n\n"
+                    f"👤 **Name:** {new_char_name}\n"
+                    f"🎞️ **Anime:** {new_anime_name}\n"
+                    f"🏅 **Rarity:** {new_rarity}\n"
+                )
+                
+                if new_subrarity:
+                    success_text += f"💠 **Sub-Rarity:** {new_subrarity}\n"
+                
+                success_text += (
+                    f"\n📸 **Media:** Updated on Catbox\n"
+                    f"📢 **Posted to:** @capture_database\n"
+                    f"🆔 **Character ID:** `{character_id}`\n"
+                    f"🔄 **Updated:** {update_type}\n\n"
+                    f"**Character has been successfully updated!**"
+                )
+                
+                await update_status(success_text)
+                logger.info(f"Character {character_id} reuploaded by user {user_id}")
+                
+            except ValueError:
+                await message.reply_text("❌ Invalid character ID. Must be a number.")
+            except Exception as e:
+                logger.error(f"Error in reupload command: {e}")
+                await message.reply_text("❌ Error reuploading character.")
         
         @self.client.on_message(filters.command("upload"))
         async def upload_command(client: Client, message: Message):
@@ -1231,7 +1739,7 @@ class SimpleUploadBot:
                     client, character.to_dict(), username, user_id
                 )
                 
-                # Success message (NO AUTO-ADD TO HAREM)
+                # Success message
                 success_text = (
                     f"✅ **Character #{character_id} Uploaded Successfully!**\n\n"
                     f"👤 **Name:** {char_name}\n"
@@ -1436,59 +1944,6 @@ class SimpleUploadBot:
                 logger.error(f"Error listing sudo users: {e}")
                 await message.reply_text("❌ Error fetching sudo users list.")
         
-        @self.client.on_message(filters.command("backup"))
-        async def backup_command(client: Client, message: Message):
-            """Handle /backup command - create database backup (owner only)"""
-            user_id = message.from_user.id
-            
-            # Check if owner
-            if not helpers.is_owner(user_id):
-                await message.reply_text("❌ Only bot owners can create backups.")
-                return
-            
-            status_msg = await message.reply_text("🔄 Creating database backup...")
-            
-            try:
-                # Create backup
-                backup_data, filename = await helpers.backup_system.create_full_backup()
-                
-                if not backup_data:
-                    await status_msg.edit_text("❌ Failed to create backup.")
-                    return
-                
-                await status_msg.edit_text("✅ Backup created! Sending to your DM...")
-                
-                # Send backup to owner's DM
-                try:
-                    await client.send_document(
-                        chat_id=user_id,
-                        document=backup_data,
-                        file_name=filename,
-                        caption=f"📦 **Database Backup**\n\n"
-                               f"🗓️ **Created:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
-                               f"👤 **Requested by:** {message.from_user.mention}\n\n"
-                               f"**Instructions:**\n"
-                               f"• Save this file securely\n"
-                               f"• Contains all characters, sudo users, and harem data"
-                    )
-                    await status_msg.edit_text("✅ Backup sent to your DM!")
-                    logger.info(f"Backup created and sent to owner {user_id}")
-                    
-                except Exception as e:
-                    logger.error(f"Failed to send backup to DM: {e}")
-                    # Try sending in chat if DM fails
-                    await client.send_document(
-                        chat_id=message.chat.id,
-                        document=backup_data,
-                        file_name=filename,
-                        caption="📦 **Database Backup**"
-                    )
-                    await status_msg.edit_text("✅ Backup created! (Sent in chat because DM failed)")
-                    
-            except Exception as e:
-                logger.error(f"Error in backup command: {e}")
-                await status_msg.edit_text("❌ Error creating backup.")
-        
         @self.client.on_message(filters.command("harembackup"))
         async def harem_backup_command(client: Client, message: Message):
             """Handle /harembackup command - backup user's harem"""
@@ -1498,7 +1953,7 @@ class SimpleUploadBot:
             
             try:
                 # Create harem backup
-                backup_data, filename = await helpers.backup_system.create_user_harem_backup(user_id)
+                backup_data, filename = await helpers.backup_system.create_specific_harem_backup(user_id)
                 
                 if not backup_data:
                     await status_msg.edit_text("❌ Failed to create harem backup.")
@@ -1520,6 +1975,10 @@ class SimpleUploadBot:
                 
                 rarity_stats = "\n".join([f"• {rarity}: {count}" for rarity, count in rarity_count.items()])
                 
+                # Get file size
+                file_size = len(backup_data)
+                file_size_kb = file_size / 1024
+                
                 # Send backup to user
                 await client.send_document(
                     chat_id=user_id,
@@ -1528,6 +1987,7 @@ class SimpleUploadBot:
                     caption=f"💾 **Your Harem Backup**\n\n"
                            f"👤 **User:** {message.from_user.mention}\n"
                            f"📅 **Backup Date:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+                           f"📊 **File Size:** {file_size_kb:.1f} KB\n"
                            f"👥 **Total Characters:** {total_chars}\n\n"
                            f"**Rarity Distribution:**\n{rarity_stats}\n\n"
                            f"**Instructions:**\n"
@@ -2041,6 +2501,7 @@ class SimpleUploadBot:
                     buttons = []
                     buttons.append(InlineKeyboardButton("✏️ Edit Details", callback_data=f"edit_{character_id}"))
                     buttons.append(InlineKeyboardButton("🖼️ Edit Media", callback_data=f"editmedia_{character_id}"))
+                    buttons.append(InlineKeyboardButton("🔄 Reupload", callback_data=f"reupload_{character_id}"))
                     
                     if not in_harem:
                         buttons.append(InlineKeyboardButton("💝 Add to Harem", callback_data=f"addharem_{character_id}"))
@@ -2160,9 +2621,14 @@ class SimpleUploadBot:
                 sudo_users = await db.get_sudo_users()
                 sudo_count = len(sudo_users)
                 
+                # Get deleted characters count
+                deleted_ids = await db.get_deleted_characters()
+                deleted_count = len(deleted_ids)
+                
                 stats_text = (
                     "📊 **Bot Statistics**\n\n"
                     f"• **Total Characters:** {total_chars}\n"
+                    f"• **Deleted Characters:** {deleted_count}\n"
                     f"• **Sudo Users:** {sudo_count}\n"
                     f"• **Your Uploads:** {len(user_chars)}\n"
                     f"• **Your Harem Size:** {len(user_harem)}\n"
@@ -2171,6 +2637,7 @@ class SimpleUploadBot:
                     f"• **Max File Size:** {config.MAX_FILE_SIZE // (1024*1024)}MB\n\n"
                     "**Commands:**\n"
                     "• `/upload` - Upload character\n"
+                    "• `/reupload` - Reupload/update character\n"
                     "• `/edit` - Edit character\n"
                     "• `/search` - Search characters\n"
                     "• `/info` - View character info\n"
@@ -2195,6 +2662,12 @@ class SimpleUploadBot:
                 "**Examples:**\n"
                 "• `/upload \"Ichigo Kurosaki\" Bleach 4`\n"
                 "• `/upload \"Goku\" \"Dragon Ball\" 5 valentine`\n\n"
+                "**🔄 REUPLOAD COMMAND:**\n"
+                "Reply to media with `/reupload ID` to update media\n"
+                "Add arguments to update details:\n"
+                "• `/reupload ID name \"New Name\"`\n"
+                "• `/reupload ID anime \"New Anime\" rarity 5`\n"
+                "• `/reupload ID \"Full Name\" \"Full Anime\" 5 valentine`\n\n"
                 "**🔄 EDIT COMMANDS:**\n"
                 "• `/edit ID \"New Name\" \"New Anime\" Rarity [subrarity]`\n"
                 "• `/editmedia ID` (reply to new media)\n\n"
@@ -2211,6 +2684,7 @@ class SimpleUploadBot:
                 "• `/remove user_id` - Remove sudo user (owner only)\n"
                 "• `/sudos` - List all sudo users\n"
                 "• `/backup` - Backup database (owner only)\n"
+                "• `/backupharem [user_id]` - Backup all/specific harem (owner only)\n"
                 "• `/delete ID` - Delete character (owner only)\n\n"
                 "**🎯 RARITIES (1-14):**\n"
                 "1. ⚪ Common\n"
@@ -2258,6 +2732,20 @@ class SimpleUploadBot:
                         f"🖼️ **Edit Media for Character #{character_id}**\n\n"
                         "Please reply to a media file with:\n"
                         f"`/editmedia {character_id}`"
+                    )
+                    await callback_query.answer()
+                
+                elif data.startswith("reupload_"):
+                    character_id = int(data.split("_")[1])
+                    await callback_query.message.edit_text(
+                        f"🔄 **Reupload Character #{character_id}**\n\n"
+                        "Please reply to a media file with:\n"
+                        f"`/reupload {character_id}`\n\n"
+                        "**Optional arguments:**\n"
+                        f"• `/reupload {character_id} name \"New Name\"`\n"
+                        f"• `/reupload {character_id} anime \"New Anime\"`\n"
+                        f"• `/reupload {character_id} rarity 5`\n"
+                        f"• `/reupload {character_id} \"Full Name\" \"Full Anime\" 5 valentine`"
                     )
                     await callback_query.answer()
                 
