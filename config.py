@@ -91,17 +91,6 @@ class Config:
         "newyear": "🎆",
         "wedding": "💒",
 
-        # Premium / Exotic
-        "gold": "🥇",
-        "diamond": "💠",
-        "royal": "👑",
-        "dark": "🌑",
-
-        # Supreme / Crystal
-        "mythic": "🛡️",
-        "ancient": "📜",
-        "celestial": "✨",
-
         # Celebrity
         "actor": "🎭",
         "singer": "🎤",
@@ -112,5 +101,6 @@ class Config:
 
 # Export config instance
 config = Config()
+
 
 
