@@ -1,4 +1,4 @@
-# ==================== COMPLETE CHARACTER BOT (UPLOAD + VIEW) ====================
+# ==================== CHARACTER BOT WITH RECYCLE BIN SYSTEM ====================
 import os
 import logging
 import asyncio
@@ -78,6 +78,9 @@ class Config:
     
     # Items per page for pagination
     ITEMS_PER_PAGE = 10
+    
+    # Recycle bin settings
+    RECYCLE_BIN_MAX_DAYS = 30  # Keep deleted characters for 30 days
 
 config = Config()
 
@@ -95,7 +98,10 @@ class Character:
         subrarity: Optional[str] = None,
         media_type: Optional[str] = None,
         added_by: int = None,
-        timestamp: Optional[datetime] = None
+        timestamp: Optional[datetime] = None,
+        deleted_at: Optional[datetime] = None,
+        deleted_by: Optional[int] = None,
+        deleted_reason: Optional[str] = None
     ):
         self.char_name = char_name
         self.anime_name = anime_name
@@ -106,10 +112,13 @@ class Character:
         self.media_type = media_type
         self.added_by = added_by
         self.timestamp = timestamp or datetime.utcnow()
+        self.deleted_at = deleted_at
+        self.deleted_by = deleted_by
+        self.deleted_reason = deleted_reason
     
     def to_dict(self) -> Dict[str, Any]:
         """Convert character object to dictionary for MongoDB"""
-        return {
+        data = {
             "char_name": self.char_name,
             "anime_name": self.anime_name,
             "rarity": self.rarity,
@@ -120,6 +129,15 @@ class Character:
             "added_by": self.added_by,
             "timestamp": self.timestamp
         }
+        
+        if self.deleted_at:
+            data["deleted_at"] = self.deleted_at
+        if self.deleted_by:
+            data["deleted_by"] = self.deleted_by
+        if self.deleted_reason:
+            data["deleted_reason"] = self.deleted_reason
+        
+        return data
     
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> 'Character':
@@ -133,17 +151,21 @@ class Character:
             subrarity=data.get("subrarity"),
             media_type=data.get("media_type"),
             added_by=data.get("added_by"),
-            timestamp=data.get("timestamp")
+            timestamp=data.get("timestamp"),
+            deleted_at=data.get("deleted_at"),
+            deleted_by=data.get("deleted_by"),
+            deleted_reason=data.get("deleted_reason")
         )
 
 # ==================== DATABASE ====================
 class MongoDB:
-    """MongoDB database operations handler"""
+    """MongoDB database operations handler with recycle bin"""
     
     def __init__(self):
         self.client = None
         self.db = None
         self.characters = None
+        self.deleted_characters = None  # New collection for recycle bin
         self.counters = None
         self.sudo_users = None
     
@@ -153,6 +175,7 @@ class MongoDB:
             self.client = MongoClient(config.MONGO_URI)
             self.db = self.client[config.DATABASE_NAME]
             self.characters = self.db.characters
+            self.deleted_characters = self.db.deleted_characters  # Recycle bin
             self.counters = self.db.counters
             self.sudo_users = self.db.sudo_users
             
@@ -169,6 +192,21 @@ class MongoDB:
                 None,
                 lambda: self.characters.create_index("character_id", unique=True)
             )
+            
+            # Indexes for deleted characters
+            await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: self.deleted_characters.create_index("character_id")
+            )
+            await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: self.deleted_characters.create_index("deleted_at")
+            )
+            await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: self.deleted_characters.create_index("deleted_by")
+            )
+            
             await asyncio.get_event_loop().run_in_executor(
                 None,
                 lambda: self.sudo_users.create_index("user_id", unique=True)
@@ -228,14 +266,14 @@ class MongoDB:
             raise
     
     async def get_character_count(self) -> int:
-        """Get total number of characters in database"""
+        """Get total number of active characters in database"""
         return await asyncio.get_event_loop().run_in_executor(
             None,
             lambda: self.characters.count_documents({})
         )
     
     async def get_user_characters(self, user_id: int) -> List[Dict[str, Any]]:
-        """Get all characters uploaded by a user"""
+        """Get all active characters uploaded by a user"""
         try:
             characters = await asyncio.get_event_loop().run_in_executor(
                 None,
@@ -247,7 +285,7 @@ class MongoDB:
             return []
     
     async def get_character_by_id(self, character_id: int) -> Optional[Dict[str, Any]]:
-        """Get character by character ID"""
+        """Get active character by character ID"""
         try:
             character = await asyncio.get_event_loop().run_in_executor(
                 None,
@@ -258,17 +296,169 @@ class MongoDB:
             logger.error(f"Error fetching character by ID: {e}")
             return None
     
-    async def delete_character(self, character_id: int) -> bool:
-        """Delete character by ID"""
+    async def get_deleted_character_by_id(self, character_id: int) -> Optional[Dict[str, Any]]:
+        """Get deleted character by character ID"""
         try:
+            character = await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: self.deleted_characters.find_one({"character_id": character_id})
+            )
+            return character
+        except PyMongoError as e:
+            logger.error(f"Error fetching deleted character by ID: {e}")
+            return None
+    
+    async def soft_delete_character(self, character_id: int, deleted_by: int, reason: str = None) -> bool:
+        """Move character to recycle bin (soft delete)"""
+        try:
+            # Get character from active collection
+            character = await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: self.characters.find_one({"character_id": character_id})
+            )
+            
+            if not character:
+                return False
+            
+            # Add deletion metadata
+            character["deleted_at"] = datetime.utcnow()
+            character["deleted_by"] = deleted_by
+            if reason:
+                character["deleted_reason"] = reason
+            
+            # Insert into deleted collection
+            await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: self.deleted_characters.insert_one(character)
+            )
+            
+            # Remove from active collection
             result = await asyncio.get_event_loop().run_in_executor(
                 None,
                 lambda: self.characters.delete_one({"character_id": character_id})
             )
+            
+            return result.deleted_count > 0
+            
+        except PyMongoError as e:
+            logger.error(f"Error soft deleting character: {e}")
+            return False
+    
+    async def restore_character(self, character_id: int) -> bool:
+        """Restore character from recycle bin"""
+        try:
+            # Get character from deleted collection
+            character = await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: self.deleted_characters.find_one({"character_id": character_id})
+            )
+            
+            if not character:
+                return False
+            
+            # Remove deletion metadata
+            character.pop("deleted_at", None)
+            character.pop("deleted_by", None)
+            character.pop("deleted_reason", None)
+            
+            # Insert back into active collection
+            await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: self.characters.insert_one(character)
+            )
+            
+            # Remove from deleted collection
+            result = await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: self.deleted_characters.delete_one({"character_id": character_id})
+            )
+            
+            return result.deleted_count > 0
+            
+        except PyMongoError as e:
+            logger.error(f"Error restoring character: {e}")
+            return False
+    
+    async def permanent_delete_character(self, character_id: int) -> bool:
+        """Permanently delete character from recycle bin"""
+        try:
+            result = await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: self.deleted_characters.delete_one({"character_id": character_id})
+            )
             return result.deleted_count > 0
         except PyMongoError as e:
-            logger.error(f"Error deleting character: {e}")
+            logger.error(f"Error permanently deleting character: {e}")
             return False
+    
+    async def cleanup_old_deleted(self) -> int:
+        """Clean up old deleted characters (older than RECYCLE_BIN_MAX_DAYS)"""
+        try:
+            cutoff_date = datetime.utcnow() - timedelta(days=config.RECYCLE_BIN_MAX_DAYS)
+            result = await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: self.deleted_characters.delete_many({"deleted_at": {"$lt": cutoff_date}})
+            )
+            return result.deleted_count
+        except PyMongoError as e:
+            logger.error(f"Error cleaning up old deleted characters: {e}")
+            return 0
+    
+    async def get_deleted_characters_count(self) -> int:
+        """Get total number of deleted characters"""
+        return await asyncio.get_event_loop().run_in_executor(
+            None,
+            lambda: self.deleted_characters.count_documents({})
+        )
+    
+    async def get_deleted_characters(self, page: int = 0) -> tuple[List[Dict[str, Any]], int]:
+        """Get deleted characters with pagination"""
+        try:
+            skip = page * config.ITEMS_PER_PAGE
+            
+            # Get deleted characters for current page
+            characters = await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: list(self.deleted_characters.find({})
+                             .sort("deleted_at", -1)
+                             .skip(skip)
+                             .limit(config.ITEMS_PER_PAGE))
+            )
+            
+            # Get total count
+            total_count = await self.get_deleted_characters_count()
+            
+            return characters, total_count
+            
+        except PyMongoError as e:
+            logger.error(f"Error fetching deleted characters: {e}")
+            return [], 0
+    
+    async def get_user_deleted_characters(self, user_id: int, page: int = 0) -> tuple[List[Dict[str, Any]], int]:
+        """Get deleted characters uploaded by a user with pagination"""
+        try:
+            skip = page * config.ITEMS_PER_PAGE
+            
+            # Get deleted characters for current page
+            characters = await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: list(self.deleted_characters.find({"added_by": user_id})
+                             .sort("deleted_at", -1)
+                             .skip(skip)
+                             .limit(config.ITEMS_PER_PAGE))
+            )
+            
+            # Get total count
+            total_count = await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: self.deleted_characters.count_documents({"added_by": user_id})
+            )
+            
+            return characters, total_count
+            
+        except PyMongoError as e:
+            logger.error(f"Error fetching user deleted characters: {e}")
+            return [], 0
     
     async def update_character(
         self, 
@@ -330,7 +520,7 @@ class MongoDB:
             return False
     
     async def search_characters(self, query: str, limit: int = 20) -> List[Dict[str, Any]]:
-        """Search characters by name or anime"""
+        """Search active characters by name or anime"""
         try:
             search_filter = {
                 "$or": [
@@ -348,8 +538,41 @@ class MongoDB:
             logger.error(f"Error searching characters: {e}")
             return []
     
+    async def search_deleted_characters(self, query: str, page: int = 0) -> tuple[List[Dict[str, Any]], int]:
+        """Search deleted characters by name or anime with pagination"""
+        try:
+            skip = page * config.ITEMS_PER_PAGE
+            
+            search_filter = {
+                "$or": [
+                    {"char_name": {"$regex": query, "$options": "i"}},
+                    {"anime_name": {"$regex": query, "$options": "i"}}
+                ]
+            }
+            
+            # Get deleted characters for current page
+            characters = await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: list(self.deleted_characters.find(search_filter)
+                             .sort("deleted_at", -1)
+                             .skip(skip)
+                             .limit(config.ITEMS_PER_PAGE))
+            )
+            
+            # Get total count
+            total_count = await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: self.deleted_characters.count_documents(search_filter)
+            )
+            
+            return characters, total_count
+            
+        except PyMongoError as e:
+            logger.error(f"Error searching deleted characters: {e}")
+            return [], 0
+    
     async def get_characters_by_rarity(self, rarity_name: str, page: int = 0) -> tuple[List[Dict[str, Any]], int]:
-        """Get characters by rarity with pagination"""
+        """Get active characters by rarity with pagination"""
         try:
             skip = page * config.ITEMS_PER_PAGE
             
@@ -373,37 +596,8 @@ class MongoDB:
             logger.error(f"Error fetching characters by rarity: {e}")
             return [], 0
     
-    async def get_characters_by_subrarity(self, rarity_name: str, subrarity: str, page: int = 0) -> tuple[List[Dict[str, Any]], int]:
-        """Get characters by sub-rarity with pagination"""
-        try:
-            skip = page * config.ITEMS_PER_PAGE
-            
-            # Get characters for current page
-            characters = await asyncio.get_event_loop().run_in_executor(
-                None,
-                lambda: list(self.characters.find({
-                    "rarity": rarity_name,
-                    "subrarity": subrarity
-                }).skip(skip).limit(config.ITEMS_PER_PAGE))
-            )
-            
-            # Get total count
-            total_count = await asyncio.get_event_loop().run_in_executor(
-                None,
-                lambda: self.characters.count_documents({
-                    "rarity": rarity_name,
-                    "subrarity": subrarity
-                })
-            )
-            
-            return characters, total_count
-            
-        except PyMongoError as e:
-            logger.error(f"Error fetching characters by sub-rarity: {e}")
-            return [], 0
-    
     async def get_all_characters_paginated(self, page: int = 0, sort_by: str = "character_id") -> tuple[List[Dict[str, Any]], int]:
-        """Get all characters with pagination"""
+        """Get all active characters with pagination"""
         try:
             skip = page * config.ITEMS_PER_PAGE
             
@@ -423,7 +617,7 @@ class MongoDB:
             return [], 0
     
     async def search_characters_paginated(self, query: str, page: int = 0) -> tuple[List[Dict[str, Any]], int]:
-        """Search characters by name or anime with pagination"""
+        """Search active characters by name or anime with pagination"""
         try:
             skip = page * config.ITEMS_PER_PAGE
             
@@ -453,7 +647,7 @@ class MongoDB:
             return [], 0
     
     async def get_rarity_stats(self) -> Dict[str, int]:
-        """Get count of characters per rarity"""
+        """Get count of active characters per rarity"""
         try:
             pipeline = [
                 {"$group": {
@@ -502,7 +696,7 @@ class MongoDB:
             return []
     
     async def get_user_characters_paginated(self, user_id: int, page: int = 0) -> tuple[List[Dict[str, Any]], int]:
-        """Get all characters uploaded by a user with pagination"""
+        """Get all active characters uploaded by a user with pagination"""
         try:
             skip = page * config.ITEMS_PER_PAGE
             
@@ -562,18 +756,6 @@ class MongoDB:
         except PyMongoError as e:
             logger.error(f"Error checking sudo user: {e}")
             return False
-    
-    async def get_sudo_users(self) -> List[int]:
-        """Get all sudo user IDs"""
-        try:
-            sudo_users = await asyncio.get_event_loop().run_in_executor(
-                None,
-                lambda: list(self.sudo_users.find({}, {"user_id": 1}))
-            )
-            return [user["user_id"] for user in sudo_users]
-        except PyMongoError as e:
-            logger.error(f"Error fetching sudo users: {e}")
-            return []
 
 # Global database instance
 db = MongoDB()
@@ -608,6 +790,8 @@ class UploadService:
         except Exception as e:
             logger.error(f"Catbox upload error: {e}")
             return None
+
+from datetime import timedelta
 
 class Helpers:
     """Utility functions for the bot"""
@@ -733,6 +917,47 @@ class Helpers:
         return info
     
     @staticmethod
+    def format_deleted_character_info(character_data: Dict[str, Any]) -> str:
+        """Format deleted character data for display"""
+        info = f"🗑️ **Deleted Character**\n\n"
+        info += f"👤 **Name:** {character_data.get('char_name', 'N/A')}\n"
+        info += f"🎞️ **Anime:** {character_data.get('anime_name', 'N/A')}\n"
+        info += f"🏅 **Rarity:** {character_data.get('rarity', 'N/A')}\n"
+        
+        if character_data.get('subrarity'):
+            info += f"💠 **Sub-Rarity:** {character_data.get('subrarity')}\n"
+        
+        info += f"🆔 **ID:** `{character_data.get('character_id', 'N/A')}`\n"
+        
+        if character_data.get('timestamp'):
+            timestamp = character_data['timestamp']
+            if isinstance(timestamp, datetime):
+                info += f"📅 **Originally Added:** {timestamp.strftime('%Y-%m-%d %H:%M:%S')}\n"
+        
+        if character_data.get('deleted_at'):
+            deleted_at = character_data['deleted_at']
+            if isinstance(deleted_at, datetime):
+                info += f"🗑️ **Deleted On:** {deleted_at.strftime('%Y-%m-%d %H:%M:%S')}\n"
+                
+                # Calculate days ago
+                days_ago = (datetime.utcnow() - deleted_at).days
+                info += f"⏳ **Deleted {days_ago} days ago**\n"
+        
+        if character_data.get('deleted_by'):
+            info += f"👤 **Deleted by:** {character_data['deleted_by']}\n"
+        
+        if character_data.get('deleted_reason'):
+            info += f"📝 **Reason:** {character_data['deleted_reason']}\n"
+        
+        if character_data.get('added_by'):
+            info += f"📤 **Originally uploaded by:** {character_data['added_by']}\n"
+        
+        if character_data.get('media_url'):
+            info += f"🔗 **Media:** [View]({character_data['media_url']})\n"
+        
+        return info
+    
+    @staticmethod
     def get_rarity_emoji(rarity_name: str) -> str:
         """Get emoji for rarity name"""
         for rarity_num, rarity_data in config.RARITIES.items():
@@ -800,6 +1025,14 @@ class Helpers:
             InlineKeyboardButton(
                 "📊 All Characters",
                 callback_data=f"view_all_{current_view}"
+            )
+        ])
+        
+        # Add recycle bin option
+        keyboard.append([
+            InlineKeyboardButton(
+                "🗑️ Recycle Bin",
+                callback_data=f"deleted_list_0_{current_view}"
             )
         ])
         
@@ -888,6 +1121,33 @@ class Helpers:
         return message
     
     @staticmethod
+    def format_deleted_character_list(characters: List[Dict[str, Any]], page: int, total_count: int) -> str:
+        """Format a list of deleted characters for display"""
+        if not characters:
+            return "🗑️ **Recycle Bin is empty!**\n\nNo deleted characters found."
+        
+        start_num = page * config.ITEMS_PER_PAGE + 1
+        end_num = min(start_num + len(characters) - 1, total_count)
+        
+        message = f"🗑️ **Recycle Bin (Deleted Characters)**\n"
+        message += f"📊 **Showing {start_num}-{end_num} of {total_count}**\n\n"
+        
+        for i, char in enumerate(characters, start=start_num):
+            emoji = Helpers.get_rarity_emoji(char.get('rarity', ''))
+            subrarity_text = f" ({char.get('subrarity', '')})" if char.get('subrarity') else ""
+            
+            # Calculate days since deletion
+            days_ago = 0
+            if char.get('deleted_at') and isinstance(char['deleted_at'], datetime):
+                days_ago = (datetime.utcnow() - char['deleted_at']).days
+            
+            message += f"{i}. **{char.get('char_name', 'Unknown')}** - {char.get('anime_name', 'Unknown')}\n"
+            message += f"   {emoji} {char.get('rarity', 'Unknown')}{subrarity_text}\n"
+            message += f"   🆔 `{char.get('character_id', 'N/A')}` | 🗑️ {days_ago}d ago\n\n"
+        
+        return message
+    
+    @staticmethod
     async def get_username_from_id(client: Client, user_id: int) -> str:
         """Get username from user ID"""
         try:
@@ -901,21 +1161,43 @@ class Helpers:
         client: Client, 
         character_data: Dict[str, Any], 
         username: str,
-        user_id: int
+        user_id: int,
+        action: str = "added"
     ) -> bool:
         """Send character data to log channel"""
         try:
-            log_message = (
-                f"🆕 **New Character Added!**\n\n"
-                f"👤 **Name:** {character_data['char_name']}\n"
-                f"🎞️ **Anime:** {character_data['anime_name']}\n"
-                f"🏅 **Rarity:** {character_data['rarity']}\n"
-            )
+            if action == "added":
+                log_message = (
+                    f"🆕 **New Character Added!**\n\n"
+                    f"👤 **Name:** {character_data['char_name']}\n"
+                    f"🎞️ **Anime:** {character_data['anime_name']}\n"
+                    f"🏅 **Rarity:** {character_data['rarity']}\n"
+                )
+            elif action == "restored":
+                log_message = (
+                    f"♻️ **Character Restored from Recycle Bin!**\n\n"
+                    f"👤 **Name:** {character_data['char_name']}\n"
+                    f"🎞️ **Anime:** {character_data['anime_name']}\n"
+                    f"🏅 **Rarity:** {character_data['rarity']}\n"
+                )
+            elif action == "deleted":
+                log_message = (
+                    f"🗑️ **Character Moved to Recycle Bin!**\n\n"
+                    f"👤 **Name:** {character_data['char_name']}\n"
+                    f"🎞️ **Anime:** {character_data['anime_name']}\n"
+                    f"🏅 **Rarity:** {character_data['rarity']}\n"
+                )
+            else:
+                log_message = (
+                    f"👤 **Name:** {character_data['char_name']}\n"
+                    f"🎞️ **Anime:** {character_data['anime_name']}\n"
+                    f"🏅 **Rarity:** {character_data['rarity']}\n"
+                )
             
             if character_data.get('subrarity'):
                 log_message += f"💠 **Sub-Rarity:** {character_data['subrarity']}\n"
             
-            log_message += f"🧍 **Added by:** @{username} ({user_id})\n"
+            log_message += f"🧍 **Action by:** @{username} ({user_id})\n"
             log_message += f"🆔 **Character ID:** {character_data['character_id']}"
             
             # Send media if available
@@ -958,7 +1240,7 @@ class Helpers:
                     text=log_message
                 )
             
-            logger.info(f"Character sent to log channel: {config.LOG_CHANNEL}")
+            logger.info(f"Character {action} logged to: {config.LOG_CHANNEL}")
             return True
             
         except Exception as e:
@@ -1005,7 +1287,7 @@ helpers = Helpers()
 
 # ==================== MAIN BOT ====================
 class CharacterBot:
-    """Main bot class with both uploading and viewing systems"""
+    """Main bot class with recycle bin system"""
     
     def __init__(self):
         self.client = Client(
@@ -1021,10 +1303,12 @@ class CharacterBot:
     async def _show_main_menu(self, client: Client, callback_query: CallbackQuery = None, message: Message = None):
         """Show main menu"""
         total_chars = await db.get_character_count()
+        total_deleted = await db.get_deleted_characters_count()
         
         menu_text = (
             f"📚 **Character Database Menu**\n"
-            f"📊 **Total Characters:** {total_chars}\n\n"
+            f"📊 **Active Characters:** {total_chars}\n"
+            f"🗑️ **Deleted Characters:** {total_deleted}\n\n"
             "Select a rarity to browse characters:"
         )
         
@@ -1067,7 +1351,7 @@ class CharacterBot:
         await callback_query.answer()
     
     async def _show_all_characters(self, client: Client, callback_query: CallbackQuery, page: int, current_view: str):
-        """Show all characters"""
+        """Show all active characters"""
         characters, total_count = await db.get_all_characters_paginated(page)
         
         if not characters:
@@ -1079,7 +1363,7 @@ class CharacterBot:
         # Format message
         message_text = helpers.format_character_list(
             characters, page, total_count, 
-            "All Characters"
+            "All Active Characters"
         )
         
         # Create keyboard
@@ -1101,6 +1385,60 @@ class CharacterBot:
             keyboard.inline_keyboard.extend(buttons)
         
         # Add back button
+        keyboard.inline_keyboard.append([
+            InlineKeyboardButton(
+                "🔙 Back to Menu",
+                callback_data="menu_main"
+            )
+        ])
+        
+        await callback_query.message.edit_text(message_text, reply_markup=keyboard)
+        await callback_query.answer()
+    
+    async def _show_deleted_characters(self, client: Client, callback_query: CallbackQuery, page: int, current_view: str):
+        """Show deleted characters (recycle bin)"""
+        characters, total_count = await db.get_deleted_characters(page)
+        
+        if not characters:
+            await callback_query.answer("Recycle bin is empty", show_alert=True)
+            return
+        
+        total_pages = (total_count + config.ITEMS_PER_PAGE - 1) // config.ITEMS_PER_PAGE
+        
+        # Format message
+        message_text = helpers.format_deleted_character_list(characters, page, total_count)
+        
+        # Create keyboard
+        keyboard = helpers.create_pagination_keyboard(page, total_pages, "deleted_list", current_view)
+        
+        # Add action buttons for each character
+        buttons = []
+        for char in characters[:3]:  # Show first 3 characters
+            char_id = char.get('character_id')
+            if char_id:
+                buttons.append([
+                    InlineKeyboardButton(
+                        f"♻️ Restore {char.get('char_name', 'Unknown')[:10]}...",
+                        callback_data=f"restore_{char_id}"
+                    )
+                ])
+                buttons.append([
+                    InlineKeyboardButton(
+                        f"👁️ View {char.get('char_name', 'Unknown')[:10]}...",
+                        callback_data=f"deleted_info_{char_id}"
+                    )
+                ])
+        
+        if buttons:
+            keyboard.inline_keyboard.extend(buttons)
+        
+        # Add back button and cleanup button
+        keyboard.inline_keyboard.append([
+            InlineKeyboardButton(
+                "🔄 Cleanup Old",
+                callback_data=f"cleanup_deleted"
+            )
+        ])
         keyboard.inline_keyboard.append([
             InlineKeyboardButton(
                 "🔙 Back to Menu",
@@ -1248,7 +1586,7 @@ class CharacterBot:
         if buttons:
             keyboard.inline_keyboard.extend(buttons)
         
-        # Add back button
+        # Add back to menu button
         keyboard.inline_keyboard.append([
             InlineKeyboardButton(
                 "🔙 Back to Menu",
@@ -1307,24 +1645,47 @@ class CharacterBot:
     
     async def _show_character_info(self, client: Client, message: Message, character_id: int):
         """Show character information"""
+        # First check active characters
         character = await db.get_character_by_id(character_id)
+        is_deleted = False
+        
+        # If not found in active, check deleted
+        if not character:
+            character = await db.get_deleted_character_by_id(character_id)
+            is_deleted = True
         
         if not character:
             await message.reply_text(f"❌ Character with ID `{character_id}` not found!")
             return
         
         # Format character info
-        char_info = helpers.format_character_info(character)
+        if is_deleted:
+            char_info = helpers.format_deleted_character_info(character)
+            title = "🗑️ Deleted Character Information"
+        else:
+            char_info = helpers.format_character_info(character)
+            title = "Character Information"
         
-        # Create keyboard
-        keyboard = InlineKeyboardMarkup([
-            [
-                InlineKeyboardButton(
-                    "🔙 Back to Menu",
-                    callback_data="menu_main"
-                )
-            ]
-        ])
+        # Create keyboard based on status
+        if is_deleted:
+            keyboard = InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton("♻️ Restore Character", callback_data=f"restore_{character_id}"),
+                    InlineKeyboardButton("🗑️ Delete Permanently", callback_data=f"perm_delete_{character_id}")
+                ],
+                [
+                    InlineKeyboardButton("🔙 Back to Menu", callback_data="menu_main")
+                ]
+            ])
+        else:
+            keyboard = InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton("🗑️ Move to Recycle Bin", callback_data=f"soft_delete_{character_id}")
+                ],
+                [
+                    InlineKeyboardButton("🔙 Back to Menu", callback_data="menu_main")
+                ]
+            ])
         
         # Check if character has media
         if character.get('media_url') and character.get('media_type'):
@@ -1333,72 +1694,103 @@ class CharacterBot:
                     await client.send_photo(
                         chat_id=message.chat.id,
                         photo=character['media_url'],
-                        caption=f"**Character Information**\n\n{char_info}",
+                        caption=f"**{title}**\n\n{char_info}",
                         reply_markup=keyboard
                     )
                 elif character.get('media_type') == 'video':
                     await client.send_video(
                         chat_id=message.chat.id,
                         video=character['media_url'],
-                        caption=f"**Character Information**\n\n{char_info}",
+                        caption=f"**{title}**\n\n{char_info}",
                         reply_markup=keyboard
                     )
                 elif character.get('media_type') == 'audio':
                     await client.send_audio(
                         chat_id=message.chat.id,
                         audio=character['media_url'],
-                        caption=f"**Character Information**\n\n{char_info}",
+                        caption=f"**{title}**\n\n{char_info}",
                         reply_markup=keyboard
                     )
                 else:
                     await client.send_document(
                         chat_id=message.chat.id,
                         document=character['media_url'],
-                        caption=f"**Character Information**\n\n{char_info}",
+                        caption=f"**{title}**\n\n{char_info}",
                         reply_markup=keyboard
                     )
             except Exception as e:
                 logger.warning(f"Failed to send media: {e}")
                 char_info += f"\n\n📸 **Media URL:** {character['media_url']}"
-                await message.reply_text(f"**Character Information**\n\n{char_info}", reply_markup=keyboard)
+                await message.reply_text(f"**{title}**\n\n{char_info}", reply_markup=keyboard)
         else:
-            await message.reply_text(f"**Character Information**\n\n{char_info}", reply_markup=keyboard)
+            await message.reply_text(f"**{title}**\n\n{char_info}", reply_markup=keyboard)
     
     async def _show_character_info_callback(self, client: Client, callback_query: CallbackQuery, character_id: int):
         """Show character information from callback"""
+        # First check active characters
         character = await db.get_character_by_id(character_id)
+        is_deleted = False
+        
+        # If not found in active, check deleted
+        if not character:
+            character = await db.get_deleted_character_by_id(character_id)
+            is_deleted = True
         
         if not character:
             await callback_query.answer(f"Character with ID {character_id} not found", show_alert=True)
             return
         
         # Format character info
-        char_info = helpers.format_character_info(character)
+        if is_deleted:
+            char_info = helpers.format_deleted_character_info(character)
+            title = "🗑️ Deleted Character Information"
+        else:
+            char_info = helpers.format_character_info(character)
+            title = "Character Information"
         
-        # Create keyboard
-        keyboard = InlineKeyboardMarkup([
-            [
-                InlineKeyboardButton(
-                    "🔙 Back to Menu",
-                    callback_data="menu_main"
-                )
-            ]
-        ])
+        # Create keyboard based on status
+        if is_deleted:
+            keyboard = InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton("♻️ Restore Character", callback_data=f"restore_{character_id}"),
+                    InlineKeyboardButton("🗑️ Delete Permanently", callback_data=f"perm_delete_{character_id}")
+                ],
+                [
+                    InlineKeyboardButton("🔙 Back to Menu", callback_data="menu_main")
+                ]
+            ])
+        else:
+            keyboard = InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton("🗑️ Move to Recycle Bin", callback_data=f"soft_delete_{character_id}")
+                ],
+                [
+                    InlineKeyboardButton("🔙 Back to Menu", callback_data="menu_main")
+                ]
+            ])
         
         # Since we can't edit message to media, send a new message
-        await callback_query.message.reply_text(f"**Character Information**\n\n{char_info}", reply_markup=keyboard)
+        await callback_query.message.reply_text(f"**{title}**\n\n{char_info}", reply_markup=keyboard)
         await callback_query.answer()
     
     async def _show_stats(self, client: Client, callback_query: CallbackQuery):
         """Show database statistics"""
         # Get various stats
         total_chars = await db.get_character_count()
+        total_deleted = await db.get_deleted_characters_count()
         rarity_stats = await db.get_rarity_stats()
         top_uploaders = await db.get_top_uploaders(10)
         
+        # Clean up old deleted characters
+        cleaned_count = await db.cleanup_old_deleted()
+        
         # Format stats message
         stats_text = f"📈 **Database Statistics**\n\n"
-        stats_text += f"📊 **Total Characters:** {total_chars}\n\n"
+        stats_text += f"📊 **Active Characters:** {total_chars}\n"
+        stats_text += f"🗑️ **Deleted Characters:** {total_deleted}\n"
+        if cleaned_count > 0:
+            stats_text += f"🧹 **Recently Cleaned:** {cleaned_count} (older than {config.RECYCLE_BIN_MAX_DAYS} days)\n"
+        stats_text += f"📈 **Total (All Time):** {total_chars + total_deleted}\n\n"
         
         stats_text += "**Characters by Rarity:**\n"
         for rarity_num, rarity_data in config.RARITIES.items():
@@ -1421,6 +1813,7 @@ class CharacterBot:
         
         # Add keyboard
         keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🗑️ View Recycle Bin", callback_data="deleted_list_0_main")],
             [InlineKeyboardButton("🔄 Refresh Stats", callback_data="stats_refresh")],
             [InlineKeyboardButton("🔙 Back to Menu", callback_data="menu_main")]
         ])
@@ -1437,7 +1830,7 @@ class CharacterBot:
             """Handle /start command"""
             welcome_text = (
                 "👋 **Welcome to Character Database Bot!**\n\n"
-                "**This bot has two main functions:**\n\n"
+                "**This bot has three main functions:**\n\n"
                 "📤 **UPLOAD SYSTEM:**\n"
                 "• Upload characters with media files\n"
                 "• Supports photos, videos, audio, and documents\n"
@@ -1448,12 +1841,18 @@ class CharacterBot:
                 "• Search characters by name or anime\n"
                 "• View character details and statistics\n"
                 "• Paginated browsing\n\n"
+                "🗑️ **RECYCLE BIN SYSTEM:**\n"
+                "• Deleted characters go to recycle bin\n"
+                "• Restore deleted characters anytime\n"
+                "• Automatic cleanup after 30 days\n"
+                "• View deleted character history\n\n"
                 "**Main Commands:**\n"
                 "• /menu - Browse character database\n"
                 "• /upload - Upload a new character\n"
+                "• /restore - Restore deleted character\n"
+                "• /deleted - View recycle bin\n"
                 "• /search - Search characters\n"
                 "• /stats - View statistics\n"
-                "• /myuploads - View your uploads\n"
                 "• /help - Show detailed help\n\n"
                 "**New Rarity System:**\n"
                 "1. 🌸 Blossom\n"
@@ -1468,6 +1867,7 @@ class CharacterBot:
             keyboard = InlineKeyboardMarkup([
                 [InlineKeyboardButton("📚 Browse Database", callback_data="menu_main")],
                 [InlineKeyboardButton("📤 Upload Character", callback_data="upload_help")],
+                [InlineKeyboardButton("🗑️ View Recycle Bin", callback_data="deleted_list_0_main")],
                 [InlineKeyboardButton("ℹ️ Help Guide", callback_data="help_main")]
             ])
             
@@ -1497,6 +1897,11 @@ class CharacterBot:
                 "5. 🌌 Celestia (🌌 Astral, 👼 Seraph, 🔮 Arcane, 🧿 Divine Relic)\n"
                 "6. 🪽 Ascended (🪽 Mythborn, 👑 Sovereign, 👁️ Omniscient)\n"
                 "7. 🧬 One-of-One\n\n"
+                "🗑️ **RECYCLE BIN SYSTEM:**\n"
+                "• /deleted - View deleted characters\n"
+                "• /restore ID - Restore a deleted character\n"
+                "• /searchdeleted query - Search deleted characters\n"
+                "• Deleted characters auto-clean after 30 days\n\n"
                 "📚 **BROWSING CHARACTERS:**\n"
                 "• /menu - Browse by rarity\n"
                 "• /search query - Search characters\n"
@@ -1512,6 +1917,7 @@ class CharacterBot:
             keyboard = InlineKeyboardMarkup([
                 [InlineKeyboardButton("📚 Browse Database", callback_data="menu_main")],
                 [InlineKeyboardButton("📤 Upload Example", callback_data="upload_example")],
+                [InlineKeyboardButton("🗑️ Recycle Bin", callback_data="deleted_list_0_main")],
                 [InlineKeyboardButton("📊 View Stats", callback_data="stats_main")]
             ])
             
@@ -1694,7 +2100,7 @@ class CharacterBot:
                 # Send to log channel
                 username = message.from_user.username or message.from_user.first_name or "Unknown"
                 await helpers.send_to_log_channel(
-                    client, character.to_dict(), username, user_id
+                    client, character.to_dict(), username, user_id, "added"
                 )
                 
                 # Success message
@@ -1726,6 +2132,203 @@ class CharacterBot:
             except Exception as e:
                 logger.error(f"Error saving character: {e}")
                 await update_status("❌ Error saving character to database. Please try again.")
+        
+        @self.client.on_message(filters.command("restore"))
+        async def restore_command(client: Client, message: Message):
+            """Handle /restore command - restore deleted character"""
+            user_id = message.from_user.id
+            
+            # Check authorization (only sudo users can restore)
+            if not await db.is_sudo_user(user_id):
+                await message.reply_text("❌ You are not authorized to restore characters.")
+                return
+            
+            args = message.text.split()
+            if len(args) != 2:
+                await message.reply_text(
+                    "♻️ **Restore Deleted Character**\n\n"
+                    "**Usage:** `/restore character_id`\n\n"
+                    "**Example:** `/restore 123`\n\n"
+                    "You can find character IDs in the recycle bin using /deleted command."
+                )
+                return
+            
+            try:
+                character_id = int(args[1])
+                
+                # Check if character exists in deleted collection
+                character = await db.get_deleted_character_by_id(character_id)
+                if not character:
+                    await message.reply_text(f"❌ Character with ID `{character_id}` not found in recycle bin!")
+                    return
+                
+                # Restore character
+                restored = await db.restore_character(character_id)
+                
+                if restored:
+                    # Send to log channel
+                    username = message.from_user.username or message.from_user.first_name or "Unknown"
+                    await helpers.send_to_log_channel(
+                        client, character, username, user_id, "restored"
+                    )
+                    
+                    await message.reply_text(
+                        f"♻️ **Character #{character_id} Restored Successfully!**\n\n"
+                        f"👤 **Name:** {character.get('char_name', 'Unknown')}\n"
+                        f"🎞️ **Anime:** {character.get('anime_name', 'Unknown')}\n"
+                        f"🏅 **Rarity:** {character.get('rarity', 'Unknown')}\n\n"
+                        f"The character has been moved back to the active database."
+                    )
+                    
+                    logger.info(f"Character {character_id} restored by user {user_id}")
+                else:
+                    await message.reply_text("❌ Failed to restore character.")
+                    
+            except ValueError:
+                await message.reply_text("❌ Invalid character ID. Must be a number.")
+            except Exception as e:
+                logger.error(f"Error in restore command: {e}")
+                await message.reply_text("❌ Error restoring character.")
+        
+        @self.client.on_message(filters.command(["deleted", "recyclebin", "trash"]))
+        async def deleted_command(client: Client, message: Message):
+            """Show deleted characters (recycle bin)"""
+            user_id = message.from_user.id
+            
+            # Check authorization (only sudo users can view recycle bin)
+            if not await db.is_sudo_user(user_id):
+                await message.reply_text("❌ You are not authorized to view the recycle bin.")
+                return
+            
+            await message.reply_text("🗑️ Loading recycle bin...")
+            
+            # Get deleted characters
+            characters, total_count = await db.get_deleted_characters(page=0)
+            
+            if not characters:
+                await message.reply_text(
+                    "🗑️ **Recycle Bin is Empty!**\n\n"
+                    "No deleted characters found.\n"
+                    "Deleted characters are automatically cleaned up after 30 days."
+                )
+                return
+            
+            total_pages = (total_count + config.ITEMS_PER_PAGE - 1) // config.ITEMS_PER_PAGE
+            
+            # Format message
+            message_text = helpers.format_deleted_character_list(characters, 0, total_count)
+            
+            # Create keyboard
+            keyboard = helpers.create_pagination_keyboard(0, total_pages, "deleted_list", "main")
+            
+            # Add action buttons for each character
+            buttons = []
+            for char in characters[:3]:  # Show first 3 characters
+                char_id = char.get('character_id')
+                if char_id:
+                    buttons.append([
+                        InlineKeyboardButton(
+                            f"♻️ Restore {char.get('char_name', 'Unknown')[:10]}...",
+                            callback_data=f"restore_{char_id}"
+                        )
+                    ])
+                    buttons.append([
+                        InlineKeyboardButton(
+                            f"👁️ View {char.get('char_name', 'Unknown')[:10]}...",
+                            callback_data=f"deleted_info_{char_id}"
+                        )
+                    ])
+            
+            if buttons:
+                keyboard.inline_keyboard.extend(buttons)
+            
+            # Add back button and cleanup button
+            keyboard.inline_keyboard.append([
+                InlineKeyboardButton(
+                    "🔄 Cleanup Old",
+                    callback_data=f"cleanup_deleted"
+                )
+            ])
+            keyboard.inline_keyboard.append([
+                InlineKeyboardButton(
+                    "🔙 Back to Menu",
+                    callback_data="menu_main"
+                )
+            ])
+            
+            await message.reply_text(message_text, reply_markup=keyboard)
+        
+        @self.client.on_message(filters.command(["searchdeleted", "finddeleted"]))
+        async def searchdeleted_command(client: Client, message: Message):
+            """Search deleted characters"""
+            user_id = message.from_user.id
+            
+            # Check authorization
+            if not await db.is_sudo_user(user_id):
+                await message.reply_text("❌ You are not authorized to search deleted characters.")
+                return
+            
+            args = message.text.split()
+            if len(args) < 2:
+                await message.reply_text(
+                    "🔍 **Search Deleted Characters**\n\n"
+                    "**Usage:** `/searchdeleted query`\n\n"
+                    "**Examples:**\n"
+                    "• `/searchdeleted naruto`\n"
+                    "• `/searchdeleted bleach`\n\n"
+                    "You can search by character name or anime name."
+                )
+                return
+            
+            query = ' '.join(args[1:])
+            await message.reply_text(f"🔍 Searching deleted characters for: `{query}`...")
+            
+            # Perform search
+            characters, total_count = await db.search_deleted_characters(query, page=0)
+            
+            if not characters:
+                await message.reply_text(f"❌ No deleted characters found for: `{query}`")
+                return
+            
+            total_pages = (total_count + config.ITEMS_PER_PAGE - 1) // config.ITEMS_PER_PAGE
+            
+            # Format message
+            message_text = helpers.format_deleted_character_list(characters, 0, total_count)
+            message_text = f"🔍 **Search Results in Recycle Bin:**\n\n" + message_text
+            
+            # Create keyboard
+            keyboard = helpers.create_pagination_keyboard(0, total_pages, "search_deleted", query)
+            
+            # Add action buttons for each character
+            buttons = []
+            for char in characters[:3]:  # Show first 3 characters
+                char_id = char.get('character_id')
+                if char_id:
+                    buttons.append([
+                        InlineKeyboardButton(
+                            f"♻️ Restore {char.get('char_name', 'Unknown')[:10]}...",
+                            callback_data=f"restore_{char_id}"
+                        )
+                    ])
+                    buttons.append([
+                        InlineKeyboardButton(
+                            f"👁️ View {char.get('char_name', 'Unknown')[:10]}...",
+                            callback_data=f"deleted_info_{char_id}"
+                        )
+                    ])
+            
+            if buttons:
+                keyboard.inline_keyboard.extend(buttons)
+            
+            # Add back button
+            keyboard.inline_keyboard.append([
+                InlineKeyboardButton(
+                    "🔙 Back to Menu",
+                    callback_data="menu_main"
+                )
+            ])
+            
+            await message.reply_text(message_text, reply_markup=keyboard)
         
         @self.client.on_message(filters.command(["search", "find"]))
         async def search_command(client: Client, message: Message):
@@ -1794,12 +2397,20 @@ class CharacterBot:
             """Show database statistics"""
             # Get various stats
             total_chars = await db.get_character_count()
+            total_deleted = await db.get_deleted_characters_count()
             rarity_stats = await db.get_rarity_stats()
             top_uploaders = await db.get_top_uploaders(10)
             
+            # Clean up old deleted characters
+            cleaned_count = await db.cleanup_old_deleted()
+            
             # Format stats message
             stats_text = f"📈 **Database Statistics**\n\n"
-            stats_text += f"📊 **Total Characters:** {total_chars}\n\n"
+            stats_text += f"📊 **Active Characters:** {total_chars}\n"
+            stats_text += f"🗑️ **Deleted Characters:** {total_deleted}\n"
+            if cleaned_count > 0:
+                stats_text += f"🧹 **Recently Cleaned:** {cleaned_count} (older than {config.RECYCLE_BIN_MAX_DAYS} days)\n"
+            stats_text += f"📈 **Total (All Time):** {total_chars + total_deleted}\n\n"
             
             stats_text += "**Characters by Rarity:**\n"
             for rarity_num, rarity_data in config.RARITIES.items():
@@ -1822,6 +2433,7 @@ class CharacterBot:
             
             # Add keyboard
             keyboard = InlineKeyboardMarkup([
+                [InlineKeyboardButton("🗑️ View Recycle Bin", callback_data="deleted_list_0_main")],
                 [InlineKeyboardButton("🔄 Refresh Stats", callback_data="stats_refresh")],
                 [InlineKeyboardButton("🔙 Back to Menu", callback_data="menu_main")]
             ])
@@ -2083,10 +2695,12 @@ class CharacterBot:
         
         @self.client.on_message(filters.command(["delete", "remove", "del"]))
         async def delete_command(client: Client, message: Message):
-            """Handle /delete command - remove character"""
-            # Only owner can delete
-            if not helpers.is_owner(message.from_user.id):
-                await message.reply_text("❌ Only the bot owner can delete characters.")
+            """Handle /delete command - move character to recycle bin"""
+            user_id = message.from_user.id
+            
+            # Only sudo users can delete
+            if not await db.is_sudo_user(user_id):
+                await message.reply_text("❌ You are not authorized to delete characters.")
                 return
             
             args = message.text.split()
@@ -2094,7 +2708,8 @@ class CharacterBot:
                 await message.reply_text(
                     "🗑️ **Delete Character**\n\n"
                     "**Usage:** `/delete ID`\n\n"
-                    "**Example:** `/delete 123`"
+                    "**Example:** `/delete 123`\n\n"
+                    "**Note:** This moves the character to the recycle bin where it can be restored later."
                 )
                 return
             
@@ -2109,17 +2724,17 @@ class CharacterBot:
                 # Show confirmation
                 keyboard = InlineKeyboardMarkup([
                     [
-                        InlineKeyboardButton("✅ Yes, Delete", callback_data=f"confirm_delete_{character_id}"),
+                        InlineKeyboardButton("✅ Yes, Move to Recycle Bin", callback_data=f"soft_delete_{character_id}"),
                         InlineKeyboardButton("❌ Cancel", callback_data="cancel_delete")
                     ]
                 ])
                 
                 await message.reply_text(
-                    f"⚠️ **Are you sure you want to delete this character?**\n\n"
+                    f"⚠️ **Are you sure you want to move this character to the recycle bin?**\n\n"
                     f"**Name:** {character['char_name']}\n"
                     f"**Anime:** {character['anime_name']}\n"
                     f"**ID:** `{character_id}`\n\n"
-                    f"**This action cannot be undone!**",
+                    f"**Note:** The character can be restored from the recycle bin later.",
                     reply_markup=keyboard
                 )
                 
@@ -2160,6 +2775,13 @@ class CharacterBot:
                     current_view = parts[2] if len(parts) > 2 else "main"
                     await self._show_all_characters(client, callback_query, 0, current_view)
                 
+                # View deleted characters
+                elif data.startswith("deleted_list_"):
+                    parts = data.split("_")
+                    page = int(parts[2])
+                    current_view = parts[3] if len(parts) > 3 else "main"
+                    await self._show_deleted_characters(client, callback_query, page, current_view)
+                
                 # View characters by rarity
                 elif data.startswith("view_rarity_"):
                     parts = data.split("_")
@@ -2183,6 +2805,55 @@ class CharacterBot:
                     page = int(parts[2])
                     query = '_'.join(parts[3:])  # Reconstruct query
                     await self._show_search_results(client, callback_query, query, page)
+                
+                # Pagination for deleted search
+                elif data.startswith("search_deleted_page_"):
+                    parts = data.split("_")
+                    page = int(parts[3])
+                    query = '_'.join(parts[4:])  # Reconstruct query
+                    # Similar to show_search_results but for deleted
+                    characters, total_count = await db.search_deleted_characters(query, page)
+                    
+                    if not characters:
+                        await callback_query.answer("No more results", show_alert=True)
+                        return
+                    
+                    total_pages = (total_count + config.ITEMS_PER_PAGE - 1) // config.ITEMS_PER_PAGE
+                    
+                    # Format message
+                    message_text = helpers.format_deleted_character_list(characters, page, total_count)
+                    message_text = f"🔍 **Search Results in Recycle Bin:**\n\n" + message_text
+                    
+                    # Create keyboard
+                    keyboard = helpers.create_pagination_keyboard(page, total_pages, "search_deleted", query)
+                    
+                    # Add action buttons
+                    buttons = []
+                    for char in characters[:3]:
+                        char_id = char.get('character_id')
+                        if char_id:
+                            buttons.append([
+                                InlineKeyboardButton(
+                                    f"♻️ Restore {char.get('char_name', 'Unknown')[:10]}...",
+                                    callback_data=f"restore_{char_id}"
+                                )
+                            ])
+                            buttons.append([
+                                InlineKeyboardButton(
+                                    f"👁️ View {char.get('char_name', 'Unknown')[:10]}...",
+                                    callback_data=f"deleted_info_{char_id}"
+                                )
+                            ])
+                    
+                    if buttons:
+                        keyboard.inline_keyboard.extend(buttons)
+                    
+                    keyboard.inline_keyboard.append([
+                        InlineKeyboardButton("🔙 Back to Menu", callback_data="menu_main")
+                    ])
+                    
+                    await callback_query.message.edit_text(message_text, reply_markup=keyboard)
+                    await callback_query.answer()
                 
                 # Pagination for myuploads
                 elif data.startswith("myuploads_page_"):
@@ -2218,6 +2889,173 @@ class CharacterBot:
                 elif data.startswith("info_"):
                     character_id = int(data.split("_")[1])
                     await self._show_character_info_callback(client, callback_query, character_id)
+                
+                # Deleted character info
+                elif data.startswith("deleted_info_"):
+                    character_id = int(data.split("_")[2])
+                    character = await db.get_deleted_character_by_id(character_id)
+                    
+                    if not character:
+                        await callback_query.answer("Character not found in recycle bin", show_alert=True)
+                        return
+                    
+                    char_info = helpers.format_deleted_character_info(character)
+                    
+                    keyboard = InlineKeyboardMarkup([
+                        [
+                            InlineKeyboardButton("♻️ Restore Character", callback_data=f"restore_{character_id}"),
+                            InlineKeyboardButton("🗑️ Delete Permanently", callback_data=f"perm_delete_{character_id}")
+                        ],
+                        [
+                            InlineKeyboardButton("🔙 Back to Recycle Bin", callback_data="deleted_list_0_main")
+                        ]
+                    ])
+                    
+                    await callback_query.message.reply_text(f"**🗑️ Deleted Character Information**\n\n{char_info}", reply_markup=keyboard)
+                    await callback_query.answer()
+                
+                # Soft delete (move to recycle bin)
+                elif data.startswith("soft_delete_"):
+                    character_id = int(data.split("_")[2])
+                    
+                    # Check authorization
+                    if not await db.is_sudo_user(user_id):
+                        await callback_query.answer("You are not authorized to delete characters", show_alert=True)
+                        return
+                    
+                    # Move to recycle bin
+                    deleted = await db.soft_delete_character(character_id, user_id, "Deleted via button")
+                    
+                    if deleted:
+                        character = await db.get_deleted_character_by_id(character_id)
+                        if character:
+                            # Send to log channel
+                            username = callback_query.from_user.username or callback_query.from_user.first_name or "Unknown"
+                            await helpers.send_to_log_channel(
+                                client, character, username, user_id, "deleted"
+                            )
+                        
+                        await callback_query.message.edit_text(
+                            f"🗑️ **Character `{character_id}` moved to recycle bin!**\n\n"
+                            f"The character has been moved to the recycle bin and can be restored later.\n\n"
+                            f"Use `/restore {character_id}` or the recycle bin menu to restore it."
+                        )
+                        logger.info(f"Character {character_id} moved to recycle bin by user {user_id}")
+                    else:
+                        await callback_query.answer("Failed to delete character", show_alert=True)
+                
+                # Restore character
+                elif data.startswith("restore_"):
+                    character_id = int(data.split("_")[1])
+                    
+                    # Check authorization
+                    if not await db.is_sudo_user(user_id):
+                        await callback_query.answer("You are not authorized to restore characters", show_alert=True)
+                        return
+                    
+                    # Restore character
+                    restored = await db.restore_character(character_id)
+                    
+                    if restored:
+                        character = await db.get_character_by_id(character_id)
+                        if character:
+                            # Send to log channel
+                            username = callback_query.from_user.username or callback_query.from_user.first_name or "Unknown"
+                            await helpers.send_to_log_channel(
+                                client, character, username, user_id, "restored"
+                            )
+                        
+                        await callback_query.message.edit_text(
+                            f"♻️ **Character `{character_id}` restored successfully!**\n\n"
+                            f"The character has been moved back to the active database.\n\n"
+                            f"Use `/info {character_id}` to view the character."
+                        )
+                        logger.info(f"Character {character_id} restored by user {user_id}")
+                    else:
+                        await callback_query.answer("Failed to restore character", show_alert=True)
+                
+                # Permanent delete
+                elif data.startswith("perm_delete_"):
+                    character_id = int(data.split("_")[2])
+                    
+                    # Only owner can permanently delete
+                    if not helpers.is_owner(user_id):
+                        await callback_query.answer("Only the bot owner can permanently delete characters", show_alert=True)
+                        return
+                    
+                    # Show confirmation
+                    keyboard = InlineKeyboardMarkup([
+                        [
+                            InlineKeyboardButton("⚠️ Yes, Delete Permanently", callback_data=f"confirm_perm_delete_{character_id}"),
+                            InlineKeyboardButton("❌ Cancel", callback_data="cancel_perm_delete")
+                        ]
+                    ])
+                    
+                    await callback_query.message.edit_text(
+                        f"🚨 **Permanent Deletion Warning!**\n\n"
+                        f"Are you sure you want to **PERMANENTLY DELETE** character `{character_id}`?\n\n"
+                        f"**This action cannot be undone!**\n"
+                        f"The character will be removed from the recycle bin forever.\n\n"
+                        f"⚠️ **This is irreversible!**",
+                        reply_markup=keyboard
+                    )
+                    await callback_query.answer()
+                
+                # Confirm permanent delete
+                elif data.startswith("confirm_perm_delete_"):
+                    character_id = int(data.split("_")[3])
+                    
+                    # Only owner can permanently delete
+                    if not helpers.is_owner(user_id):
+                        await callback_query.answer("Unauthorized", show_alert=True)
+                        return
+                    
+                    # Get character info before deleting
+                    character = await db.get_deleted_character_by_id(character_id)
+                    
+                    # Permanently delete
+                    deleted = await db.permanent_delete_character(character_id)
+                    
+                    if deleted:
+                        await callback_query.message.edit_text(
+                            f"💀 **Character `{character_id}` permanently deleted!**\n\n"
+                            f"The character has been permanently removed from the database.\n\n"
+                            f"**Name:** {character.get('char_name', 'Unknown') if character else 'Unknown'}\n"
+                            f"**This action cannot be undone.**"
+                        )
+                        logger.info(f"Character {character_id} permanently deleted by owner {user_id}")
+                    else:
+                        await callback_query.message.edit_text(f"❌ Failed to permanently delete character `{character_id}`")
+                    
+                    await callback_query.answer()
+                
+                # Cancel permanent delete
+                elif data == "cancel_perm_delete":
+                    await callback_query.message.edit_text("✅ Permanent deletion cancelled.")
+                    await callback_query.answer()
+                
+                # Cleanup old deleted characters
+                elif data == "cleanup_deleted":
+                    # Only owner can cleanup
+                    if not helpers.is_owner(user_id):
+                        await callback_query.answer("Only the bot owner can cleanup old deleted characters", show_alert=True)
+                        return
+                    
+                    cleaned_count = await db.cleanup_old_deleted()
+                    
+                    if cleaned_count > 0:
+                        await callback_query.message.edit_text(
+                            f"🧹 **Cleanup Complete!**\n\n"
+                            f"Removed {cleaned_count} old deleted characters (older than {config.RECYCLE_BIN_MAX_DAYS} days).\n\n"
+                            f"The recycle bin has been cleaned up."
+                        )
+                        logger.info(f"Cleaned up {cleaned_count} old deleted characters by owner {user_id}")
+                    else:
+                        await callback_query.message.edit_text(
+                            "🧹 **No old characters to clean up.**\n\n"
+                            "All deleted characters are within the retention period."
+                        )
+                    await callback_query.answer()
                 
                 # Search from menu
                 elif data == "search_main":
@@ -2286,12 +3124,14 @@ class CharacterBot:
                         "**Main Functions:**\n"
                         "📤 Upload characters with media\n"
                         "📚 Browse character database\n"
+                        "🗑️ Recycle bin system (restore deleted)\n"
                         "🔍 Search for characters\n"
                         "📊 View statistics\n\n"
                         "**Use buttons below to explore:**",
                         reply_markup=InlineKeyboardMarkup([
                             [InlineKeyboardButton("📤 Upload System", callback_data="upload_help")],
                             [InlineKeyboardButton("📚 Viewing System", callback_data="menu_main")],
+                            [InlineKeyboardButton("🗑️ Recycle Bin", callback_data="deleted_list_0_main")],
                             [InlineKeyboardButton("📊 Statistics", callback_data="stats_main")]
                         ])
                     )
@@ -2301,28 +3141,44 @@ class CharacterBot:
                 elif data.startswith("confirm_delete_"):
                     character_id = int(data.split("_")[2])
                     
-                    deleted = await db.delete_character(character_id)
+                    # Only owner can permanently delete (old system)
+                    if not helpers.is_owner(user_id):
+                        await callback_query.answer("Unauthorized", show_alert=True)
+                        return
+                    
+                    # For backward compatibility, use soft delete
+                    deleted = await db.soft_delete_character(character_id, user_id, "Deleted via old delete command")
+                    
                     if deleted:
-                        await callback_query.message.edit_text(f"✅ Character `{character_id}` deleted successfully!")
-                        logger.info(f"Character {character_id} deleted by user {callback_query.from_user.id}")
+                        await callback_query.message.edit_text(f"🗑️ Character `{character_id}` moved to recycle bin!")
+                        logger.info(f"Character {character_id} moved to recycle bin by user {user_id}")
                     else:
                         await callback_query.message.edit_text(f"❌ Failed to delete character `{character_id}`")
                     
                     await callback_query.answer()
                 
                 elif data == "cancel_delete":
-                    await callback_query.message.edit_text("❌ Delete cancelled.")
+                    await callback_query.message.edit_text("✅ Delete cancelled.")
                     await callback_query.answer()
+                
+                # Unknown callback
+                else:
+                    await callback_query.answer("Unknown action", show_alert=True)
                     
             except Exception as e:
                 logger.error(f"Error handling callback: {e}")
-                await callback_query.answer("An error occurred.", show_alert=True)
+                await callback_query.answer("An error occurred", show_alert=True)
     
     async def start(self):
         """Start the bot"""
         try:
             await db.connect()
             logger.info("Database connection established")
+            
+            # Clean up old deleted characters on startup
+            cleaned = await db.cleanup_old_deleted()
+            if cleaned > 0:
+                logger.info(f"Cleaned up {cleaned} old deleted characters on startup")
             
             await self.client.start()
             logger.info("Bot started successfully")
