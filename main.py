@@ -5,7 +5,7 @@ import asyncio
 import aiohttp
 import uuid
 from datetime import datetime, timedelta
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Set
 
 from pyrogram import Client, filters
 from pyrogram.types import (
@@ -45,35 +45,22 @@ class Config:
     UPLOAD_TIMEOUT = 60
     MAX_FILE_SIZE = 50 * 1024 * 1024  # 50MB
     
-    # Rarity system
-    RARITIES = {
-        1: {"name": "🌸 Blossom", "subs": [], "emoji": "🌸"},
-        2: {"name": "✨ Starlit", "subs": [], "emoji": "✨"},
-        3: {
-            "name": "🩸 Crimson",
-            "subs": ["🩸 Bloodline", "🕯️ Cursed", "🌑 Shadowborn"],
-            "emoji": "🩸"
-        },
-        4: {
-            "name": "🌘 Eclipse",
-            "subs": ["🌘 Lunar", "☀️ Solar", "🌓 Twilight", "🕳️ Void"],
-            "emoji": "🌘"
-        },
-        5: {
-            "name": "🌌 Celestia",
-            "subs": ["🌌 Astral", "👼 Seraph", "🔮 Arcane", "🧿 Divine Relic"],
-            "emoji": "🌌"
-        },
-        6: {
-            "name": "🪽 Ascended",
-            "subs": ["🪽 Mythborn", "👑 Sovereign", "👁️ Omniscient"],
-            "emoji": "🪽"
-        },
-        7: {
-            "name": "🧬 One-of-One",
-            "subs": [],
-            "emoji": "🧬"
-        }
+    # New rarity system (1-14)
+    RARITY_MAP = {
+        1: "⚪ Common",
+        2: "🟢 Uncommon",
+        3: "🔴 Rare",
+        4: "🟡 Legendary",
+        5: "🎐 Limited Edition",
+        6: "💎 Premium",
+        7: "🥵 Exotic",
+        8: "🎬 Animated",
+        9: "🌩️ Thundra",
+        10: "☄️ Galvoria",
+        11: "🌈 Neon",
+        12: "🛡️ Supreme",
+        13: "🔮 Crystal",
+        14: "🎤 Celebrity",
     }
     
     # Pagination settings
@@ -81,6 +68,19 @@ class Config:
     
     # Recycle bin settings
     RECYCLE_BIN_MAX_DAYS = 30
+    
+    # Sudo permission levels
+    PERMISSIONS = {
+        'upload': 'Upload characters',
+        'delete': 'Delete characters',
+        'edit': 'Edit characters',
+        'restore': 'Restore deleted characters',
+        'fill': 'Fill deleted slots',
+        'view_deleted': 'View recycle bin',
+        'add_sudo': 'Add sudo users',
+        'remove_sudo': 'Remove sudo users',
+        'reset_db': 'Reset database'
+    }
 
 config = Config()
 
@@ -95,7 +95,6 @@ class Character:
         rarity: str,
         character_id: int,
         media_url: Optional[str] = None,
-        subrarity: Optional[str] = None,
         media_type: Optional[str] = None,
         added_by: int = None,
         timestamp: Optional[datetime] = None,
@@ -108,7 +107,6 @@ class Character:
         self.rarity = rarity
         self.character_id = character_id
         self.media_url = media_url
-        self.subrarity = subrarity
         self.media_type = media_type
         self.added_by = added_by
         self.timestamp = timestamp or datetime.utcnow()
@@ -124,7 +122,6 @@ class Character:
             "rarity": self.rarity,
             "character_id": self.character_id,
             "media_url": self.media_url,
-            "subrarity": self.subrarity,
             "media_type": self.media_type,
             "added_by": self.added_by,
             "timestamp": self.timestamp
@@ -148,7 +145,6 @@ class Character:
             rarity=data.get("rarity"),
             character_id=data.get("character_id"),
             media_url=data.get("media_url"),
-            subrarity=data.get("subrarity"),
             media_type=data.get("media_type"),
             added_by=data.get("added_by"),
             timestamp=data.get("timestamp"),
@@ -168,6 +164,7 @@ class MongoDB:
         self.deleted_characters = None
         self.counters = None
         self.sudo_users = None
+        self.db_warnings = None  # For reset warnings
     
     async def connect(self):
         """Establish connection to MongoDB"""
@@ -178,12 +175,16 @@ class MongoDB:
             self.deleted_characters = self.db.deleted_characters
             self.counters = self.db.counters
             self.sudo_users = self.db.sudo_users
+            self.db_warnings = self.db.db_warnings
             
             # Create indexes
             await self._create_indexes()
             
             # Initialize counter
             await self._initialize_counter()
+            
+            # Initialize warnings
+            await self._initialize_warnings()
             
             logger.info("Connected to MongoDB successfully")
             
@@ -222,6 +223,23 @@ class MongoDB:
             await asyncio.get_event_loop().run_in_executor(
                 None,
                 lambda: self.counters.insert_one({"_id": "character_id", "seq": 0})
+            )
+    
+    async def _initialize_warnings(self):
+        """Initialize reset warnings collection"""
+        warning_exists = await asyncio.get_event_loop().run_in_executor(
+            None,
+            lambda: self.db_warnings.find_one({"_id": "reset_warnings"})
+        )
+        
+        if not warning_exists:
+            await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: self.db_warnings.insert_one({
+                    "_id": "reset_warnings",
+                    "warnings": {},
+                    "last_warning": None
+                })
             )
     
     async def disconnect(self):
@@ -284,37 +302,21 @@ class MongoDB:
         character_id: int, 
         char_name: str, 
         anime_name: str, 
-        rarity: str, 
-        subrarity: Optional[str] = None
+        rarity: str
     ) -> bool:
         """Update character details"""
         try:
-            update_doc = {
-                "char_name": char_name,
-                "anime_name": anime_name,
-                "rarity": rarity
-            }
-            
-            if subrarity:
-                update_doc["subrarity"] = subrarity
-                result = await asyncio.get_event_loop().run_in_executor(
-                    None,
-                    lambda: self.characters.update_one(
-                        {"character_id": character_id},
-                        {"$set": update_doc}
-                    )
+            result = await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: self.characters.update_one(
+                    {"character_id": character_id},
+                    {"$set": {
+                        "char_name": char_name,
+                        "anime_name": anime_name,
+                        "rarity": rarity
+                    }}
                 )
-            else:
-                result = await asyncio.get_event_loop().run_in_executor(
-                    None,
-                    lambda: self.characters.update_one(
-                        {"character_id": character_id},
-                        {
-                            "$set": update_doc,
-                            "$unset": {"subrarity": ""}
-                        }
-                    )
-                )
+            )
             return result.modified_count > 0
         except PyMongoError as e:
             logger.error(f"Error updating character: {e}")
@@ -502,6 +504,122 @@ class MongoDB:
             logger.error(f"Error cleaning up old deleted characters: {e}")
             return 0
     
+    # ==================== DATABASE RESET FUNCTIONS ====================
+    async def add_reset_warning(self, user_id: int) -> tuple[int, datetime]:
+        """Add a reset warning for a user"""
+        try:
+            result = await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: self.db_warnings.find_one_and_update(
+                    {"_id": "reset_warnings"},
+                    {
+                        "$set": {
+                            f"warnings.{user_id}.last_warning": datetime.utcnow(),
+                            "last_warning": datetime.utcnow()
+                        },
+                        "$inc": {f"warnings.{user_id}.count": 1}
+                    },
+                    upsert=True,
+                    return_document=True
+                )
+            )
+            
+            warnings = result.get("warnings", {})
+            user_warnings = warnings.get(str(user_id), {})
+            warning_count = user_warnings.get("count", 1)
+            
+            return warning_count, datetime.utcnow()
+            
+        except PyMongoError as e:
+            logger.error(f"Error adding reset warning: {e}")
+            return 1, datetime.utcnow()
+    
+    async def get_reset_warnings(self, user_id: int) -> tuple[int, Optional[datetime]]:
+        """Get reset warnings for a user"""
+        try:
+            result = await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: self.db_warnings.find_one({"_id": "reset_warnings"})
+            )
+            
+            if result and "warnings" in result:
+                warnings = result["warnings"]
+                user_warnings = warnings.get(str(user_id), {})
+                warning_count = user_warnings.get("count", 0)
+                last_warning = user_warnings.get("last_warning")
+                if last_warning and isinstance(last_warning, str):
+                    last_warning = datetime.fromisoformat(last_warning.replace('Z', '+00:00'))
+                return warning_count, last_warning
+            
+            return 0, None
+            
+        except PyMongoError as e:
+            logger.error(f"Error getting reset warnings: {e}")
+            return 0, None
+    
+    async def clear_reset_warnings(self, user_id: int) -> bool:
+        """Clear reset warnings for a user"""
+        try:
+            result = await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: self.db_warnings.update_one(
+                    {"_id": "reset_warnings"},
+                    {"$unset": {f"warnings.{user_id}": ""}}
+                )
+            )
+            return result.modified_count > 0
+        except PyMongoError as e:
+            logger.error(f"Error clearing reset warnings: {e}")
+            return False
+    
+    async def reset_database(self) -> bool:
+        """Reset the entire database (clear all collections)"""
+        try:
+            # Drop all collections
+            await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: self.characters.drop()
+            )
+            await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: self.deleted_characters.drop()
+            )
+            
+            # Reset counter
+            await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: self.counters.delete_one({"_id": "character_id"})
+            )
+            
+            # Reinitialize counter
+            await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: self.counters.insert_one({"_id": "character_id", "seq": 0})
+            )
+            
+            # Clear all warnings
+            await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: self.db_warnings.delete_one({"_id": "reset_warnings"})
+            )
+            
+            # Reinitialize warnings
+            await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: self.db_warnings.insert_one({
+                    "_id": "reset_warnings",
+                    "warnings": {},
+                    "last_warning": None
+                })
+            )
+            
+            logger.info("Database reset successfully")
+            return True
+            
+        except PyMongoError as e:
+            logger.error(f"Error resetting database: {e}")
+            return False
+    
     # ==================== SEARCH AND LIST OPERATIONS ====================
     async def search_characters(self, query: str, limit: int = 20) -> List[Dict[str, Any]]:
         """Search active characters by name or anime"""
@@ -574,33 +692,6 @@ class MongoDB:
             
         except PyMongoError as e:
             logger.error(f"Error fetching characters by rarity: {e}")
-            return [], 0
-    
-    async def get_characters_by_subrarity(self, rarity_name: str, subrarity: str, page: int = 0) -> tuple[List[Dict[str, Any]], int]:
-        """Get characters by sub-rarity with pagination"""
-        try:
-            skip = page * config.ITEMS_PER_PAGE
-            
-            characters = await asyncio.get_event_loop().run_in_executor(
-                None,
-                lambda: list(self.characters.find({
-                    "rarity": rarity_name,
-                    "subrarity": subrarity
-                }).skip(skip).limit(config.ITEMS_PER_PAGE))
-            )
-            
-            total_count = await asyncio.get_event_loop().run_in_executor(
-                None,
-                lambda: self.characters.count_documents({
-                    "rarity": rarity_name,
-                    "subrarity": subrarity
-                })
-            )
-            
-            return characters, total_count
-            
-        except PyMongoError as e:
-            logger.error(f"Error fetching characters by sub-rarity: {e}")
             return [], 0
     
     async def get_all_characters_paginated(self, page: int = 0) -> tuple[List[Dict[str, Any]], int]:
@@ -773,14 +864,25 @@ class MongoDB:
             return []
     
     # ==================== SUDO USER OPERATIONS ====================
-    async def add_sudo_user(self, user_id: int) -> bool:
-        """Add a sudo user"""
+    async def add_sudo_user(self, user_id: int, permissions: List[str]) -> bool:
+        """Add a sudo user with specific permissions"""
         try:
+            sudo_doc = {
+                "user_id": user_id,
+                "permissions": permissions,
+                "added_at": datetime.utcnow(),
+                "added_by": config.OWNER_ID
+            }
+            
             result = await asyncio.get_event_loop().run_in_executor(
                 None,
-                lambda: self.sudo_users.insert_one({"user_id": user_id})
+                lambda: self.sudo_users.update_one(
+                    {"user_id": user_id},
+                    {"$set": sudo_doc},
+                    upsert=True
+                )
             )
-            return result.inserted_id is not None
+            return True
         except PyMongoError as e:
             logger.error(f"Error adding sudo user: {e}")
             return False
@@ -797,18 +899,64 @@ class MongoDB:
             logger.error(f"Error removing sudo user: {e}")
             return False
     
-    async def is_sudo_user(self, user_id: int) -> bool:
-        """Check if user is sudo user"""
+    async def get_sudo_user(self, user_id: int) -> Optional[Dict[str, Any]]:
+        """Get sudo user details"""
         try:
-            if user_id == config.OWNER_ID:
-                return True
             sudo_user = await asyncio.get_event_loop().run_in_executor(
                 None,
                 lambda: self.sudo_users.find_one({"user_id": user_id})
             )
-            return sudo_user is not None
+            return sudo_user
         except PyMongoError as e:
-            logger.error(f"Error checking sudo user: {e}")
+            logger.error(f"Error getting sudo user: {e}")
+            return None
+    
+    async def get_all_sudo_users(self) -> List[Dict[str, Any]]:
+        """Get all sudo users"""
+        try:
+            sudo_users = await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: list(self.sudo_users.find({}))
+            )
+            return sudo_users
+        except PyMongoError as e:
+            logger.error(f"Error getting sudo users: {e}")
+            return []
+    
+    async def has_permission(self, user_id: int, permission: str) -> bool:
+        """Check if user has specific permission"""
+        try:
+            if user_id == config.OWNER_ID:
+                return True
+            
+            sudo_user = await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: self.sudo_users.find_one({"user_id": user_id})
+            )
+            
+            if not sudo_user:
+                return False
+            
+            permissions = sudo_user.get("permissions", [])
+            return permission in permissions
+            
+        except PyMongoError as e:
+            logger.error(f"Error checking permission: {e}")
+            return False
+    
+    async def update_sudo_permissions(self, user_id: int, permissions: List[str]) -> bool:
+        """Update sudo user permissions"""
+        try:
+            result = await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: self.sudo_users.update_one(
+                    {"user_id": user_id},
+                    {"$set": {"permissions": permissions}}
+                )
+            )
+            return result.modified_count > 0
+        except PyMongoError as e:
+            logger.error(f"Error updating sudo permissions: {e}")
             return False
 
 # Global database instance
@@ -949,10 +1097,6 @@ class Helpers:
         info = f"👤 **Name:** {character_data.get('char_name', 'N/A')}\n"
         info += f"🎞️ **Anime:** {character_data.get('anime_name', 'N/A')}\n"
         info += f"🏅 **Rarity:** {character_data.get('rarity', 'N/A')}\n"
-        
-        if character_data.get('subrarity'):
-            info += f"💠 **Sub-Rarity:** {character_data.get('subrarity')}\n"
-        
         info += f"🆔 **ID:** `{character_data.get('character_id', 'N/A')}`\n"
         
         if character_data.get('timestamp'):
@@ -975,10 +1119,6 @@ class Helpers:
         info += f"👤 **Name:** {character_data.get('char_name', 'N/A')}\n"
         info += f"🎞️ **Anime:** {character_data.get('anime_name', 'N/A')}\n"
         info += f"🏅 **Rarity:** {character_data.get('rarity', 'N/A')}\n"
-        
-        if character_data.get('subrarity'):
-            info += f"💠 **Sub-Rarity:** {character_data.get('subrarity')}\n"
-        
         info += f"🆔 **ID:** `{character_data.get('character_id', 'N/A')}`\n"
         
         if character_data.get('timestamp'):
@@ -1010,9 +1150,12 @@ class Helpers:
     @staticmethod
     def get_rarity_emoji(rarity_name: str) -> str:
         """Get emoji for rarity name"""
-        for rarity_num, rarity_data in config.RARITIES.items():
-            if rarity_data["name"] == rarity_name:
-                return rarity_data["emoji"]
+        # Extract emoji from rarity string (first character)
+        if rarity_name and len(rarity_name) > 0:
+            # Find the first character that's not a letter or number (likely emoji)
+            for char in rarity_name:
+                if not char.isalnum() and char not in ' .-_':
+                    return char
         return "⚪"
     
     @staticmethod
@@ -1053,14 +1196,24 @@ class Helpers:
         """Create keyboard with all rarity options"""
         keyboard = []
         
-        # Add main rarities
-        for rarity_num, rarity_data in config.RARITIES.items():
-            keyboard.append([
-                InlineKeyboardButton(
-                    f"{rarity_data['emoji']} {rarity_data['name']}",
-                    callback_data=f"rarity_{rarity_num}_{current_view}"
-                )
-            ])
+        # Add main rarities in 2 columns
+        row = []
+        for rarity_num, rarity_name in config.RARITY_MAP.items():
+            emoji = Helpers.get_rarity_emoji(rarity_name)
+            button = InlineKeyboardButton(
+                f"{emoji} {rarity_num}",
+                callback_data=f"rarity_{rarity_num}_{current_view}"
+            )
+            row.append(button)
+            
+            # Every 2 buttons, start a new row
+            if len(row) == 2:
+                keyboard.append(row)
+                row = []
+        
+        # Add any remaining buttons
+        if row:
+            keyboard.append(row)
         
         # Add all characters option
         keyboard.append([
@@ -1097,47 +1250,37 @@ class Helpers:
         return InlineKeyboardMarkup(keyboard)
     
     @staticmethod
-    def create_subrarity_keyboard(rarity_num: int, current_view: str = "main") -> InlineKeyboardMarkup:
-        """Create keyboard with sub-rarities for a specific rarity"""
+    def create_permission_keyboard(user_id: int, current_permissions: Set[str] = None) -> InlineKeyboardMarkup:
+        """Create keyboard for selecting sudo permissions"""
         keyboard = []
         
-        rarity_data = config.RARITIES.get(rarity_num, {})
-        if not rarity_data:
-            return InlineKeyboardMarkup([])
+        if current_permissions is None:
+            current_permissions = set()
         
-        # Add "All" option for this rarity
-        keyboard.append([
-            InlineKeyboardButton(
-                f"📂 All {rarity_data['name']} Characters",
-                callback_data=f"view_rarity_{rarity_num}_page_0_{current_view}"
-            )
-        ])
-        
-        # Add sub-rarities if they exist
-        subs = rarity_data.get("subs", [])
-        if subs:
-            keyboard.append([
-                InlineKeyboardButton(
-                    "📁 Sub-Rarities:",
-                    callback_data="noop"
-                )
-            ])
+        # Create permission buttons (2 per row)
+        row = []
+        for perm_key, perm_desc in config.PERMISSIONS.items():
+            # Create button with checkbox
+            checked = "✅" if perm_key in current_permissions else "⬜"
+            button_text = f"{checked} {perm_desc}"
             
-            for sub in subs:
-                sub_key = sub.replace(' ', '_').replace('️', '')
-                keyboard.append([
-                    InlineKeyboardButton(
-                        f"   {sub}",
-                        callback_data=f"view_sub_{rarity_num}_{sub_key}_page_0_{current_view}"
-                    )
-                ])
-        
-        # Add back button
-        keyboard.append([
-            InlineKeyboardButton(
-                "🔙 Back to Rarities",
-                callback_data=f"menu_{current_view}"
+            button = InlineKeyboardButton(
+                button_text,
+                callback_data=f"toggle_perm_{user_id}_{perm_key}"
             )
+            row.append(button)
+            
+            if len(row) == 2:
+                keyboard.append(row)
+                row = []
+        
+        if row:
+            keyboard.append(row)
+        
+        # Add action buttons
+        keyboard.append([
+            InlineKeyboardButton("✅ Save Permissions", callback_data=f"save_perms_{user_id}"),
+            InlineKeyboardButton("❌ Cancel", callback_data="cancel_perms")
         ])
         
         return InlineKeyboardMarkup(keyboard)
@@ -1156,9 +1299,8 @@ class Helpers:
         
         for i, char in enumerate(characters, start=start_num):
             emoji = Helpers.get_rarity_emoji(char.get('rarity', ''))
-            subrarity_text = f" ({char.get('subrarity', '')})" if char.get('subrarity') else ""
             message += f"{i}. **{char.get('char_name', 'Unknown')}** - {char.get('anime_name', 'Unknown')}\n"
-            message += f"   {emoji} {char.get('rarity', 'Unknown')}{subrarity_text} | ID: `{char.get('character_id', 'N/A')}`\n\n"
+            message += f"   {emoji} {char.get('rarity', 'Unknown')} | ID: `{char.get('character_id', 'N/A')}`\n\n"
         
         return message
     
@@ -1176,7 +1318,6 @@ class Helpers:
         
         for i, char in enumerate(characters, start=start_num):
             emoji = Helpers.get_rarity_emoji(char.get('rarity', ''))
-            subrarity_text = f" ({char.get('subrarity', '')})" if char.get('subrarity') else ""
             
             # Calculate days since deletion
             days_ago = 0
@@ -1184,7 +1325,7 @@ class Helpers:
                 days_ago = (datetime.utcnow() - char['deleted_at']).days
             
             message += f"{i}. **{char.get('char_name', 'Unknown')}** - {char.get('anime_name', 'Unknown')}\n"
-            message += f"   {emoji} {char.get('rarity', 'Unknown')}{subrarity_text}\n"
+            message += f"   {emoji} {char.get('rarity', 'Unknown')}\n"
             message += f"   🆔 `{char.get('character_id', 'N/A')}` | 🗑️ {days_ago}d ago\n\n"
         
         return message
@@ -1244,9 +1385,6 @@ class Helpers:
                     f"🏅 **Rarity:** {character_data['rarity']}\n"
                 )
             
-            if character_data.get('subrarity'):
-                log_message += f"💠 **Sub-Rarity:** {character_data['subrarity']}\n"
-            
             log_message += f"🧍 **Action by:** @{username} ({user_id})\n"
             log_message += f"🆔 **Character ID:** {character_data['character_id']}"
             
@@ -1298,34 +1436,15 @@ class Helpers:
             return False
     
     @staticmethod
-    def parse_rarity(rarity_input: str) -> tuple[Optional[str], Optional[str]]:
-        """Parse rarity input for new rarity system"""
+    def parse_rarity(rarity_input: str) -> Optional[str]:
+        """Parse rarity input for new rarity system (1-14)"""
         try:
-            parts = rarity_input.strip().split()
-            if not parts:
-                return None, None
-            
-            rarity_num = int(parts[0])
-            if rarity_num not in config.RARITIES:
-                return None, None
-            
-            rarity_data = config.RARITIES[rarity_num]
-            rarity_name = rarity_data["name"]
-            subrarity = None
-            
-            # Check for subrarity
-            if len(parts) > 1:
-                sub_input = ' '.join(parts[1:]).lower()
-                for sub in rarity_data.get("subs", []):
-                    sub_clean = sub.replace('️', '').replace(' ', '').lower()
-                    if sub_input in sub_clean or sub_input in sub.lower():
-                        subrarity = sub
-                        break
-            
-            return rarity_name, subrarity
-            
-        except (ValueError, IndexError):
-            return None, None
+            rarity_num = int(rarity_input.strip())
+            if 1 <= rarity_num <= 14:
+                return config.RARITY_MAP[rarity_num]
+            return None
+        except (ValueError, KeyError):
+            return None
     
     @staticmethod
     def is_owner(user_id: int) -> bool:
@@ -1346,6 +1465,7 @@ class CharacterBot:
             bot_token=config.BOT_TOKEN
         )
         self.user_states = {}
+        self.reset_warnings = {}  # Track reset warnings per user
         self._register_handlers()
     
     # ==================== COMMAND HANDLERS ====================
@@ -1362,7 +1482,7 @@ class CharacterBot:
                 "📤 **UPLOAD SYSTEM:**\n"
                 "• Upload characters with media files\n"
                 "• Supports photos, videos, audio, documents\n"
-                "• Uses new rarity system (1-7 with sub-rarities)\n"
+                "• Uses new rarity system (1-14)\n"
                 "• Automatically posts to @capture_database\n\n"
                 "📚 **VIEWING SYSTEM:**\n"
                 "• Browse characters by rarity\n"
@@ -1378,6 +1498,10 @@ class CharacterBot:
                 "• Fill deleted character slots with new characters\n"
                 "• Reuse deleted character IDs\n"
                 "• Maintains ID continuity\n\n"
+                "👑 **SUDO SYSTEM:**\n"
+                "• Granular permission control\n"
+                "• Different access levels\n"
+                "• Inline permission management\n\n"
                 "**Main Commands:**\n"
                 "• /menu - Browse character database\n"
                 "• /upload - Upload new character\n"
@@ -1386,15 +1510,25 @@ class CharacterBot:
                 "• /deleted - View recycle bin\n"
                 "• /search - Search characters\n"
                 "• /stats - View statistics\n"
-                "• /help - Show detailed help\n\n"
-                "**New Rarity System:**\n"
-                "1. 🌸 Blossom\n"
-                "2. ✨ Starlit\n"
-                "3. 🩸 Crimson (with sub-rarities)\n"
-                "4. 🌘 Eclipse (with sub-rarities)\n"
-                "5. 🌌 Celestia (with sub-rarities)\n"
-                "6. 🪽 Ascended (with sub-rarities)\n"
-                "7. 🧬 One-of-One"
+                "• /help - Show detailed help\n"
+                "• /sudolist - View sudo users (Owner only)\n"
+                "• /addsudo - Add sudo user (Owner only)\n"
+                "• /removesudo - Remove sudo user (Owner only)\n\n"
+                "**New Rarity System (1-14):**\n"
+                "1. ⚪ Common\n"
+                "2. 🟢 Uncommon\n"
+                "3. 🔴 Rare\n"
+                "4. 🟡 Legendary\n"
+                "5. 🎐 Limited Edition\n"
+                "6. 💎 Premium\n"
+                "7. 🥵 Exotic\n"
+                "8. 🎬 Animated\n"
+                "9. 🌩️ Thundra\n"
+                "10. ☄️ Galvoria\n"
+                "11. 🌈 Neon\n"
+                "12. 🛡️ Supreme\n"
+                "13. 🔮 Crystal\n"
+                "14. 🎤 Celebrity"
             )
             
             keyboard = InlineKeyboardMarkup([
@@ -1415,22 +1549,29 @@ class CharacterBot:
                 "ℹ️ **Character Bot Help Guide**\n\n"
                 "📤 **UPLOADING CHARACTERS:**\n"
                 "1. Send a photo/video/audio/document\n"
-                "2. Reply to it with: `/upload \"Character Name\" \"Anime Name\" Rarity [subrarity]`\n\n"
+                "2. Reply to it with: `/upload \"Character Name\" \"Anime Name\" Rarity`\n\n"
                 "**Examples:**\n"
                 "• `/upload \"Ichigo Kurosaki\" Bleach 3`\n"
-                "• `/upload \"Goku\" \"Dragon Ball\" 5 astral`\n\n"
+                "• `/upload \"Goku\" \"Dragon Ball\" 10`\n\n"
+                "**Rarity Numbers (1-14):**\n"
+                "1. ⚪ Common\n"
+                "2. 🟢 Uncommon\n"
+                "3. 🔴 Rare\n"
+                "4. 🟡 Legendary\n"
+                "5. 🎐 Limited Edition\n"
+                "6. 💎 Premium\n"
+                "7. 🥵 Exotic\n"
+                "8. 🎬 Animated\n"
+                "9. 🌩️ Thundra\n"
+                "10. ☄️ Galvoria\n"
+                "11. 🌈 Neon\n"
+                "12. 🛡️ Supreme\n"
+                "13. 🔮 Crystal\n"
+                "14. 🎤 Celebrity\n\n"
                 "🔄 **FILLING DELETED SLOTS:**\n"
-                "• `/fill ID \"Character Name\" \"Anime Name\" Rarity [subrarity]`\n"
-                "• `/fill oldest \"Character Name\" \"Anime Name\" Rarity [subrarity]`\n"
+                "• `/fill ID \"Character Name\" \"Anime Name\" Rarity`\n"
+                "• `/fill oldest \"Character Name\" \"Anime Name\" Rarity`\n"
                 "• Reuses deleted character IDs from recycle bin\n\n"
-                "**Rarity Numbers (1-7):**\n"
-                "1. 🌸 Blossom\n"
-                "2. ✨ Starlit\n"
-                "3. 🩸 Crimson (🩸 Bloodline, 🕯️ Cursed, 🌑 Shadowborn)\n"
-                "4. 🌘 Eclipse (🌘 Lunar, ☀️ Solar, 🌓 Twilight, 🕳️ Void)\n"
-                "5. 🌌 Celestia (🌌 Astral, 👼 Seraph, 🔮 Arcane, 🧿 Divine Relic)\n"
-                "6. 🪽 Ascended (🪽 Mythborn, 👑 Sovereign, 👁️ Omniscient)\n"
-                "7. 🧬 One-of-One\n\n"
                 "🗑️ **RECYCLE BIN SYSTEM:**\n"
                 "• /deleted - View deleted characters\n"
                 "• /restore ID - Restore a deleted character\n"
@@ -1444,9 +1585,16 @@ class CharacterBot:
                 "• /myuploads - View your uploads\n"
                 "• /stats - View database statistics\n\n"
                 "⚙️ **EDITING CHARACTERS:**\n"
-                "• /edit ID \"New Name\" \"New Anime\" Rarity [subrarity]\n"
+                "• /edit ID \"New Name\" \"New Anime\" Rarity\n"
                 "• /editmedia ID - Edit media (reply to new media)\n\n"
-                "**Note:** Only sudo users can upload/edit/fill/delete/restore characters."
+                "👑 **SUDO MANAGEMENT (Owner only):**\n"
+                "• /addsudo @username - Add sudo user\n"
+                "• /removesudo @username - Remove sudo user\n"
+                "• /sudolist - List all sudo users\n"
+                "• /setsudo @username - Set specific permissions\n\n"
+                "⚠️ **DATABASE RESET (Owner only):**\n"
+                "• /reset - Reset database (requires 3 confirmations)\n\n"
+                "**Note:** Commands require appropriate sudo permissions."
             )
             
             keyboard = InlineKeyboardMarkup([
@@ -1459,17 +1607,17 @@ class CharacterBot:
             
             await message.reply_text(help_text, reply_markup=keyboard)
         
-        # ========== UPLOAD COMMAND ==========
+        # ========== UPLOAD COMMAND (with permission check) ==========
         @self.client.on_message(filters.command("upload"))
         async def upload_command(client: Client, message: Message):
             """Handle /upload command"""
             user_id = message.from_user.id
             
-            # Check authorization
-            if not await db.is_sudo_user(user_id):
+            # Check authorization with permission
+            if not await db.has_permission(user_id, 'upload'):
                 await message.reply_text(
                     "❌ You are not authorized to upload characters.\n\n"
-                    "Only sudo users can upload. Contact the bot owner for access."
+                    "You need 'upload' permission. Contact the bot owner for access."
                 )
                 return
             
@@ -1483,18 +1631,25 @@ class CharacterBot:
                 await message.reply_text(
                     "❌ **Please reply to a media file with this command!**\n\n"
                     "**Usage:** Reply to a photo/video/audio/document with:\n"
-                    "`/upload \"Character Name\" \"Anime Name\" Rarity [subrarity]`\n\n"
+                    "`/upload \"Character Name\" \"Anime Name\" Rarity`\n\n"
                     "**Examples:**\n"
                     "• `/upload \"Ichigo Kurosaki\" Bleach 3`\n"
-                    "• `/upload \"Goku\" \"Dragon Ball\" 5 astral`\n\n"
-                    "**Rarity Numbers:**\n"
-                    "1. 🌸 Blossom\n"
-                    "2. ✨ Starlit\n"
-                    "3. 🩸 Crimson\n"
-                    "4. 🌘 Eclipse\n"
-                    "5. 🌌 Celestia\n"
-                    "6. 🪽 Ascended\n"
-                    "7. 🧬 One-of-One"
+                    "• `/upload \"Goku\" \"Dragon Ball\" 10`\n\n"
+                    "**Rarity Numbers (1-14):**\n"
+                    "1. ⚪ Common\n"
+                    "2. 🟢 Uncommon\n"
+                    "3. 🔴 Rare\n"
+                    "4. 🟡 Legendary\n"
+                    "5. 🎐 Limited Edition\n"
+                    "6. 💎 Premium\n"
+                    "7. 🥵 Exotic\n"
+                    "8. 🎬 Animated\n"
+                    "9. 🌩️ Thundra\n"
+                    "10. ☄️ Galvoria\n"
+                    "11. 🌈 Neon\n"
+                    "12. 🛡️ Supreme\n"
+                    "13. 🔮 Crystal\n"
+                    "14. 🎤 Celebrity"
                 )
                 return
             
@@ -1503,7 +1658,7 @@ class CharacterBot:
             if len(args) < 4:
                 await message.reply_text(
                     "❌ **Invalid syntax!**\n\n"
-                    "**Usage:** `/upload \"Character Name\" \"Anime Name\" Rarity [subrarity]`\n\n"
+                    "**Usage:** `/upload \"Character Name\" \"Anime Name\" Rarity`\n\n"
                     "**Note:** Use quotes for names with spaces\n"
                     "**Example:** `/upload \"Monkey D. Luffy\" OnePiece 3`"
                 )
@@ -1547,7 +1702,7 @@ class CharacterBot:
                 anime_name = parts[0]
                 text = ' '.join(parts[1:])
             
-            # The rest is rarity (and optional subrarity)
+            # The rest is rarity
             rarity_input = text.strip()
             
             if not char_name or not anime_name or not rarity_input:
@@ -1555,23 +1710,25 @@ class CharacterBot:
                 return
             
             # Parse rarity
-            rarity_name, subrarity = helpers.parse_rarity(rarity_input)
+            rarity_name = helpers.parse_rarity(rarity_input)
             if not rarity_name:
                 await message.reply_text(
                     "❌ Invalid rarity.\n\n"
-                    "**Valid Rarity Numbers:**\n"
-                    "1. 🌸 Blossom\n"
-                    "2. ✨ Starlit\n"
-                    "3. 🩸 Crimson\n"
-                    "4. 🌘 Eclipse\n"
-                    "5. 🌌 Celestia\n"
-                    "6. 🪽 Ascended\n"
-                    "7. 🧬 One-of-One\n\n"
-                    "**Some sub-rarities:**\n"
-                    "• For rarity 3: bloodline, cursed, shadowborn\n"
-                    "• For rarity 4: lunar, solar, twilight, void\n"
-                    "• For rarity 5: astral, seraph, arcane, divinerelic\n"
-                    "• For rarity 6: mythborn, sovereign, omniscient"
+                    "**Valid Rarity Numbers (1-14):**\n"
+                    "1. ⚪ Common\n"
+                    "2. 🟢 Uncommon\n"
+                    "3. 🔴 Rare\n"
+                    "4. 🟡 Legendary\n"
+                    "5. 🎐 Limited Edition\n"
+                    "6. 💎 Premium\n"
+                    "7. 🥵 Exotic\n"
+                    "8. 🎬 Animated\n"
+                    "9. 🌩️ Thundra\n"
+                    "10. ☄️ Galvoria\n"
+                    "11. 🌈 Neon\n"
+                    "12. 🛡️ Supreme\n"
+                    "13. 🔮 Crystal\n"
+                    "14. 🎤 Celebrity"
                 )
                 return
             
@@ -1623,7 +1780,6 @@ class CharacterBot:
                 character_id=character_id,
                 media_url=media_url,
                 media_type=media_type,
-                subrarity=subrarity,
                 added_by=user_id
             )
             
@@ -1642,12 +1798,6 @@ class CharacterBot:
                     f"👤 **Name:** {char_name}\n"
                     f"🎞️ **Anime:** {anime_name}\n"
                     f"🏅 **Rarity:** {rarity_name}\n"
-                )
-                
-                if subrarity:
-                    success_text += f"💠 **Sub-Rarity:** {subrarity}\n"
-                
-                success_text += (
                     f"\n📸 **Media:** Uploaded to Catbox\n"
                     f"📢 **Posted to:** @capture_database\n"
                     f"🆔 **Character ID:** `{character_id}`\n\n"
@@ -1666,17 +1816,296 @@ class CharacterBot:
                 logger.error(f"Error saving character: {e}")
                 await update_status("❌ Error saving character to database. Please try again.")
         
-        # ========== FILL COMMAND ==========
+        # ========== ADDSUDO COMMAND (Owner only) ==========
+        @self.client.on_message(filters.command("addsudo"))
+        async def addsudo_command(client: Client, message: Message):
+            """Add sudo user (Owner only)"""
+            user_id = message.from_user.id
+            
+            if not helpers.is_owner(user_id):
+                await message.reply_text("❌ Only the bot owner can use this command.")
+                return
+            
+            args = message.text.split()
+            if len(args) != 2:
+                await message.reply_text(
+                    "👑 **Add Sudo User**\n\n"
+                    "**Usage:** `/addsudo @username`\n\n"
+                    "**Example:** `/addsudo @username`\n\n"
+                    "**Note:** This will give the user all permissions by default.\n"
+                    "Use /setsudo to set specific permissions."
+                )
+                return
+            
+            target_username = args[1].replace('@', '')
+            
+            try:
+                # Get user from username
+                target_user = await client.get_users(target_username)
+                
+                # Check if already sudo
+                existing_sudo = await db.get_sudo_user(target_user.id)
+                if existing_sudo:
+                    await message.reply_text(f"❌ @{target_username} is already a sudo user.")
+                    return
+                
+                # Add with all permissions by default
+                all_permissions = list(config.PERMISSIONS.keys())
+                await db.add_sudo_user(target_user.id, all_permissions)
+                
+                await message.reply_text(
+                    f"✅ **Sudo User Added!**\n\n"
+                    f"👤 **User:** @{target_username} (ID: {target_user.id})\n"
+                    f"🔑 **Permissions:** All permissions granted\n\n"
+                    f"Use /setsudo to modify specific permissions."
+                )
+                
+                logger.info(f"Sudo user added: @{target_username} ({target_user.id})")
+                
+            except Exception as e:
+                logger.error(f"Error adding sudo user: {e}")
+                await message.reply_text("❌ Error adding sudo user. Make sure the username is correct.")
+        
+        # ========== REMOVESUDO COMMAND (Owner only) ==========
+        @self.client.on_message(filters.command(["removesudo", "delsudo"]))
+        async def removesudo_command(client: Client, message: Message):
+            """Remove sudo user (Owner only)"""
+            user_id = message.from_user.id
+            
+            if not helpers.is_owner(user_id):
+                await message.reply_text("❌ Only the bot owner can use this command.")
+                return
+            
+            args = message.text.split()
+            if len(args) != 2:
+                await message.reply_text(
+                    "👑 **Remove Sudo User**\n\n"
+                    "**Usage:** `/removesudo @username`\n\n"
+                    "**Example:** `/removesudo @username`"
+                )
+                return
+            
+            target_username = args[1].replace('@', '')
+            
+            try:
+                # Get user from username
+                target_user = await client.get_users(target_username)
+                
+                # Remove sudo
+                removed = await db.remove_sudo_user(target_user.id)
+                
+                if removed:
+                    await message.reply_text(
+                        f"✅ **Sudo User Removed!**\n\n"
+                        f"👤 **User:** @{target_username} (ID: {target_user.id})\n"
+                        f"🔓 **Status:** All permissions revoked"
+                    )
+                    
+                    logger.info(f"Sudo user removed: @{target_username} ({target_user.id})")
+                else:
+                    await message.reply_text(f"❌ @{target_username} is not a sudo user.")
+                    
+            except Exception as e:
+                logger.error(f"Error removing sudo user: {e}")
+                await message.reply_text("❌ Error removing sudo user. Make sure the username is correct.")
+        
+        # ========== SUDOLIST COMMAND (Owner only) ==========
+        @self.client.on_message(filters.command(["sudolist", "listsudo", "sudoers"]))
+        async def sudolist_command(client: Client, message: Message):
+            """List all sudo users (Owner only)"""
+            user_id = message.from_user.id
+            
+            if not helpers.is_owner(user_id):
+                await message.reply_text("❌ Only the bot owner can use this command.")
+                return
+            
+            sudo_users = await db.get_all_sudo_users()
+            
+            if not sudo_users:
+                await message.reply_text("👑 **No Sudo Users Found**\n\nNo sudo users have been added yet.")
+                return
+            
+            message_text = "👑 **Sudo Users List**\n\n"
+            
+            for i, sudo in enumerate(sudo_users, 1):
+                user_id = sudo.get('user_id')
+                permissions = sudo.get('permissions', [])
+                added_at = sudo.get('added_at', datetime.utcnow())
+                
+                # Try to get username
+                try:
+                    username = await helpers.get_username_from_id(client, user_id)
+                except:
+                    username = f"User {user_id}"
+                
+                # Format permissions
+                perm_text = ', '.join(permissions[:3])
+                if len(permissions) > 3:
+                    perm_text += f" (+{len(permissions)-3} more)"
+                
+                # Format date
+                if isinstance(added_at, datetime):
+                    date_str = added_at.strftime('%Y-%m-%d')
+                else:
+                    date_str = "Unknown"
+                
+                message_text += f"{i}. {username}\n"
+                message_text += f"   🆔: {user_id}\n"
+                message_text += f"   🔑: {perm_text}\n"
+                message_text += f"   📅: {date_str}\n\n"
+            
+            # Add buttons to manage sudo users
+            keyboard = InlineKeyboardMarkup([
+                [InlineKeyboardButton("➕ Add Sudo User", callback_data="add_sudo_ui")],
+                [InlineKeyboardButton("⚙️ Manage Permissions", callback_data="manage_perms_ui")]
+            ])
+            
+            await message.reply_text(message_text, reply_markup=keyboard)
+        
+        # ========== SETSUDO COMMAND (Owner only) ==========
+        @self.client.on_message(filters.command(["setsudo", "setpermissions"]))
+        async def setsudo_command(client: Client, message: Message):
+            """Set specific permissions for sudo user (Owner only)"""
+            user_id = message.from_user.id
+            
+            if not helpers.is_owner(user_id):
+                await message.reply_text("❌ Only the bot owner can use this command.")
+                return
+            
+            args = message.text.split()
+            if len(args) != 2:
+                await message.reply_text(
+                    "👑 **Set Sudo Permissions**\n\n"
+                    "**Usage:** `/setsudo @username`\n\n"
+                    "**Example:** `/setsudo @username`\n\n"
+                    "This will open an inline keyboard to select specific permissions."
+                )
+                return
+            
+            target_username = args[1].replace('@', '')
+            
+            try:
+                # Get user from username
+                target_user = await client.get_users(target_username)
+                
+                # Check if user exists in sudo
+                sudo_user = await db.get_sudo_user(target_user.id)
+                current_permissions = set(sudo_user.get('permissions', [])) if sudo_user else set()
+                
+                # Create permission selection keyboard
+                keyboard = helpers.create_permission_keyboard(target_user.id, current_permissions)
+                
+                await message.reply_text(
+                    f"⚙️ **Set Permissions for @{target_username}**\n\n"
+                    f"**Current permissions:** {len(current_permissions)}\n"
+                    f"Click on permissions to toggle them, then click 'Save Permissions'.\n\n"
+                    f"**Available Permissions:**\n"
+                    f"• upload - Upload characters\n"
+                    f"• delete - Delete characters\n"
+                    f"• edit - Edit characters\n"
+                    f"• restore - Restore deleted characters\n"
+                    f"• fill - Fill deleted slots\n"
+                    f"• view_deleted - View recycle bin\n"
+                    f"• add_sudo - Add sudo users\n"
+                    f"• remove_sudo - Remove sudo users\n"
+                    f"• reset_db - Reset database",
+                    reply_markup=keyboard
+                )
+                
+            except Exception as e:
+                logger.error(f"Error setting sudo permissions: {e}")
+                await message.reply_text("❌ Error setting permissions. Make sure the username is correct.")
+        
+        # ========== RESET COMMAND (Owner only with warnings) ==========
+        @self.client.on_message(filters.command("reset"))
+        async def reset_command(client: Client, message: Message):
+            """Reset database with 3 warnings (Owner only)"""
+            user_id = message.from_user.id
+            
+            if not helpers.is_owner(user_id):
+                await message.reply_text("❌ Only the bot owner can reset the database.")
+                return
+            
+            # Get current warnings
+            warning_count, last_warning = await db.get_reset_warnings(user_id)
+            
+            # Check if warnings have expired (24 hours)
+            warning_expired = False
+            if last_warning:
+                hours_since_warning = (datetime.utcnow() - last_warning).total_seconds() / 3600
+                if hours_since_warning > 24:
+                    warning_expired = True
+                    await db.clear_reset_warnings(user_id)
+                    warning_count = 0
+            
+            warnings_needed = 3 - warning_count
+            
+            if warnings_needed <= 0:
+                # All warnings given, show final confirmation
+                keyboard = InlineKeyboardMarkup([
+                    [
+                        InlineKeyboardButton("🚨 YES, RESET DATABASE", callback_data="confirm_reset"),
+                        InlineKeyboardButton("❌ Cancel", callback_data="cancel_reset")
+                    ]
+                ])
+                
+                total_chars = await db.get_character_count()
+                total_deleted = await db.get_deleted_characters_count()
+                
+                await message.reply_text(
+                    f"⚠️ **FINAL WARNING - DATABASE RESET** ⚠️\n\n"
+                    f"🚨 **This is your FINAL warning!**\n\n"
+                    f"📊 **Current Database Stats:**\n"
+                    f"• Active Characters: {total_chars}\n"
+                    f"• Deleted Characters: {total_deleted}\n"
+                    f"• Total: {total_chars + total_deleted}\n\n"
+                    f"❌ **THIS ACTION WILL:**\n"
+                    f"1. Delete ALL characters\n"
+                    f"2. Delete ALL deleted characters\n"
+                    f"3. Reset character ID counter to 0\n"
+                    f"4. Clear ALL data\n\n"
+                    f"🔥 **THIS ACTION IS IRREVERSIBLE!**\n\n"
+                    f"Are you ABSOLUTELY sure you want to reset the database?",
+                    reply_markup=keyboard
+                )
+                
+            else:
+                # Add warning
+                new_warning_count, _ = await db.add_reset_warning(user_id)
+                
+                total_chars = await db.get_character_count()
+                total_deleted = await db.get_deleted_characters_count()
+                
+                if new_warning_count == 1:
+                    warning_text = "FIRST"
+                elif new_warning_count == 2:
+                    warning_text = "SECOND"
+                else:
+                    warning_text = "THIRD"
+                
+                await message.reply_text(
+                    f"⚠️ **{warning_text} WARNING - DATABASE RESET** ⚠️\n\n"
+                    f"🚨 **Warning {new_warning_count}/3**\n\n"
+                    f"📊 **Current Database Stats:**\n"
+                    f"• Active Characters: {total_chars}\n"
+                    f"• Deleted Characters: {total_deleted}\n"
+                    f"• Total: {total_chars + total_deleted}\n\n"
+                    f"❌ **Resetting will delete ALL data!**\n\n"
+                    f"⚠️ **You need {3 - new_warning_count} more warning(s) before you can reset.**\n"
+                    f"Send `/reset` again to continue."
+                )
+        
+        # ========== FILL COMMAND (with permission check) ==========
         @self.client.on_message(filters.command("fill"))
         async def fill_command(client: Client, message: Message):
             """Handle /fill command - add character in place of deleted character"""
             user_id = message.from_user.id
             
-            # Check authorization
-            if not await db.is_sudo_user(user_id):
+            # Check authorization with permission
+            if not await db.has_permission(user_id, 'fill'):
                 await message.reply_text(
                     "❌ You are not authorized to use the fill command.\n\n"
-                    "Only sudo users can use this command. Contact the bot owner for access."
+                    "You need 'fill' permission. Contact the bot owner for access."
                 )
                 return
             
@@ -1690,12 +2119,12 @@ class CharacterBot:
                 await message.reply_text(
                     "🔄 **Fill Deleted Character Slot**\n\n"
                     "**Usage:** Reply to a media file with:\n"
-                    "`/fill character_id \"Character Name\" \"Anime Name\" Rarity [subrarity]`\n\n"
+                    "`/fill character_id \"Character Name\" \"Anime Name\" Rarity`\n\n"
                     "**Examples:**\n"
                     "• `/fill 123 \"Ichigo Kurosaki\" Bleach 3`\n"
-                    "• `/fill 456 \"Goku\" \"Dragon Ball\" 5 astral`\n\n"
+                    "• `/fill 456 \"Goku\" \"Dragon Ball\" 10`\n\n"
                     "**To fill oldest deleted slot:**\n"
-                    "`/fill oldest \"Character Name\" \"Anime Name\" Rarity [subrarity]`\n\n"
+                    "`/fill oldest \"Character Name\" \"Anime Name\" Rarity`\n\n"
                     "**To see available deleted IDs:**\n"
                     "Use `/deleted` to view recycle bin\n"
                     "Use `/searchdeleted` to search deleted characters"
@@ -1707,7 +2136,7 @@ class CharacterBot:
             if len(args) < 4:
                 await message.reply_text(
                     "❌ **Invalid syntax!**\n\n"
-                    "**Usage:** `/fill character_id \"Character Name\" \"Anime Name\" Rarity [subrarity]`\n\n"
+                    "**Usage:** `/fill character_id \"Character Name\" \"Anime Name\" Rarity`\n\n"
                     "**Examples:**\n"
                     "• `/fill 123 \"Ichigo Kurosaki\" Bleach 3`\n"
                     "• `/fill oldest \"Naruto Uzumaki\" Naruto 4`\n\n"
@@ -1793,19 +2222,26 @@ class CharacterBot:
             
             # Parse rarity
             rarity_input = text.strip()
-            rarity_name, subrarity = helpers.parse_rarity(rarity_input)
+            rarity_name = helpers.parse_rarity(rarity_input)
             
             if not rarity_name:
                 await message.reply_text(
                     "❌ Invalid rarity.\n\n"
-                    "**Valid Rarity Numbers (1-7):**\n"
-                    "1. 🌸 Blossom\n"
-                    "2. ✨ Starlit\n"
-                    "3. 🩸 Crimson\n"
-                    "4. 🌘 Eclipse\n"
-                    "5. 🌌 Celestia\n"
-                    "6. 🪽 Ascended\n"
-                    "7. 🧬 One-of-One"
+                    "**Valid Rarity Numbers (1-14):**\n"
+                    "1. ⚪ Common\n"
+                    "2. 🟢 Uncommon\n"
+                    "3. 🔴 Rare\n"
+                    "4. 🟡 Legendary\n"
+                    "5. 🎐 Limited Edition\n"
+                    "6. 💎 Premium\n"
+                    "7. 🥵 Exotic\n"
+                    "8. 🎬 Animated\n"
+                    "9. 🌩️ Thundra\n"
+                    "10. ☄️ Galvoria\n"
+                    "11. 🌈 Neon\n"
+                    "12. 🛡️ Supreme\n"
+                    "13. 🔮 Crystal\n"
+                    "14. 🎤 Celebrity"
                 )
                 return
             
@@ -1856,7 +2292,6 @@ class CharacterBot:
                 character_id=character_id,
                 media_url=media_url,
                 media_type=media_type,
-                subrarity=subrarity,
                 added_by=user_id
             )
             
@@ -1888,12 +2323,6 @@ class CharacterBot:
                         f"👤 **New Character:** {char_name}\n"
                         f"🎞️ **Anime:** {anime_name}\n"
                         f"🏅 **Rarity:** {rarity_name}\n"
-                    )
-                    
-                    if subrarity:
-                        success_text += f"💠 **Sub-Rarity:** {subrarity}\n"
-                    
-                    success_text += (
                         f"\n📸 **Media:** Uploaded to Catbox\n"
                         f"📢 **Posted to:** @capture_database\n"
                         f"🆔 **Character ID:** `{character_id}`\n"
@@ -1918,14 +2347,14 @@ class CharacterBot:
                 logger.error(f"Error filling character: {e}")
                 await update_status("❌ Error filling character slot. Please try again.")
         
-        # ========== RESTORE COMMAND ==========
+        # ========== RESTORE COMMAND (with permission check) ==========
         @self.client.on_message(filters.command("restore"))
         async def restore_command(client: Client, message: Message):
             """Handle /restore command - restore deleted character"""
             user_id = message.from_user.id
             
-            # Check authorization
-            if not await db.is_sudo_user(user_id):
+            # Check authorization with permission
+            if not await db.has_permission(user_id, 'restore'):
                 await message.reply_text("❌ You are not authorized to restore characters.")
                 return
             
@@ -1976,14 +2405,14 @@ class CharacterBot:
                 logger.error(f"Error in restore command: {e}")
                 await message.reply_text("❌ Error restoring character.")
         
-        # ========== DELETED COMMAND ==========
+        # ========== DELETED COMMAND (with permission check) ==========
         @self.client.on_message(filters.command(["deleted", "recyclebin", "trash"]))
         async def deleted_command(client: Client, message: Message):
             """Show deleted characters (recycle bin)"""
             user_id = message.from_user.id
             
-            # Check authorization
-            if not await db.is_sudo_user(user_id):
+            # Check authorization with permission
+            if not await db.has_permission(user_id, 'view_deleted'):
                 await message.reply_text("❌ You are not authorized to view the recycle bin.")
                 return
             
@@ -2045,14 +2474,14 @@ class CharacterBot:
             
             await message.reply_text(message_text, reply_markup=keyboard)
         
-        # ========== SEARCHDELETED COMMAND ==========
+        # ========== SEARCHDELETED COMMAND (with permission check) ==========
         @self.client.on_message(filters.command(["searchdeleted", "finddeleted"]))
         async def searchdeleted_command(client: Client, message: Message):
             """Search deleted characters"""
             user_id = message.from_user.id
             
-            # Check authorization
-            if not await db.is_sudo_user(user_id):
+            # Check authorization with permission
+            if not await db.has_permission(user_id, 'view_deleted'):
                 await message.reply_text("❌ You are not authorized to search deleted characters.")
                 return
             
@@ -2220,10 +2649,11 @@ class CharacterBot:
             stats_text += f"📈 **Total (All Time):** {total_chars + total_deleted}\n\n"
             
             stats_text += "**Characters by Rarity:**\n"
-            for rarity_num, rarity_data in config.RARITIES.items():
-                count = rarity_stats.get(rarity_data["name"], 0)
+            for rarity_num, rarity_name in config.RARITY_MAP.items():
+                count = rarity_stats.get(rarity_name, 0)
                 percentage = (count / total_chars * 100) if total_chars > 0 else 0
-                stats_text += f"{rarity_data['emoji']} **{rarity_data['name']}:** {count} ({percentage:.1f}%)\n"
+                emoji = helpers.get_rarity_emoji(rarity_name)
+                stats_text += f"{emoji} **{rarity_name.split(' ', 1)[-1]}:** {count} ({percentage:.1f}%)\n"
             
             stats_text += f"\n**Top Uploaders:**\n"
             for i, uploader in enumerate(top_uploaders, 1):
@@ -2322,14 +2752,14 @@ class CharacterBot:
                 logger.error(f"Error in info command: {e}")
                 await message.reply_text("❌ Error fetching character information.")
         
-        # ========== EDIT COMMAND ==========
+        # ========== EDIT COMMAND (with permission check) ==========
         @self.client.on_message(filters.command("edit"))
         async def edit_command(client: Client, message: Message):
             """Handle /edit command - edit character details"""
             user_id = message.from_user.id
             
-            # Check authorization
-            if not await db.is_sudo_user(user_id):
+            # Check authorization with permission
+            if not await db.has_permission(user_id, 'edit'):
                 await message.reply_text("❌ You are not authorized to edit characters.")
                 return
             
@@ -2337,10 +2767,10 @@ class CharacterBot:
             if len(args) < 5:
                 await message.reply_text(
                     "✏️ **Edit Character**\n\n"
-                    "**Usage:** `/edit ID \"New Name\" \"New Anime\" Rarity [subrarity]`\n\n"
+                    "**Usage:** `/edit ID \"New Name\" \"New Anime\" Rarity`\n\n"
                     "**Examples:**\n"
                     "• `/edit 123 \"Naruto Uzumaki\" Naruto 3`\n"
-                    "• `/edit 123 \"Sakura\" Naruto 5 astral`\n\n"
+                    "• `/edit 123 \"Sakura\" Naruto 10`\n\n"
                     "**Note:** Use quotes for names with spaces"
                 )
                 return
@@ -2385,10 +2815,10 @@ class CharacterBot:
                 
                 # Parse rarity
                 rarity_input = text.strip()
-                new_rarity, new_subrarity = helpers.parse_rarity(rarity_input)
+                new_rarity = helpers.parse_rarity(rarity_input)
                 
                 if not new_rarity:
-                    await message.reply_text("❌ Invalid rarity. Must be 1-7.")
+                    await message.reply_text("❌ Invalid rarity. Must be 1-14.")
                     return
                 
                 # Check if character exists
@@ -2402,8 +2832,7 @@ class CharacterBot:
                     character_id=character_id,
                     char_name=new_char_name,
                     anime_name=new_anime_name,
-                    rarity=new_rarity,
-                    subrarity=new_subrarity
+                    rarity=new_rarity
                 )
                 
                 if updated:
@@ -2418,14 +2847,14 @@ class CharacterBot:
                 logger.error(f"Error in edit command: {e}")
                 await message.reply_text("❌ Error updating character. Please check the format.")
         
-        # ========== EDITMEDIA COMMAND ==========
+        # ========== EDITMEDIA COMMAND (with permission check) ==========
         @self.client.on_message(filters.command("editmedia"))
         async def editmedia_command(client: Client, message: Message):
             """Handle /editmedia command - edit character media"""
             user_id = message.from_user.id
             
-            # Check authorization
-            if not await db.is_sudo_user(user_id):
+            # Check authorization with permission
+            if not await db.has_permission(user_id, 'edit'):
                 await message.reply_text("❌ You are not authorized to edit character media.")
                 return
             
@@ -2503,14 +2932,14 @@ class CharacterBot:
                 logger.error(f"Error in editmedia command: {e}")
                 await message.reply_text("❌ Error updating media.")
         
-        # ========== DELETE COMMAND ==========
+        # ========== DELETE COMMAND (with permission check) ==========
         @self.client.on_message(filters.command(["delete", "remove", "del"]))
         async def delete_command(client: Client, message: Message):
             """Handle /delete command - move character to recycle bin"""
             user_id = message.from_user.id
             
-            # Only sudo users can delete
-            if not await db.is_sudo_user(user_id):
+            # Check authorization with permission
+            if not await db.has_permission(user_id, 'delete'):
                 await message.reply_text("❌ You are not authorized to delete characters.")
                 return
             
@@ -2578,7 +3007,45 @@ class CharacterBot:
                     if len(parts) >= 3:
                         rarity_num = int(parts[1])
                         current_view = parts[2] if len(parts) > 2 else "main"
-                        await self._show_rarity_submenu(client, callback_query, rarity_num, current_view)
+                        
+                        # Show characters for this rarity
+                        characters, total_count = await db.get_characters_by_rarity(
+                            config.RARITY_MAP[rarity_num], 0
+                        )
+                        
+                        if not characters:
+                            await callback_query.answer(f"No characters found for rarity {rarity_num}", show_alert=True)
+                            return
+                        
+                        total_pages = (total_count + config.ITEMS_PER_PAGE - 1) // config.ITEMS_PER_PAGE
+                        
+                        message_text = helpers.format_character_list(
+                            characters, 0, total_count,
+                            f"{config.RARITY_MAP[rarity_num]} Characters"
+                        )
+                        
+                        keyboard = helpers.create_pagination_keyboard(0, total_pages, "rarity", f"{rarity_num}_{current_view}")
+                        
+                        buttons = []
+                        for char in characters[:3]:
+                            char_id = char.get('character_id')
+                            if char_id:
+                                buttons.append([
+                                    InlineKeyboardButton(
+                                        f"👁️ {char.get('char_name', 'Unknown')[:15]}...",
+                                        callback_data=f"info_{char_id}"
+                                    )
+                                ])
+                        
+                        if buttons:
+                            keyboard.inline_keyboard.extend(buttons)
+                        
+                        keyboard.inline_keyboard.append([
+                            InlineKeyboardButton("🔙 Back to Menu", callback_data="menu_main")
+                        ])
+                        
+                        await callback_query.message.edit_text(message_text, reply_markup=keyboard)
+                        await callback_query.answer()
                 
                 # View all characters
                 elif data.startswith("view_all_"):
@@ -2592,23 +3059,6 @@ class CharacterBot:
                     page = int(parts[2])
                     current_view = parts[3] if len(parts) > 3 else "main"
                     await self._show_deleted_characters(client, callback_query, page, current_view)
-                
-                # View characters by rarity
-                elif data.startswith("view_rarity_"):
-                    parts = data.split("_")
-                    rarity_num = int(parts[2])
-                    page = int(parts[4])
-                    current_view = parts[5] if len(parts) > 5 else "main"
-                    await self._show_rarity_characters(client, callback_query, rarity_num, page, current_view)
-                
-                # View characters by sub-rarity
-                elif data.startswith("view_sub_"):
-                    parts = data.split("_")
-                    rarity_num = int(parts[2])
-                    subrarity = '_'.join(parts[3:-2])
-                    page = int(parts[-2])
-                    current_view = parts[-1]
-                    await self._show_subrarity_characters(client, callback_query, rarity_num, subrarity, page, current_view)
                 
                 # Pagination for search
                 elif data.startswith("search_page_"):
@@ -2681,16 +3131,44 @@ class CharacterBot:
                     page = int(parts[2])
                     rarity_num = int(parts[3])
                     current_view = parts[4] if len(parts) > 4 else "main"
-                    await self._show_rarity_characters(client, callback_query, rarity_num, page, current_view)
-                
-                # Pagination for subrarity
-                elif data.startswith("sub_page_"):
-                    parts = data.split("_")
-                    page = int(parts[2])
-                    rarity_num = int(parts[3])
-                    subrarity = '_'.join(parts[4:-1])
-                    current_view = parts[-1]
-                    await self._show_subrarity_characters(client, callback_query, rarity_num, subrarity, page, current_view)
+                    
+                    characters, total_count = await db.get_characters_by_rarity(
+                        config.RARITY_MAP[rarity_num], page
+                    )
+                    
+                    if not characters:
+                        await callback_query.answer("No more characters", show_alert=True)
+                        return
+                    
+                    total_pages = (total_count + config.ITEMS_PER_PAGE - 1) // config.ITEMS_PER_PAGE
+                    
+                    message_text = helpers.format_character_list(
+                        characters, page, total_count,
+                        f"{config.RARITY_MAP[rarity_num]} Characters"
+                    )
+                    
+                    keyboard = helpers.create_pagination_keyboard(page, total_pages, "rarity", f"{rarity_num}_{current_view}")
+                    
+                    buttons = []
+                    for char in characters[:3]:
+                        char_id = char.get('character_id')
+                        if char_id:
+                            buttons.append([
+                                InlineKeyboardButton(
+                                    f"👁️ {char.get('char_name', 'Unknown')[:15]}...",
+                                    callback_data=f"info_{char_id}"
+                                )
+                            ])
+                    
+                    if buttons:
+                        keyboard.inline_keyboard.extend(buttons)
+                    
+                    keyboard.inline_keyboard.append([
+                        InlineKeyboardButton("🔙 Back to Menu", callback_data="menu_main")
+                    ])
+                    
+                    await callback_query.message.edit_text(message_text, reply_markup=keyboard)
+                    await callback_query.answer()
                 
                 # Character info
                 elif data.startswith("info_"):
@@ -2725,8 +3203,8 @@ class CharacterBot:
                 elif data.startswith("soft_delete_"):
                     character_id = int(data.split("_")[2])
                     
-                    # Check authorization
-                    if not await db.is_sudo_user(user_id):
+                    # Check authorization with permission
+                    if not await db.has_permission(user_id, 'delete'):
                         await callback_query.answer("You are not authorized to delete characters", show_alert=True)
                         return
                     
@@ -2754,8 +3232,8 @@ class CharacterBot:
                 elif data.startswith("restore_"):
                     character_id = int(data.split("_")[1])
                     
-                    # Check authorization
-                    if not await db.is_sudo_user(user_id):
+                    # Check authorization with permission
+                    if not await db.has_permission(user_id, 'restore'):
                         await callback_query.answer("You are not authorized to restore characters", show_alert=True)
                         return
                     
@@ -2885,18 +3363,25 @@ class CharacterBot:
                         "📤 **Upload Character**\n\n"
                         "1. Send a photo/video/audio/document\n"
                         "2. Reply to it with:\n"
-                        "`/upload \"Character Name\" \"Anime Name\" Rarity [subrarity]`\n\n"
+                        "`/upload \"Character Name\" \"Anime Name\" Rarity`\n\n"
                         "**Example:**\n"
                         "`/upload \"Ichigo Kurosaki\" Bleach 3`\n"
-                        "`/upload \"Goku\" \"Dragon Ball\" 5 astral`\n\n"
-                        "**Rarity Numbers (1-7):**\n"
-                        "1. 🌸 Blossom\n"
-                        "2. ✨ Starlit\n"
-                        "3. 🩸 Crimson (🩸 Bloodline, 🕯️ Cursed, 🌑 Shadowborn)\n"
-                        "4. 🌘 Eclipse (🌘 Lunar, ☀️ Solar, 🌓 Twilight, 🕳️ Void)\n"
-                        "5. 🌌 Celestia (🌌 Astral, 👼 Seraph, 🔮 Arcane, 🧿 Divine Relic)\n"
-                        "6. 🪽 Ascended (🪽 Mythborn, 👑 Sovereign, 👁️ Omniscient)\n"
-                        "7. 🧬 One-of-One",
+                        "`/upload \"Goku\" \"Dragon Ball\" 10`\n\n"
+                        "**Rarity Numbers (1-14):**\n"
+                        "1. ⚪ Common\n"
+                        "2. 🟢 Uncommon\n"
+                        "3. 🔴 Rare\n"
+                        "4. 🟡 Legendary\n"
+                        "5. 🎐 Limited Edition\n"
+                        "6. 💎 Premium\n"
+                        "7. 🥵 Exotic\n"
+                        "8. 🎬 Animated\n"
+                        "9. 🌩️ Thundra\n"
+                        "10. ☄️ Galvoria\n"
+                        "11. 🌈 Neon\n"
+                        "12. 🛡️ Supreme\n"
+                        "13. 🔮 Crystal\n"
+                        "14. 🎤 Celebrity",
                         reply_markup=InlineKeyboardMarkup([
                             [InlineKeyboardButton("🔙 Back to Menu", callback_data="menu_main")]
                         ])
@@ -2909,12 +3394,11 @@ class CharacterBot:
                         "📤 **Upload Example:**\n\n"
                         "1. **Send a photo** of Naruto\n"
                         "2. **Reply to it with:**\n"
-                        "`/upload \"Naruto Uzumaki\" Naruto 4 solar`\n\n"
+                        "`/upload \"Naruto Uzumaki\" Naruto 4`\n\n"
                         "**This would create:**\n"
                         "• Character: Naruto Uzumaki\n"
                         "• Anime: Naruto\n"
-                        "• Rarity: 🌘 Eclipse\n"
-                        "• Sub-rarity: ☀️ Solar",
+                        "• Rarity: 🟡 Legendary",
                         reply_markup=InlineKeyboardMarkup([
                             [InlineKeyboardButton("📤 Try Uploading", callback_data="upload_help")],
                             [InlineKeyboardButton("🔙 Back to Menu", callback_data="menu_main")]
@@ -2929,14 +3413,14 @@ class CharacterBot:
                         "1. **Find a deleted character ID** using `/deleted`\n"
                         "2. **Send a photo** of a new character\n"
                         "3. **Reply to it with:**\n"
-                        "`/fill 123 \"Sasuke Uchiha\" Naruto 4 lunar`\n\n"
+                        "`/fill 123 \"Sasuke Uchiha\" Naruto 4`\n\n"
                         "**This would:**\n"
                         "• Reuse deleted slot #123\n"
                         "• Create: Sasuke Uchiha (Naruto)\n"
-                        "• Rarity: 🌘 Eclipse (🌘 Lunar)\n\n"
+                        "• Rarity: 🟡 Legendary\n\n"
                         "**Or use `oldest` to fill the oldest slot:**\n"
                         "`/fill oldest \"New Character\" Anime 3`\n\n"
-                        "**Note:** You need sudo access to use this command.",
+                        "**Note:** You need 'fill' permission to use this command.",
                         reply_markup=InlineKeyboardMarkup([
                             [InlineKeyboardButton("🗑️ View Recycle Bin", callback_data="deleted_list_0_main")],
                             [InlineKeyboardButton("📤 Try Uploading", callback_data="upload_help")],
@@ -2964,6 +3448,248 @@ class CharacterBot:
                             [InlineKeyboardButton("🗑️ Recycle Bin", callback_data="deleted_list_0_main")],
                             [InlineKeyboardButton("📊 Statistics", callback_data="stats_main")]
                         ])
+                    )
+                    await callback_query.answer()
+                
+                # Add sudo user UI
+                elif data == "add_sudo_ui":
+                    if not helpers.is_owner(user_id):
+                        await callback_query.answer("Only owner can add sudo users", show_alert=True)
+                        return
+                    
+                    await callback_query.message.edit_text(
+                        "👑 **Add Sudo User**\n\n"
+                        "Use the command:\n"
+                        "`/addsudo @username`\n\n"
+                        "This will give the user all permissions by default.\n"
+                        "Use `/setsudo @username` to set specific permissions.",
+                        reply_markup=InlineKeyboardMarkup([
+                            [InlineKeyboardButton("🔙 Back to Sudo List", callback_data="sudo_list_back")],
+                            [InlineKeyboardButton("🔙 Back to Menu", callback_data="menu_main")]
+                        ])
+                    )
+                    await callback_query.answer()
+                
+                # Manage permissions UI
+                elif data == "manage_perms_ui":
+                    if not helpers.is_owner(user_id):
+                        await callback_query.answer("Only owner can manage permissions", show_alert=True)
+                        return
+                    
+                    await callback_query.message.edit_text(
+                        "⚙️ **Manage Sudo Permissions**\n\n"
+                        "Use the command:\n"
+                        "`/setsudo @username`\n\n"
+                        "This will open an inline keyboard to select specific permissions for the user.",
+                        reply_markup=InlineKeyboardMarkup([
+                            [InlineKeyboardButton("🔙 Back to Sudo List", callback_data="sudo_list_back")],
+                            [InlineKeyboardButton("🔙 Back to Menu", callback_data="menu_main")]
+                        ])
+                    )
+                    await callback_query.answer()
+                
+                # Back to sudo list
+                elif data == "sudo_list_back":
+                    if not helpers.is_owner(user_id):
+                        await callback_query.answer("Unauthorized", show_alert=True)
+                        return
+                    
+                    sudo_users = await db.get_all_sudo_users()
+                    
+                    if not sudo_users:
+                        await callback_query.message.edit_text("👑 **No Sudo Users Found**\n\nNo sudo users have been added yet.")
+                        await callback_query.answer()
+                        return
+                    
+                    message_text = "👑 **Sudo Users List**\n\n"
+                    
+                    for i, sudo in enumerate(sudo_users, 1):
+                        sudo_user_id = sudo.get('user_id')
+                        permissions = sudo.get('permissions', [])
+                        added_at = sudo.get('added_at', datetime.utcnow())
+                        
+                        # Try to get username
+                        try:
+                            username = await helpers.get_username_from_id(client, sudo_user_id)
+                        except:
+                            username = f"User {sudo_user_id}"
+                        
+                        # Format permissions
+                        perm_text = ', '.join(permissions[:3])
+                        if len(permissions) > 3:
+                            perm_text += f" (+{len(permissions)-3} more)"
+                        
+                        # Format date
+                        if isinstance(added_at, datetime):
+                            date_str = added_at.strftime('%Y-%m-%d')
+                        else:
+                            date_str = "Unknown"
+                        
+                        message_text += f"{i}. {username}\n"
+                        message_text += f"   🆔: {sudo_user_id}\n"
+                        message_text += f"   🔑: {perm_text}\n"
+                        message_text += f"   📅: {date_str}\n\n"
+                    
+                    # Add buttons to manage sudo users
+                    keyboard = InlineKeyboardMarkup([
+                        [InlineKeyboardButton("➕ Add Sudo User", callback_data="add_sudo_ui")],
+                        [InlineKeyboardButton("⚙️ Manage Permissions", callback_data="manage_perms_ui")],
+                        [InlineKeyboardButton("🔙 Back to Menu", callback_data="menu_main")]
+                    ])
+                    
+                    await callback_query.message.edit_text(message_text, reply_markup=keyboard)
+                    await callback_query.answer()
+                
+                # Toggle permission
+                elif data.startswith("toggle_perm_"):
+                    parts = data.split("_")
+                    if len(parts) != 4:
+                        await callback_query.answer("Invalid permission data", show_alert=True)
+                        return
+                    
+                    target_user_id = int(parts[2])
+                    perm_key = parts[3]
+                    
+                    if not helpers.is_owner(user_id):
+                        await callback_query.answer("Only owner can modify permissions", show_alert=True)
+                        return
+                    
+                    # Get current permissions
+                    sudo_user = await db.get_sudo_user(target_user_id)
+                    if not sudo_user:
+                        await callback_query.answer("User is not a sudo user", show_alert=True)
+                        return
+                    
+                    current_permissions = set(sudo_user.get('permissions', []))
+                    
+                    # Toggle permission
+                    if perm_key in current_permissions:
+                        current_permissions.remove(perm_key)
+                    else:
+                        current_permissions.add(perm_key)
+                    
+                    # Update UI
+                    keyboard = helpers.create_permission_keyboard(target_user_id, current_permissions)
+                    
+                    # Get username for display
+                    try:
+                        target_username = await helpers.get_username_from_id(client, target_user_id)
+                    except:
+                        target_username = f"User {target_user_id}"
+                    
+                    await callback_query.message.edit_reply_markup(keyboard)
+                    await callback_query.answer(f"Toggled {perm_key} permission")
+                
+                # Save permissions
+                elif data.startswith("save_perms_"):
+                    target_user_id = int(data.split("_")[2])
+                    
+                    if not helpers.is_owner(user_id):
+                        await callback_query.answer("Only owner can save permissions", show_alert=True)
+                        return
+                    
+                    # Get current permissions from button states (we need to parse them from the message)
+                    # For simplicity, we'll get them from the database and update
+                    sudo_user = await db.get_sudo_user(target_user_id)
+                    if not sudo_user:
+                        await callback_query.answer("User is not a sudo user", show_alert=True)
+                        return
+                    
+                    current_permissions = set(sudo_user.get('permissions', []))
+                    
+                    # Update in database
+                    await db.update_sudo_permissions(target_user_id, list(current_permissions))
+                    
+                    # Get username for display
+                    try:
+                        target_username = await helpers.get_username_from_id(client, target_user_id)
+                    except:
+                        target_username = f"User {target_user_id}"
+                    
+                    await callback_query.message.edit_text(
+                        f"✅ **Permissions Updated!**\n\n"
+                        f"👤 **User:** {target_username}\n"
+                        f"🔑 **Permissions:** {len(current_permissions)} permissions set\n\n"
+                        f"Permissions have been saved successfully.",
+                        reply_markup=InlineKeyboardMarkup([
+                            [InlineKeyboardButton("👑 Back to Sudo Management", callback_data="sudo_list_back")]
+                        ])
+                    )
+                    await callback_query.answer("Permissions saved successfully")
+                
+                # Cancel permission editing
+                elif data == "cancel_perms":
+                    if not helpers.is_owner(user_id):
+                        await callback_query.answer("Unauthorized", show_alert=True)
+                        return
+                    
+                    await callback_query.message.edit_text(
+                        "❌ **Permission editing cancelled.**\n\n"
+                        "No changes were made.",
+                        reply_markup=InlineKeyboardMarkup([
+                            [InlineKeyboardButton("👑 Back to Sudo Management", callback_data="sudo_list_back")]
+                        ])
+                    )
+                    await callback_query.answer()
+                
+                # Confirm database reset
+                elif data == "confirm_reset":
+                    if not helpers.is_owner(user_id):
+                        await callback_query.answer("Only owner can reset database", show_alert=True)
+                        return
+                    
+                    # Check if user has permission to reset
+                    if not await db.has_permission(user_id, 'reset_db'):
+                        await callback_query.answer("You don't have permission to reset database", show_alert=True)
+                        return
+                    
+                    # Get stats before reset
+                    total_chars_before = await db.get_character_count()
+                    total_deleted_before = await db.get_deleted_characters_count()
+                    
+                    # Reset database
+                    reset_success = await db.reset_database()
+                    
+                    if reset_success:
+                        # Clear warnings
+                        await db.clear_reset_warnings(user_id)
+                        
+                        await callback_query.message.edit_text(
+                            f"♻️ **DATABASE RESET COMPLETE!**\n\n"
+                            f"✅ **All data has been cleared!**\n\n"
+                            f"📊 **Before Reset:**\n"
+                            f"• Active Characters: {total_chars_before}\n"
+                            f"• Deleted Characters: {total_deleted_before}\n"
+                            f"• Total: {total_chars_before + total_deleted_before}\n\n"
+                            f"🆕 **After Reset:**\n"
+                            f"• Active Characters: 0\n"
+                            f"• Deleted Characters: 0\n"
+                            f"• Character ID Counter: 0\n\n"
+                            f"✨ **Database is now fresh and empty!**\n"
+                            f"You can start uploading new characters from ID 1."
+                        )
+                        
+                        logger.info(f"Database reset by owner {user_id}")
+                    else:
+                        await callback_query.message.edit_text(
+                            "❌ **Database reset failed!**\n\n"
+                            "An error occurred while resetting the database."
+                        )
+                    
+                    await callback_query.answer()
+                
+                # Cancel reset
+                elif data == "cancel_reset":
+                    if not helpers.is_owner(user_id):
+                        await callback_query.answer("Unauthorized", show_alert=True)
+                        return
+                    
+                    # Clear warnings
+                    await db.clear_reset_warnings(user_id)
+                    
+                    await callback_query.message.edit_text(
+                        "✅ **Database reset cancelled.**\n\n"
+                        "No changes were made to the database."
                     )
                     await callback_query.answer()
                 
@@ -3019,36 +3745,6 @@ class CharacterBot:
             await callback_query.answer()
         else:
             await message.reply_text(menu_text, reply_markup=keyboard)
-    
-    async def _show_rarity_submenu(self, client: Client, callback_query: CallbackQuery, rarity_num: int, current_view: str):
-        """Show submenu for a specific rarity"""
-        rarity_data = config.RARITIES.get(rarity_num, {})
-        if not rarity_data:
-            await callback_query.answer("Invalid rarity", show_alert=True)
-            return
-        
-        # Get count for this rarity
-        characters_count = await asyncio.get_event_loop().run_in_executor(
-            None,
-            lambda: db.characters.count_documents({"rarity": rarity_data["name"]})
-        )
-        
-        menu_text = (
-            f"{rarity_data['emoji']} **{rarity_data['name']}**\n"
-            f"📊 **Characters:** {characters_count}\n\n"
-        )
-        
-        if rarity_data.get("subs"):
-            menu_text += "**Sub-Rarities Available:**\n"
-            for sub in rarity_data["subs"]:
-                menu_text += f"• {sub}\n"
-            menu_text += "\nSelect an option below:"
-        else:
-            menu_text += "Select an option below:"
-        
-        keyboard = helpers.create_subrarity_keyboard(rarity_num, current_view)
-        await callback_query.message.edit_text(menu_text, reply_markup=keyboard)
-        await callback_query.answer()
     
     async def _show_all_characters(self, client: Client, callback_query: CallbackQuery, page: int, current_view: str):
         """Show all active characters"""
@@ -3135,101 +3831,6 @@ class CharacterBot:
             InlineKeyboardButton(
                 "🔙 Back to Menu",
                 callback_data="menu_main"
-            )
-        ])
-        
-        await callback_query.message.edit_text(message_text, reply_markup=keyboard)
-        await callback_query.answer()
-    
-    async def _show_rarity_characters(self, client: Client, callback_query: CallbackQuery, rarity_num: int, page: int, current_view: str):
-        """Show characters for a specific rarity"""
-        rarity_data = config.RARITIES.get(rarity_num, {})
-        if not rarity_data:
-            await callback_query.answer("Invalid rarity", show_alert=True)
-            return
-        
-        characters, total_count = await db.get_characters_by_rarity(rarity_data["name"], page)
-        
-        if not characters:
-            await callback_query.answer(f"No {rarity_data['name']} characters found", show_alert=True)
-            return
-        
-        total_pages = (total_count + config.ITEMS_PER_PAGE - 1) // config.ITEMS_PER_PAGE
-        
-        message_text = helpers.format_character_list(
-            characters, page, total_count, 
-            f"{rarity_data['emoji']} {rarity_data['name']} Characters"
-        )
-        
-        keyboard = helpers.create_pagination_keyboard(page, total_pages, "rarity", f"{rarity_num}_{current_view}")
-        
-        buttons = []
-        for char in characters[:3]:
-            char_id = char.get('character_id')
-            if char_id:
-                buttons.append([
-                    InlineKeyboardButton(
-                        f"👁️ {char.get('char_name', 'Unknown')[:15]}...",
-                        callback_data=f"info_{char_id}"
-                    )
-                ])
-        
-        if buttons:
-            keyboard.inline_keyboard.extend(buttons)
-        
-        keyboard.inline_keyboard.append([
-            InlineKeyboardButton(
-                "🔙 Back",
-                callback_data=f"rarity_{rarity_num}_{current_view}"
-            )
-        ])
-        
-        await callback_query.message.edit_text(message_text, reply_markup=keyboard)
-        await callback_query.answer()
-    
-    async def _show_subrarity_characters(self, client: Client, callback_query: CallbackQuery, rarity_num: int, subrarity: str, page: int, current_view: str):
-        """Show characters for a specific sub-rarity"""
-        rarity_data = config.RARITIES.get(rarity_num, {})
-        if not rarity_data:
-            await callback_query.answer("Invalid rarity", show_alert=True)
-            return
-        
-        # Convert back from underscore to space
-        subrarity = subrarity.replace('_', ' ')
-        
-        characters, total_count = await db.get_characters_by_subrarity(rarity_data["name"], subrarity, page)
-        
-        if not characters:
-            await callback_query.answer(f"No {subrarity} characters found", show_alert=True)
-            return
-        
-        total_pages = (total_count + config.ITEMS_PER_PAGE - 1) // config.ITEMS_PER_PAGE
-        
-        message_text = helpers.format_character_list(
-            characters, page, total_count, 
-            f"{subrarity} Characters"
-        )
-        
-        keyboard = helpers.create_pagination_keyboard(page, total_pages, "sub", f"{rarity_num}_{subrarity.replace(' ', '_')}_{current_view}")
-        
-        buttons = []
-        for char in characters[:3]:
-            char_id = char.get('character_id')
-            if char_id:
-                buttons.append([
-                    InlineKeyboardButton(
-                        f"👁️ {char.get('char_name', 'Unknown')[:15]}...",
-                        callback_data=f"info_{char_id}"
-                    )
-                ])
-        
-        if buttons:
-            keyboard.inline_keyboard.extend(buttons)
-        
-        keyboard.inline_keyboard.append([
-            InlineKeyboardButton(
-                "🔙 Back",
-                callback_data=f"rarity_{rarity_num}_{current_view}"
             )
         ])
         
@@ -3469,10 +4070,11 @@ class CharacterBot:
         stats_text += f"📈 **Total (All Time):** {total_chars + total_deleted}\n\n"
         
         stats_text += "**Characters by Rarity:**\n"
-        for rarity_num, rarity_data in config.RARITIES.items():
-            count = rarity_stats.get(rarity_data["name"], 0)
+        for rarity_num, rarity_name in config.RARITY_MAP.items():
+            count = rarity_stats.get(rarity_name, 0)
             percentage = (count / total_chars * 100) if total_chars > 0 else 0
-            stats_text += f"{rarity_data['emoji']} **{rarity_data['name']}:** {count} ({percentage:.1f}%)\n"
+            emoji = helpers.get_rarity_emoji(rarity_name)
+            stats_text += f"{emoji} **{rarity_name.split(' ', 1)[-1]}:** {count} ({percentage:.1f}%)\n"
         
         stats_text += f"\n**Top Uploaders:**\n"
         for i, uploader in enumerate(top_uploaders, 1):
