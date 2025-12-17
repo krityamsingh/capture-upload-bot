@@ -32,8 +32,8 @@ class Config:
     BOT_TOKEN = os.getenv("BOT_TOKEN", "8496337458:AAF7ORldWpN-C6hpzSDt1bPCOeGVxfbU4qg")
     
     # MongoDB configuration
-    MONGO_URI = os.getenv("MONGODB_URI", "mongodb+srv://erenxironman09:erenxironman09@catcherbot.koejwre.mongodb.net/?appName=catcherbot")
-    DATABASE_NAME = os.getenv("DATABASE_NAME", "catcherbot")
+    MONGO_URI = os.getenv("MONGODB_URI", "mongodb+srv://catcher09977:catcher09977@catcher091.dqd095y.mongodb.net/?appName=catcher091")
+    DATABASE_NAME = os.getenv("DATABASE_NAME", "catcher091")
     
     # Bot owner ID
     OWNER_ID = int(os.getenv("OWNER_ID", 7878477646))
@@ -4153,3 +4153,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
