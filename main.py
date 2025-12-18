@@ -35,7 +35,7 @@ from telegram import (
     Chat,
     User
 )
-from telegram.constants import ChatAction
+from telegram.constants import ChatAction, ChatType
 from telegram.ext import (
     Application,
     ApplicationBuilder,
@@ -1461,11 +1461,11 @@ def main():
     application.add_handler(CommandHandler("admin", admin_panel))
     application.add_handler(CommandHandler("broadcast", broadcast_command))
     
-    # Add message handlers
+    # Add message handlers - FIXED: Use correct filter classes
     application.add_handler(MessageHandler(
         filters.Document.ALL | filters.PHOTO | filters.VIDEO | 
         filters.AUDIO | filters.VOICE | filters.VIDEO_NOTE |
-        filters.STICKER | filters.ANIMATION,
+        filters.Sticker.ALL | filters.Animation.ALL,  # FIXED HERE
         handle_file
     ))
     
