@@ -2,6 +2,7 @@
 """
 COMPLETE TELEGRAM UPLOAD BOT WITH ALL FEATURES
 Features: Rarity system, recycle bin, sudo permissions, database reset warnings, etc.
+Updated for python-telegram-bot v20+ and MongoDB index fixes
 """
 
 import os
@@ -20,9 +21,11 @@ import aiohttp
 
 from dotenv import load_dotenv
 from pymongo import MongoClient, DESCENDING, ASCENDING
-from pymongo.errors import ConnectionFailure, DuplicateKeyError
+from pymongo.errors import ConnectionFailure, DuplicateKeyError, OperationFailure
 from bson import ObjectId
 from bson.errors import InvalidId
+
+# Updated imports for python-telegram-bot v20+
 from telegram import (
     Update, 
     InlineKeyboardButton, 
@@ -31,7 +34,7 @@ from telegram import (
     InputMediaVideo,
     InputMediaDocument
 )
-from telegram.constants import ChatAction, ParseMode
+from telegram.constants import ParseMode
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -227,8 +230,8 @@ class MongoDB:
             self.users = self.db.users
             self.analytics = self.db.analytics
             
-            # Create indexes
-            self._create_indexes()
+            # Create indexes safely
+            self._create_indexes_safe()
             
             # Initialize counter
             self._initialize_counter()
@@ -242,27 +245,110 @@ class MongoDB:
             logger.error(f"❌ Failed to connect to MongoDB: {e}")
             raise
     
-    def _create_indexes(self):
-        """Create all necessary indexes"""
-        # Files collection indexes
-        self.files.create_index([("telegram_file_id", 1)], unique=True, sparse=True)
-        self.files.create_index([("added_by", 1)])
-        self.files.create_index([("file_id", 1)], unique=True)
-        self.files.create_index([("rarity", 1)])
-        self.files.create_index([("timestamp", DESCENDING)])
-        self.files.create_index([("tags", 1)])
-        self.files.create_index([("privacy", 1)])
-        
-        # Deleted files indexes
-        self.deleted_files.create_index([("file_id", 1)])
-        self.deleted_files.create_index([("deleted_at", DESCENDING)])
-        self.deleted_files.create_index([("deleted_by", 1)])
-        
-        # Users indexes
-        self.users.create_index([("user_id", 1)], unique=True)
-        self.sudo_users.create_index([("user_id", 1)], unique=True)
-        
-        logger.info("✅ Database indexes created")
+    def _create_indexes_safe(self):
+        """Create indexes safely with explicit names to avoid conflicts"""
+        try:
+            # List of indexes with explicit names
+            index_configs = [
+                # Files collection
+                {
+                    "collection": self.files,
+                    "keys": [("telegram_file_id", 1)],
+                    "kwargs": {"unique": True, "sparse": True, "name": "telegram_file_id_unique_idx"}
+                },
+                {
+                    "collection": self.files,
+                    "keys": [("file_id", 1)],
+                    "kwargs": {"unique": True, "name": "file_id_unique_idx"}
+                },
+                {
+                    "collection": self.files,
+                    "keys": [("added_by", 1)],
+                    "kwargs": {"name": "added_by_idx"}
+                },
+                {
+                    "collection": self.files,
+                    "keys": [("rarity", 1)],
+                    "kwargs": {"name": "rarity_idx"}
+                },
+                {
+                    "collection": self.files,
+                    "keys": [("timestamp", DESCENDING)],
+                    "kwargs": {"name": "timestamp_desc_idx"}
+                },
+                {
+                    "collection": self.files,
+                    "keys": [("tags", 1)],
+                    "kwargs": {"name": "tags_idx"}
+                },
+                {
+                    "collection": self.files,
+                    "keys": [("privacy", 1)],
+                    "kwargs": {"name": "privacy_idx"}
+                },
+                
+                # Deleted files collection
+                {
+                    "collection": self.deleted_files,
+                    "keys": [("file_id", 1)],
+                    "kwargs": {"name": "deleted_file_id_idx"}
+                },
+                {
+                    "collection": self.deleted_files,
+                    "keys": [("deleted_at", DESCENDING)],
+                    "kwargs": {"name": "deleted_at_desc_idx"}
+                },
+                {
+                    "collection": self.deleted_files,
+                    "keys": [("deleted_by", 1)],
+                    "kwargs": {"name": "deleted_by_idx"}
+                },
+                
+                # Users collection
+                {
+                    "collection": self.users,
+                    "keys": [("user_id", 1)],
+                    "kwargs": {"unique": True, "name": "user_id_unique_idx"}
+                },
+                
+                # Sudo users collection
+                {
+                    "collection": self.sudo_users,
+                    "keys": [("user_id", 1)],
+                    "kwargs": {"unique": True, "name": "sudo_user_id_unique_idx"}
+                }
+            ]
+            
+            created_count = 0
+            for config in index_configs:
+                try:
+                    # Check if index already exists
+                    existing_indexes = list(config["collection"].list_indexes())
+                    index_name = config["kwargs"].get("name")
+                    
+                    # Skip if index with same name already exists
+                    if any(idx.get("name") == index_name for idx in existing_indexes):
+                        logger.info(f"Index {index_name} already exists, skipping...")
+                        continue
+                    
+                    # Create the index
+                    config["collection"].create_index(config["keys"], **config["kwargs"])
+                    created_count += 1
+                    logger.info(f"Created index: {index_name}")
+                    
+                except OperationFailure as e:
+                    if "already exists" in str(e) or "IndexKeySpecsConflict" in str(e):
+                        logger.warning(f"Index {config['kwargs'].get('name')} already exists: {e}")
+                    else:
+                        logger.error(f"Error creating index {config['kwargs'].get('name')}: {e}")
+                except Exception as e:
+                    logger.error(f"Unexpected error creating index {config['kwargs'].get('name')}: {e}")
+            
+            logger.info(f"✅ Created/updated {created_count} indexes")
+            
+        except Exception as e:
+            logger.error(f"Error in index creation: {e}")
+            # Don't crash the bot if indexes fail
     
     def _initialize_counter(self):
         """Initialize counter if not exists"""
@@ -759,7 +845,6 @@ class MongoDB:
 
 # Initialize database
 db = MongoDB()
-db.connect()
 
 # ==================== HELPER CLASSES ====================
 class UploadService:
@@ -1098,6 +1183,12 @@ def sudo_only(permission: str):
 # ==================== COMMAND HANDLERS ====================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Start command with complete feature overview"""
+    try:
+        # Initialize database connection
+        db.connect()
+    except:
+        pass
+    
     user = update.effective_user
     db.ensure_user(user.id, user.username, user.first_name)
     
@@ -3174,6 +3265,13 @@ def main():
     if not Config.BOT_TOKEN:
         logger.error("❌ BOT_TOKEN environment variable is required!")
         exit(1)
+    
+    # Initialize database connection
+    try:
+        db.connect()
+    except Exception as e:
+        logger.error(f"Failed to connect to MongoDB: {e}")
+        logger.info("Will try to connect when first command is received...")
     
     # Create application
     application = Application.builder().token(Config.BOT_TOKEN).build()
