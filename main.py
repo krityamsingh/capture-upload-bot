@@ -1,57 +1,68 @@
-# ==================== SIMPLE CHARACTER UPLOAD BOT ====================
+#!/usr/bin/env python3
+"""
+COMPLETE TELEGRAM UPLOAD BOT WITH ALL FEATURES
+Features: Rarity system, recycle bin, sudo permissions, database reset warnings, etc.
+"""
+
 import os
 import logging
 import asyncio
-import aiohttp
-import uuid
 import json
-import zipfile
-import io
-from datetime import datetime
-from typing import Dict, Any, List, Optional
+import hashlib
+import uuid
+import re
+from datetime import datetime, timedelta
+from typing import Dict, List, Optional, Tuple, Set
+from enum import Enum
+from io import BytesIO
+from functools import wraps
+import aiohttp
 
-from pyrogram import Client, filters
-from pyrogram.types import (
-    Message, InlineKeyboardButton, 
-    InlineKeyboardMarkup
+from dotenv import load_dotenv
+from pymongo import MongoClient, DESCENDING, ASCENDING
+from pymongo.errors import ConnectionFailure, DuplicateKeyError
+from bson import ObjectId
+from bson.errors import InvalidId
+from telegram import (
+    Update, 
+    InlineKeyboardButton, 
+    InlineKeyboardMarkup,
+    User,
+    Chat,
+    InputMediaPhoto,
+    InputMediaVideo,
+    InputMediaDocument
 )
-from pymongo import MongoClient
-from pymongo.errors import PyMongoError
+from telegram.constants import ChatAction, ParseMode
+from telegram.ext import (
+    Application,
+    CommandHandler,
+    MessageHandler,
+    CallbackQueryHandler,
+    ContextTypes,
+    filters,
+    ConversationHandler,
+    CallbackContext
+)
+from telegram.error import BadRequest, NetworkError, RetryAfter
 
-# Configure logging for Heroku
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger(__name__)
+# ==================== LOAD ENVIRONMENT ====================
+load_dotenv()
 
 # ==================== CONFIGURATION ====================
 class Config:
-    """Configuration class for bot settings"""
+    BOT_TOKEN = os.getenv("BOT_TOKEN")
+    MONGODB_URI = os.getenv("MONGODB_URI", "mongodb://localhost:27017")
+    DATABASE_NAME = os.getenv("DATABASE_NAME", "upload_bot")
+    OWNER_ID = int(os.getenv("OWNER_ID", "123456789"))
+    LOG_CHANNEL = os.getenv("LOG_CHANNEL", "")
+    UPLOAD_TIMEOUT = int(os.getenv("UPLOAD_TIMEOUT", 60))
+    MAX_FILE_SIZE = int(os.getenv("MAX_FILE_SIZE", 50 * 1024 * 1024))  # 50MB
     
-    # Get environment variables from Heroku
-    API_ID = int(os.getenv("API_ID", 26676741))
-    API_HASH = os.getenv("API_HASH", "6fbc29f23c15bdb0c7fbbefe65c9193a")
-    BOT_TOKEN = os.getenv("BOT_TOKEN", "8496337458:AAF7ORldWpN-C6hpzSDt1bPCOeGVxfbU4qg")
-    
-    # MongoDB configuration
-    MONGO_URI = os.getenv("MONGODB_URI", os.getenv("MONGO_URI", "mongodb+srv://erenxironman09:erenxironman09@catcherbot.koejwre.mongodb.net/?appName=catcherbot"))
-    DATABASE_NAME = os.getenv("DATABASE_NAME", "catcherbot")
-    
-    # Bot owner IDs (for admin commands) - multiple owners
-    OWNER_IDS = [1653814030, 7976292835, 8496760733, 7878477646]
-    
-    # Default log channel - @capture_database
-    LOG_CHANNEL = "@capture_database"
-    
-    # Upload service configuration
-    UPLOAD_TIMEOUT = 60
-    MAX_FILE_SIZE = 50 * 1024 * 1024  # 50MB max file size
-    
-    # Updated rarity mappings
+    # Rarity system (1-14) for categorization
     RARITY_MAP = {
         1: "⚪ Common",
-        2: "🟢 Uncommon",
+        2: "🟢 Uncommon", 
         3: "🔴 Rare",
         4: "🟡 Legendary",
         5: "🎐 Limited Edition",
@@ -63,891 +74,724 @@ class Config:
         11: "🌈 Neon",
         12: "🛡️ Supreme",
         13: "🔮 Crystal",
-        14: "🎤 Celebrity"
+        14: "🎤 Celebrity",
     }
     
-    # Subtypes for Limited Edition (rarity 5)
-    LIMITED_SUBTYPES = {
-        "valentine": "💝 Valentine",
-        "christmas": "🎄 Christmas", 
-        "halloween": "🎃 Halloween",
-        "summer": "🏖️ Summer",
-        "winter": "❄️ Winter",
-        "basketball": "🏀 Basketball",
-        "police": "👮‍♀️ Police",
-        "newyear": "🎆 New Year",
-        "easter": "🐰 Easter",
-        "wedding": "💒 Wedding",
-        "karate": "🥋 Karate",
+    # Pagination settings
+    ITEMS_PER_PAGE = 10
+    
+    # Recycle bin settings
+    RECYCLE_BIN_MAX_DAYS = 30
+    
+    # Sudo permission levels
+    PERMISSIONS = {
+        'upload': 'Upload files',
+        'delete': 'Delete files',
+        'edit': 'Edit files',
+        'restore': 'Restore deleted files',
+        'fill': 'Fill deleted slots',
+        'view_deleted': 'View recycle bin',
+        'add_sudo': 'Add sudo users',
+        'remove_sudo': 'Remove sudo users',
+        'reset_db': 'Reset database'
     }
 
-config = Config()
+# ==================== LOGGING ====================
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler('bot.log'),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger(__name__)
 
-# ==================== MODELS ====================
-class Character:
-    """Data model for character documents"""
+# ==================== DATA MODELS ====================
+class FileMetadata:
+    """Data model for file documents"""
     
     def __init__(
         self,
-        char_name: str,
-        anime_name: str,
+        file_name: str,
+        description: str,
         rarity: str,
-        character_id: int,
-        media_url: Optional[str] = None,
-        subrarity: Optional[str] = None,
-        media_type: Optional[str] = None,
+        file_id: int,
+        telegram_file_id: str = None,
+        file_type: str = None,
+        file_size: int = 0,
         added_by: int = None,
-        timestamp: Optional[datetime] = None
+        timestamp: Optional[datetime] = None,
+        deleted_at: Optional[datetime] = None,
+        deleted_by: Optional[int] = None,
+        deleted_reason: Optional[str] = None,
+        tags: List[str] = None,
+        privacy: str = "public",
+        views: int = 0,
+        downloads: int = 0,
+        favorites: int = 0
     ):
-        self.char_name = char_name
-        self.anime_name = anime_name
+        self.file_name = file_name
+        self.description = description
         self.rarity = rarity
-        self.character_id = character_id
-        self.media_url = media_url
-        self.subrarity = subrarity
-        self.media_type = media_type
+        self.file_id = file_id
+        self.telegram_file_id = telegram_file_id
+        self.file_type = file_type
+        self.file_size = file_size
         self.added_by = added_by
         self.timestamp = timestamp or datetime.utcnow()
+        self.deleted_at = deleted_at
+        self.deleted_by = deleted_by
+        self.deleted_reason = deleted_reason
+        self.tags = tags or []
+        self.privacy = privacy
+        self.views = views
+        self.downloads = downloads
+        self.favorites = favorites
     
-    def to_dict(self) -> Dict[str, Any]:
-        """Convert character object to dictionary for MongoDB"""
-        return {
-            "char_name": self.char_name,
-            "anime_name": self.anime_name,
+    def to_dict(self) -> Dict:
+        """Convert file object to dictionary for MongoDB"""
+        data = {
+            "file_name": self.file_name,
+            "description": self.description,
             "rarity": self.rarity,
-            "character_id": self.character_id,
-            "media_url": self.media_url,
-            "subrarity": self.subrarity,
-            "media_type": self.media_type,
+            "file_id": self.file_id,
+            "telegram_file_id": self.telegram_file_id,
+            "file_type": self.file_type,
+            "file_size": self.file_size,
             "added_by": self.added_by,
-            "timestamp": self.timestamp
+            "timestamp": self.timestamp,
+            "tags": self.tags,
+            "privacy": self.privacy,
+            "views": self.views,
+            "downloads": self.downloads,
+            "favorites": self.favorites
         }
+        
+        if self.deleted_at:
+            data["deleted_at"] = self.deleted_at
+        if self.deleted_by:
+            data["deleted_by"] = self.deleted_by
+        if self.deleted_reason:
+            data["deleted_reason"] = self.deleted_reason
+        
+        return data
     
     @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> 'Character':
-        """Create Character object from dictionary"""
+    def from_dict(cls, data: Dict) -> 'FileMetadata':
+        """Create FileMetadata object from dictionary"""
         return cls(
-            char_name=data.get("char_name"),
-            anime_name=data.get("anime_name"),
+            file_name=data.get("file_name"),
+            description=data.get("description"),
             rarity=data.get("rarity"),
-            character_id=data.get("character_id"),
-            media_url=data.get("media_url"),
-            subrarity=data.get("subrarity"),
-            media_type=data.get("media_type"),
+            file_id=data.get("file_id"),
+            telegram_file_id=data.get("telegram_file_id"),
+            file_type=data.get("file_type"),
+            file_size=data.get("file_size", 0),
             added_by=data.get("added_by"),
-            timestamp=data.get("timestamp")
+            timestamp=data.get("timestamp"),
+            deleted_at=data.get("deleted_at"),
+            deleted_by=data.get("deleted_by"),
+            deleted_reason=data.get("deleted_reason"),
+            tags=data.get("tags", []),
+            privacy=data.get("privacy", "public"),
+            views=data.get("views", 0),
+            downloads=data.get("downloads", 0),
+            favorites=data.get("favorites", 0)
         )
 
-# ==================== DATABASE ====================
+# ==================== DATABASE CLASS ====================
 class MongoDB:
     """MongoDB database operations handler"""
     
     def __init__(self):
         self.client = None
         self.db = None
-        self.characters = None
+        self.files = None
+        self.deleted_files = None
         self.counters = None
         self.sudo_users = None
-        self.harem = None  # New collection for harem data
-        self.user_backups = None  # New collection for user backup metadata
+        self.db_warnings = None
+        self.users = None
+        self.analytics = None
     
-    async def connect(self):
+    def connect(self):
         """Establish connection to MongoDB"""
         try:
-            self.client = MongoClient(config.MONGO_URI)
-            self.db = self.client[config.DATABASE_NAME]
-            self.characters = self.db.characters
+            self.client = MongoClient(Config.MONGODB_URI, serverSelectionTimeoutMS=5000)
+            self.client.server_info()
+            
+            self.db = self.client[Config.DATABASE_NAME]
+            self.files = self.db.files
+            self.deleted_files = self.db.deleted_files
             self.counters = self.db.counters
             self.sudo_users = self.db.sudo_users
-            self.harem = self.db.harem  # Initialize harem collection
-            self.user_backups = self.db.user_backups  # Initialize backup metadata
+            self.db_warnings = self.db.db_warnings
+            self.users = self.db.users
+            self.analytics = self.db.analytics
             
             # Create indexes
-            await asyncio.get_event_loop().run_in_executor(
-                None, 
-                lambda: self.characters.create_index("char_name")
-            )
-            await asyncio.get_event_loop().run_in_executor(
-                None,
-                lambda: self.characters.create_index("added_by")
-            )
-            await asyncio.get_event_loop().run_in_executor(
-                None,
-                lambda: self.characters.create_index("character_id", unique=True)
-            )
-            await asyncio.get_event_loop().run_in_executor(
-                None,
-                lambda: self.sudo_users.create_index("user_id", unique=True)
-            )
-            await asyncio.get_event_loop().run_in_executor(
-                None,
-                lambda: self.harem.create_index([("user_id", 1), ("character_id", 1)], unique=True)
-            )
-            await asyncio.get_event_loop().run_in_executor(
-                None,
-                lambda: self.user_backups.create_index([("user_id", 1), ("backup_id", 1)], unique=True)
-            )
+            self._create_indexes()
             
-            # Initialize counter if not exists
-            counter_exists = await asyncio.get_event_loop().run_in_executor(
-                None,
-                lambda: self.counters.find_one({"_id": "character_id"})
-            )
+            # Initialize counter
+            self._initialize_counter()
             
-            if not counter_exists:
-                await asyncio.get_event_loop().run_in_executor(
-                    None,
-                    lambda: self.counters.insert_one({"_id": "character_id", "seq": 0})
-                )
+            # Initialize warnings
+            self._initialize_warnings()
             
-            logger.info("Connected to MongoDB successfully")
+            logger.info("✅ Connected to MongoDB successfully")
             
-        except PyMongoError as e:
-            logger.error(f"Failed to connect to MongoDB: {e}")
+        except ConnectionFailure as e:
+            logger.error(f"❌ Failed to connect to MongoDB: {e}")
             raise
     
-    async def disconnect(self):
-        """Close MongoDB connection"""
-        if self.client:
-            await asyncio.get_event_loop().run_in_executor(None, self.client.close)
-            logger.info("Disconnected from MongoDB")
+    def _create_indexes(self):
+        """Create all necessary indexes"""
+        # Files collection indexes
+        self.files.create_index([("telegram_file_id", 1)], unique=True, sparse=True)
+        self.files.create_index([("added_by", 1)])
+        self.files.create_index([("file_id", 1)], unique=True)
+        self.files.create_index([("rarity", 1)])
+        self.files.create_index([("timestamp", DESCENDING)])
+        self.files.create_index([("tags", 1)])
+        self.files.create_index([("privacy", 1)])
+        
+        # Deleted files indexes
+        self.deleted_files.create_index([("file_id", 1)])
+        self.deleted_files.create_index([("deleted_at", DESCENDING)])
+        self.deleted_files.create_index([("deleted_by", 1)])
+        
+        # Users indexes
+        self.users.create_index([("user_id", 1)], unique=True)
+        self.sudo_users.create_index([("user_id", 1)], unique=True)
+        
+        logger.info("✅ Database indexes created")
     
-    async def get_next_character_id(self) -> int:
-        """Get next sequential character ID"""
-        try:
-            result = await asyncio.get_event_loop().run_in_executor(
-                None,
-                lambda: self.counters.find_one_and_update(
-                    {"_id": "character_id"},
-                    {"$inc": {"seq": 1}},
-                    return_document=True
-                )
-            )
-            return result["seq"]
-        except PyMongoError as e:
-            logger.error(f"Error getting next character ID: {e}")
-            raise
+    def _initialize_counter(self):
+        """Initialize counter if not exists"""
+        if not self.counters.find_one({"_id": "file_id"}):
+            self.counters.insert_one({"_id": "file_id", "seq": 0})
     
-    # Character operations
-    async def insert_character(self, character: Character) -> str:
-        """Insert a new character into database"""
-        try:
-            result = await asyncio.get_event_loop().run_in_executor(
-                None,
-                lambda: self.characters.insert_one(character.to_dict())
-            )
-            return str(result.inserted_id)
-        except PyMongoError as e:
-            logger.error(f"Error inserting character: {e}")
-            raise
+    def _initialize_warnings(self):
+        """Initialize reset warnings collection"""
+        if not self.db_warnings.find_one({"_id": "reset_warnings"}):
+            self.db_warnings.insert_one({
+                "_id": "reset_warnings",
+                "warnings": {},
+                "last_warning": None
+            })
     
-    async def insert_character_with_id(self, character: Character) -> str:
-        """Insert a character with specific ID (for filling gaps)"""
-        try:
-            # Check if character ID already exists
-            existing = await asyncio.get_event_loop().run_in_executor(
-                None,
-                lambda: self.characters.find_one({"character_id": character.character_id})
-            )
-            
-            if existing:
-                raise ValueError(f"Character ID {character.character_id} already exists")
-            
-            result = await asyncio.get_event_loop().run_in_executor(
-                None,
-                lambda: self.characters.insert_one(character.to_dict())
-            )
-            
-            # Update counter if needed (to maintain sequence)
-            current_counter = await self.get_current_counter()
-            if character.character_id >= current_counter:
-                await self.update_counter(character.character_id + 1)
-            
-            return str(result.inserted_id)
-        except PyMongoError as e:
-            logger.error(f"Error inserting character with ID: {e}")
-            raise
-    
-    async def get_current_counter(self) -> int:
-        """Get current counter value without incrementing"""
-        try:
-            result = await asyncio.get_event_loop().run_in_executor(
-                None,
-                lambda: self.counters.find_one({"_id": "character_id"})
-            )
-            return result["seq"] if result else 0
-        except PyMongoError as e:
-            logger.error(f"Error getting current counter: {e}")
-            return 0
-    
-    async def update_counter(self, new_value: int) -> bool:
-        """Update the counter to a specific value"""
-        try:
-            result = await asyncio.get_event_loop().run_in_executor(
-                None,
-                lambda: self.counters.update_one(
-                    {"_id": "character_id"},
-                    {"$set": {"seq": new_value}}
-                )
-            )
-            return result.modified_count > 0
-        except PyMongoError as e:
-            logger.error(f"Error updating counter: {e}")
-            return False
-    
-    async def get_character_count(self) -> int:
-        """Get total number of characters in database"""
-        return await asyncio.get_event_loop().run_in_executor(
-            None,
-            lambda: self.characters.count_documents({})
+    # ==================== ID MANAGEMENT ====================
+    def get_next_file_id(self) -> int:
+        """Get next sequential file ID"""
+        result = self.counters.find_one_and_update(
+            {"_id": "file_id"},
+            {"$inc": {"seq": 1}},
+            return_document=True
         )
+        return result["seq"]
     
-    async def get_user_characters(self, user_id: int) -> List[Dict[str, Any]]:
-        """Get all characters uploaded by a user"""
-        try:
-            characters = await asyncio.get_event_loop().run_in_executor(
-                None,
-                lambda: list(self.characters.find({"added_by": user_id}))
-            )
-            return characters
-        except PyMongoError as e:
-            logger.error(f"Error fetching user characters: {e}")
-            return []
+    # ==================== FILE OPERATIONS ====================
+    def insert_file(self, file_data: FileMetadata) -> str:
+        """Insert a new file into database"""
+        result = self.files.insert_one(file_data.to_dict())
+        return str(result.inserted_id)
     
-    async def get_character_by_id(self, character_id: int) -> Optional[Dict[str, Any]]:
-        """Get character by character ID"""
-        try:
-            character = await asyncio.get_event_loop().run_in_executor(
-                None,
-                lambda: self.characters.find_one({"character_id": character_id})
-            )
-            return character
-        except PyMongoError as e:
-            logger.error(f"Error fetching character by ID: {e}")
-            return None
+    def get_file_count(self) -> int:
+        """Get total number of active files"""
+        return self.files.count_documents({})
     
-    async def delete_character(self, character_id: int) -> bool:
-        """Delete character by ID"""
-        try:
-            result = await asyncio.get_event_loop().run_in_executor(
-                None,
-                lambda: self.characters.delete_one({"character_id": character_id})
-            )
-            return result.deleted_count > 0
-        except PyMongoError as e:
-            logger.error(f"Error deleting character: {e}")
-            return False
+    def get_file_by_id(self, file_id: int) -> Optional[Dict]:
+        """Get active file by file ID"""
+        return self.files.find_one({"file_id": file_id})
     
-    async def update_character(
+    def update_file(
         self, 
-        character_id: int, 
-        char_name: str, 
-        anime_name: str, 
-        rarity: str, 
-        subrarity: Optional[str] = None
+        file_id: int, 
+        file_name: str, 
+        description: str, 
+        rarity: str,
+        tags: List[str] = None
     ) -> bool:
-        """Update character details"""
-        try:
-            update_doc = {
-                "char_name": char_name,
-                "anime_name": anime_name,
-                "rarity": rarity
-            }
+        """Update file details"""
+        update_data = {
+            "file_name": file_name,
+            "description": description,
+            "rarity": rarity
+        }
+        if tags is not None:
+            update_data["tags"] = tags
             
-            if subrarity:
-                update_doc["subrarity"] = subrarity
-                result = await asyncio.get_event_loop().run_in_executor(
-                    None,
-                    lambda: self.characters.update_one(
-                        {"character_id": character_id},
-                        {"$set": update_doc}
-                    )
-                )
-            else:
-                result = await asyncio.get_event_loop().run_in_executor(
-                    None,
-                    lambda: self.characters.update_one(
-                        {"character_id": character_id},
-                        {
-                            "$set": update_doc,
-                            "$unset": {"subrarity": ""}
-                        }
-                    )
-                )
-            return result.modified_count > 0
-        except PyMongoError as e:
-            logger.error(f"Error updating character: {e}")
-            return False
+        result = self.files.update_one(
+            {"file_id": file_id},
+            {"$set": update_data}
+        )
+        return result.modified_count > 0
     
-    async def update_character_media(self, character_id: int, media_url: str, media_type: str) -> bool:
-        """Update character media"""
-        try:
-            result = await asyncio.get_event_loop().run_in_executor(
-                None,
-                lambda: self.characters.update_one(
-                    {"character_id": character_id},
-                    {"$set": {
-                        "media_url": media_url,
-                        "media_type": media_type
-                    }}
-                )
-            )
-            return result.modified_count > 0
-        except PyMongoError as e:
-            logger.error(f"Error updating character media: {e}")
-            return False
+    def update_file_metadata(self, file_id: int, metadata: Dict) -> bool:
+        """Update file metadata"""
+        result = self.files.update_one(
+            {"file_id": file_id},
+            {"$set": metadata}
+        )
+        return result.modified_count > 0
     
-    async def search_characters(self, query: str, limit: int = 20) -> List[Dict[str, Any]]:
-        """Search characters by name or anime"""
+    def increment_views(self, file_id: int) -> bool:
+        """Increment file views"""
+        result = self.files.update_one(
+            {"file_id": file_id},
+            {"$inc": {"views": 1}}
+        )
+        return result.modified_count > 0
+    
+    def increment_downloads(self, file_id: int) -> bool:
+        """Increment file downloads"""
+        result = self.files.update_one(
+            {"file_id": file_id},
+            {"$inc": {"downloads": 1}}
+        )
+        return result.modified_count > 0
+    
+    def increment_favorites(self, file_id: int) -> bool:
+        """Increment file favorites"""
+        result = self.files.update_one(
+            {"file_id": file_id},
+            {"$inc": {"favorites": 1}}
+        )
+        return result.modified_count > 0
+    
+    # ==================== RECYCLE BIN OPERATIONS ====================
+    def soft_delete_file(self, file_id: int, deleted_by: int, reason: str = None) -> bool:
+        """Move file to recycle bin (soft delete)"""
+        # Get file from active collection
+        file_data = self.files.find_one({"file_id": file_id})
+        
+        if not file_data:
+            return False
+        
+        # Add deletion metadata
+        file_data["deleted_at"] = datetime.utcnow()
+        file_data["deleted_by"] = deleted_by
+        if reason:
+            file_data["deleted_reason"] = reason
+        
+        # Insert into deleted collection
+        self.deleted_files.insert_one(file_data)
+        
+        # Remove from active collection
+        result = self.files.delete_one({"file_id": file_id})
+        
+        return result.deleted_count > 0
+    
+    def restore_file(self, file_id: int) -> bool:
+        """Restore file from recycle bin"""
+        # Get file from deleted collection
+        file_data = self.deleted_files.find_one({"file_id": file_id})
+        
+        if not file_data:
+            return False
+        
+        # Remove deletion metadata
+        file_data.pop("deleted_at", None)
+        file_data.pop("deleted_by", None)
+        file_data.pop("deleted_reason", None)
+        
+        # Insert back into active collection
+        self.files.insert_one(file_data)
+        
+        # Remove from deleted collection
+        result = self.deleted_files.delete_one({"file_id": file_id})
+        
+        return result.deleted_count > 0
+    
+    def permanent_delete_file(self, file_id: int) -> bool:
+        """Permanently delete file from recycle bin"""
+        result = self.deleted_files.delete_one({"file_id": file_id})
+        return result.deleted_count > 0
+    
+    def fill_deleted_file(self, file_id: int, file_data: FileMetadata) -> bool:
+        """Replace a deleted file with new file data"""
+        # Check if file exists in deleted collection
+        deleted_file = self.deleted_files.find_one({"file_id": file_id})
+        
+        if not deleted_file:
+            return False
+        
+        # Remove from deleted collection
+        self.deleted_files.delete_one({"file_id": file_id})
+        
+        # Insert new file with the same ID
+        file_dict = file_data.to_dict()
+        file_dict["file_id"] = file_id
+        
+        self.files.insert_one(file_dict)
+        
+        return True
+    
+    def get_deleted_file_by_id(self, file_id: int) -> Optional[Dict]:
+        """Get deleted file by file ID"""
+        return self.deleted_files.find_one({"file_id": file_id})
+    
+    def get_deleted_files_count(self) -> int:
+        """Get total number of deleted files"""
+        return self.deleted_files.count_documents({})
+    
+    def get_oldest_deleted_file(self) -> Optional[Dict]:
+        """Get the oldest deleted file (first to be deleted)"""
+        return self.deleted_files.find_one({}, sort=[("deleted_at", ASCENDING)])
+    
+    def cleanup_old_deleted(self) -> int:
+        """Clean up old deleted files (older than RECYCLE_BIN_MAX_DAYS)"""
+        cutoff_date = datetime.utcnow() - timedelta(days=Config.RECYCLE_BIN_MAX_DAYS)
+        result = self.deleted_files.delete_many({"deleted_at": {"$lt": cutoff_date}})
+        return result.deleted_count
+    
+    # ==================== SEARCH AND LIST OPERATIONS ====================
+    def search_files(self, query: str, limit: int = 20) -> List[Dict]:
+        """Search active files by name or description"""
+        search_filter = {
+            "$or": [
+                {"file_name": {"$regex": query, "$options": "i"}},
+                {"description": {"$regex": query, "$options": "i"}},
+                {"tags": {"$in": [query]}}
+            ]
+        }
+        
+        return list(self.files.find(search_filter).limit(limit))
+    
+    def search_deleted_files(self, query: str, page: int = 0) -> Tuple[List[Dict], int]:
+        """Search deleted files with pagination"""
+        skip = page * Config.ITEMS_PER_PAGE
+        
+        search_filter = {
+            "$or": [
+                {"file_name": {"$regex": query, "$options": "i"}},
+                {"description": {"$regex": query, "$options": "i"}},
+                {"tags": {"$in": [query]}}
+            ]
+        }
+        
+        files = list(self.deleted_files.find(search_filter)
+                     .sort("deleted_at", DESCENDING)
+                     .skip(skip)
+                     .limit(Config.ITEMS_PER_PAGE))
+        
+        total_count = self.deleted_files.count_documents(search_filter)
+        
+        return files, total_count
+    
+    def get_files_by_rarity(self, rarity_name: str, page: int = 0) -> Tuple[List[Dict], int]:
+        """Get active files by rarity with pagination"""
+        skip = page * Config.ITEMS_PER_PAGE
+        
+        files = list(self.files.find({"rarity": rarity_name})
+                     .skip(skip)
+                     .limit(Config.ITEMS_PER_PAGE))
+        
+        total_count = self.files.count_documents({"rarity": rarity_name})
+        
+        return files, total_count
+    
+    def get_all_files_paginated(self, page: int = 0) -> Tuple[List[Dict], int]:
+        """Get all active files with pagination"""
+        skip = page * Config.ITEMS_PER_PAGE
+        
+        files = list(self.files.find({})
+                     .sort("file_id", ASCENDING)
+                     .skip(skip)
+                     .limit(Config.ITEMS_PER_PAGE))
+        
+        total_count = self.get_file_count()
+        
+        return files, total_count
+    
+    def get_deleted_files(self, page: int = 0) -> Tuple[List[Dict], int]:
+        """Get deleted files with pagination"""
+        skip = page * Config.ITEMS_PER_PAGE
+        
+        files = list(self.deleted_files.find({})
+                     .sort("deleted_at", DESCENDING)
+                     .skip(skip)
+                     .limit(Config.ITEMS_PER_PAGE))
+        
+        total_count = self.get_deleted_files_count()
+        
+        return files, total_count
+    
+    def get_user_files_paginated(self, user_id: int, page: int = 0) -> Tuple[List[Dict], int]:
+        """Get all active files uploaded by a user with pagination"""
+        skip = page * Config.ITEMS_PER_PAGE
+        
+        files = list(self.files.find({"added_by": user_id})
+                     .sort("timestamp", DESCENDING)
+                     .skip(skip)
+                     .limit(Config.ITEMS_PER_PAGE))
+        
+        total_count = self.files.count_documents({"added_by": user_id})
+        
+        return files, total_count
+    
+    def get_user_deleted_files(self, user_id: int, page: int = 0) -> Tuple[List[Dict], int]:
+        """Get deleted files uploaded by a user with pagination"""
+        skip = page * Config.ITEMS_PER_PAGE
+        
+        files = list(self.deleted_files.find({"added_by": user_id})
+                     .sort("deleted_at", DESCENDING)
+                     .skip(skip)
+                     .limit(Config.ITEMS_PER_PAGE))
+        
+        total_count = self.deleted_files.count_documents({"added_by": user_id})
+        
+        return files, total_count
+    
+    def search_files_paginated(self, query: str, page: int = 0) -> Tuple[List[Dict], int]:
+        """Search active files with pagination"""
+        skip = page * Config.ITEMS_PER_PAGE
+        
+        search_filter = {
+            "$or": [
+                {"file_name": {"$regex": query, "$options": "i"}},
+                {"description": {"$regex": query, "$options": "i"}},
+                {"tags": {"$in": [query]}}
+            ]
+        }
+        
+        files = list(self.files.find(search_filter)
+                     .skip(skip)
+                     .limit(Config.ITEMS_PER_PAGE))
+        
+        total_count = self.files.count_documents(search_filter)
+        
+        return files, total_count
+    
+    # ==================== STATISTICS ====================
+    def get_rarity_stats(self) -> Dict[str, int]:
+        """Get count of active files per rarity"""
+        pipeline = [
+            {"$group": {
+                "_id": "$rarity",
+                "count": {"$sum": 1}
+            }},
+            {"$sort": {"_id": 1}}
+        ]
+        
+        results = list(self.files.aggregate(pipeline))
+        
+        stats = {}
+        for result in results:
+            stats[result["_id"]] = result["count"]
+        
+        return stats
+    
+    def get_top_uploaders(self, limit: int = 10) -> List[Dict]:
+        """Get top uploaders by file count"""
+        pipeline = [
+            {"$group": {
+                "_id": "$added_by",
+                "count": {"$sum": 1}
+            }},
+            {"$sort": {"count": DESCENDING}},
+            {"$limit": limit}
+        ]
+        
+        return list(self.files.aggregate(pipeline))
+    
+    # ==================== DATABASE RESET FUNCTIONS ====================
+    def add_reset_warning(self, user_id: int) -> Tuple[int, datetime]:
+        """Add a reset warning for a user"""
+        result = self.db_warnings.find_one_and_update(
+            {"_id": "reset_warnings"},
+            {
+                "$set": {
+                    f"warnings.{user_id}.last_warning": datetime.utcnow(),
+                    "last_warning": datetime.utcnow()
+                },
+                "$inc": {f"warnings.{user_id}.count": 1}
+            },
+            upsert=True,
+            return_document=True
+        )
+        
+        warnings = result.get("warnings", {})
+        user_warnings = warnings.get(str(user_id), {})
+        warning_count = user_warnings.get("count", 1)
+        
+        return warning_count, datetime.utcnow()
+    
+    def get_reset_warnings(self, user_id: int) -> Tuple[int, Optional[datetime]]:
+        """Get reset warnings for a user"""
+        result = self.db_warnings.find_one({"_id": "reset_warnings"})
+        
+        if result and "warnings" in result:
+            warnings = result["warnings"]
+            user_warnings = warnings.get(str(user_id), {})
+            warning_count = user_warnings.get("count", 0)
+            last_warning = user_warnings.get("last_warning")
+            if last_warning and isinstance(last_warning, str):
+                last_warning = datetime.fromisoformat(last_warning.replace('Z', '+00:00'))
+            return warning_count, last_warning
+        
+        return 0, None
+    
+    def clear_reset_warnings(self, user_id: int) -> bool:
+        """Clear reset warnings for a user"""
+        result = self.db_warnings.update_one(
+            {"_id": "reset_warnings"},
+            {"$unset": {f"warnings.{user_id}": ""}}
+        )
+        return result.modified_count > 0
+    
+    def reset_database(self) -> bool:
+        """Reset the entire database (clear all collections)"""
         try:
-            search_filter = {
-                "$or": [
-                    {"char_name": {"$regex": query, "$options": "i"}},
-                    {"anime_name": {"$regex": query, "$options": "i"}}
-                ]
-            }
+            # Drop all collections
+            self.files.drop()
+            self.deleted_files.drop()
             
-            characters = await asyncio.get_event_loop().run_in_executor(
-                None,
-                lambda: list(self.characters.find(search_filter).limit(limit))
-            )
-            return characters
-        except PyMongoError as e:
-            logger.error(f"Error searching characters: {e}")
-            return []
-    
-    # Sudo user operations
-    async def add_sudo_user(self, user_id: int, added_by: int) -> bool:
-        """Add a sudo user"""
-        try:
-            result = await asyncio.get_event_loop().run_in_executor(
-                None,
-                lambda: self.sudo_users.insert_one({
-                    "user_id": user_id,
-                    "added_by": added_by,
-                    "added_at": datetime.utcnow()
-                })
-            )
-            return result.inserted_id is not None
-        except PyMongoError as e:
-            logger.error(f"Error adding sudo user: {e}")
+            # Reset counter
+            self.counters.delete_one({"_id": "file_id"})
+            
+            # Reinitialize counter
+            self.counters.insert_one({"_id": "file_id", "seq": 0})
+            
+            # Clear all warnings
+            self.db_warnings.delete_one({"_id": "reset_warnings"})
+            
+            # Reinitialize warnings
+            self.db_warnings.insert_one({
+                "_id": "reset_warnings",
+                "warnings": {},
+                "last_warning": None
+            })
+            
+            logger.info("Database reset successfully")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error resetting database: {e}")
             return False
     
-    async def remove_sudo_user(self, user_id: int) -> bool:
+    # ==================== SUDO USER OPERATIONS ====================
+    def add_sudo_user(self, user_id: int, permissions: List[str]) -> bool:
+        """Add a sudo user with specific permissions"""
+        sudo_doc = {
+            "user_id": user_id,
+            "permissions": permissions,
+            "added_at": datetime.utcnow(),
+            "added_by": Config.OWNER_ID
+        }
+        
+        result = self.sudo_users.update_one(
+            {"user_id": user_id},
+            {"$set": sudo_doc},
+            upsert=True
+        )
+        return True
+    
+    def remove_sudo_user(self, user_id: int) -> bool:
         """Remove a sudo user"""
-        try:
-            result = await asyncio.get_event_loop().run_in_executor(
-                None,
-                lambda: self.sudo_users.delete_one({"user_id": user_id})
-            )
-            return result.deleted_count > 0
-        except PyMongoError as e:
-            logger.error(f"Error removing sudo user: {e}")
+        result = self.sudo_users.delete_one({"user_id": user_id})
+        return result.deleted_count > 0
+    
+    def get_sudo_user(self, user_id: int) -> Optional[Dict]:
+        """Get sudo user details"""
+        return self.sudo_users.find_one({"user_id": user_id})
+    
+    def get_all_sudo_users(self) -> List[Dict]:
+        """Get all sudo users"""
+        return list(self.sudo_users.find({}))
+    
+    def has_permission(self, user_id: int, permission: str) -> bool:
+        """Check if user has specific permission"""
+        if user_id == Config.OWNER_ID:
+            return True
+        
+        sudo_user = self.sudo_users.find_one({"user_id": user_id})
+        
+        if not sudo_user:
             return False
+        
+        permissions = sudo_user.get("permissions", [])
+        return permission in permissions
     
-    async def is_sudo_user(self, user_id: int) -> bool:
-        """Check if user is sudo user"""
-        try:
-            if user_id in config.OWNER_IDS:
-                return True
-            sudo_user = await asyncio.get_event_loop().run_in_executor(
-                None,
-                lambda: self.sudo_users.find_one({"user_id": user_id})
-            )
-            return sudo_user is not None
-        except PyMongoError as e:
-            logger.error(f"Error checking sudo user: {e}")
-            return False
+    def update_sudo_permissions(self, user_id: int, permissions: List[str]) -> bool:
+        """Update sudo user permissions"""
+        result = self.sudo_users.update_one(
+            {"user_id": user_id},
+            {"$set": {"permissions": permissions}}
+        )
+        return result.modified_count > 0
     
-    async def get_sudo_users(self) -> List[Dict[str, Any]]:
-        """Get all sudo user IDs with metadata"""
-        try:
-            sudo_users = await asyncio.get_event_loop().run_in_executor(
-                None,
-                lambda: list(self.sudo_users.find({}))
-            )
-            return sudo_users
-        except PyMongoError as e:
-            logger.error(f"Error fetching sudo users: {e}")
-            return []
+    # ==================== USER MANAGEMENT ====================
+    def ensure_user(self, user_id: int, username: str = None, first_name: str = None) -> Dict:
+        """Ensure user exists in database"""
+        user_data = {
+            "user_id": user_id,
+            "username": username,
+            "first_name": first_name,
+            "join_date": datetime.utcnow(),
+            "last_seen": datetime.utcnow(),
+            "uploads_count": 0,
+            "total_downloads": 0,
+            "total_views": 0
+        }
+        
+        self.users.update_one(
+            {"user_id": user_id},
+            {"$setOnInsert": user_data, "$set": {"last_seen": datetime.utcnow()}},
+            upsert=True
+        )
+        
+        return user_data
     
-    # Backup operations
-    async def create_backup_data(self) -> Dict[str, Any]:
-        """Create backup of entire database"""
-        try:
-            backup_data = {
-                "timestamp": datetime.utcnow().isoformat(),
-                "characters": [],
-                "sudo_users": [],
-                "harem_data": [],
-                "metadata": {
-                    "total_characters": 0,
-                    "total_sudo_users": 0,
-                    "total_harem_entries": 0
-                }
-            }
-            
-            # Get all characters
-            characters = await asyncio.get_event_loop().run_in_executor(
-                None,
-                lambda: list(self.characters.find({}))
-            )
-            # Convert ObjectId to string for JSON serialization
-            for char in characters:
-                char['_id'] = str(char['_id'])
-                if 'timestamp' in char and isinstance(char['timestamp'], datetime):
-                    char['timestamp'] = char['timestamp'].isoformat()
-            
-            backup_data["characters"] = characters
-            backup_data["metadata"]["total_characters"] = len(characters)
-            
-            # Get all sudo users
-            sudo_users = await asyncio.get_event_loop().run_in_executor(
-                None,
-                lambda: list(self.sudo_users.find({}))
-            )
-            for user in sudo_users:
-                user['_id'] = str(user['_id'])
-                if 'added_at' in user and isinstance(user['added_at'], datetime):
-                    user['added_at'] = user['added_at'].isoformat()
-            
-            backup_data["sudo_users"] = sudo_users
-            backup_data["metadata"]["total_sudo_users"] = len(sudo_users)
-            
-            # Get all harem data
-            harem_data = await asyncio.get_event_loop().run_in_executor(
-                None,
-                lambda: list(self.harem.find({}))
-            )
-            for entry in harem_data:
-                entry['_id'] = str(entry['_id'])
-                if 'timestamp' in entry and isinstance(entry['timestamp'], datetime):
-                    entry['timestamp'] = entry['timestamp'].isoformat()
-            
-            backup_data["harem_data"] = harem_data
-            backup_data["metadata"]["total_harem_entries"] = len(harem_data)
-            
-            return backup_data
-            
-        except PyMongoError as e:
-            logger.error(f"Error creating backup data: {e}")
-            return None
+    def increment_user_uploads(self, user_id: int) -> bool:
+        """Increment user's upload count"""
+        result = self.users.update_one(
+            {"user_id": user_id},
+            {"$inc": {"uploads_count": 1}}
+        )
+        return result.modified_count > 0
     
-    # Harem operations
-    async def add_to_harem(self, user_id: int, character_id: int) -> bool:
-        """Add character to user's harem"""
-        try:
-            # Check if character exists
-            character = await self.get_character_by_id(character_id)
-            if not character:
-                return False
-            
-            # Check if already in harem
-            existing = await asyncio.get_event_loop().run_in_executor(
-                None,
-                lambda: self.harem.find_one({
-                    "user_id": user_id,
-                    "character_id": character_id
-                })
-            )
-            
-            if existing:
-                return True  # Already in harem
-            
-            # Add to harem
-            result = await asyncio.get_event_loop().run_in_executor(
-                None,
-                lambda: self.harem.insert_one({
-                    "user_id": user_id,
-                    "character_id": character_id,
-                    "character_data": character,
-                    "added_at": datetime.utcnow()
-                })
-            )
-            
-            return result.inserted_id is not None
-            
-        except PyMongoError as e:
-            logger.error(f"Error adding to harem: {e}")
-            return False
-    
-    async def get_user_harem(self, user_id: int) -> List[Dict[str, Any]]:
-        """Get user's harem data"""
-        try:
-            harem = await asyncio.get_event_loop().run_in_executor(
-                None,
-                lambda: list(self.harem.find({"user_id": user_id}))
-            )
-            return harem
-        except PyMongoError as e:
-            logger.error(f"Error getting user harem: {e}")
-            return []
-    
-    async def remove_from_harem(self, user_id: int, character_id: int) -> bool:
-        """Remove character from user's harem"""
-        try:
-            result = await asyncio.get_event_loop().run_in_executor(
-                None,
-                lambda: self.harem.delete_one({
-                    "user_id": user_id,
-                    "character_id": character_id
-                })
-            )
-            return result.deleted_count > 0
-        except PyMongoError as e:
-            logger.error(f"Error removing from harem: {e}")
-            return False
-    
-    async def clear_user_harem(self, user_id: int) -> bool:
-        """Clear all harem entries for user"""
-        try:
-            result = await asyncio.get_event_loop().run_in_executor(
-                None,
-                lambda: self.harem.delete_many({"user_id": user_id})
-            )
-            return result.deleted_count > 0
-        except PyMongoError as e:
-            logger.error(f"Error clearing harem: {e}")
-            return False
-    
-    async def backup_user_harem(self, user_id: int) -> Dict[str, Any]:
-        """Create backup of user's harem"""
-        try:
-            harem_data = await self.get_user_harem(user_id)
-            backup = {
-                "user_id": user_id,
-                "timestamp": datetime.utcnow().isoformat(),
-                "total_characters": len(harem_data),
-                "harem_entries": []
-            }
-            
-            for entry in harem_data:
-                # Clean up the entry for JSON serialization
-                clean_entry = {
-                    "character_id": entry.get("character_id"),
-                    "character_name": entry.get("character_data", {}).get("char_name", "Unknown"),
-                    "anime": entry.get("character_data", {}).get("anime_name", "Unknown"),
-                    "rarity": entry.get("character_data", {}).get("rarity", "Unknown"),
-                    "added_at": entry.get("added_at", datetime.utcnow()).isoformat() if isinstance(entry.get("added_at"), datetime) else datetime.utcnow().isoformat()
-                }
-                backup["harem_entries"].append(clean_entry)
-            
-            return backup
-            
-        except Exception as e:
-            logger.error(f"Error backing up user harem: {e}")
-            return None
-    
-    async def restore_user_harem(self, user_id: int, harem_data: List[Dict[str, Any]]) -> tuple[bool, int, int]:
-        """Restore user's harem from backup data"""
-        try:
-            # Clear existing harem
-            cleared = await self.clear_user_harem(user_id)
-            if not cleared:
-                logger.warning(f"Could not clear existing harem for user {user_id}")
-            
-            added_count = 0
-            failed_count = 0
-            
-            for entry in harem_data:
-                character_id = entry.get("character_id")
-                if character_id:
-                    success = await self.add_to_harem(user_id, character_id)
-                    if success:
-                        added_count += 1
-                    else:
-                        failed_count += 1
-            
-            return True, added_count, failed_count
-            
-        except Exception as e:
-            logger.error(f"Error restoring user harem: {e}")
-            return False, 0, 0
-    
-    async def get_all_harem_users(self) -> List[int]:
-        """Get all user IDs with harem data"""
-        try:
-            user_ids = await asyncio.get_event_loop().run_in_executor(
-                None,
-                lambda: list(self.harem.distinct("user_id"))
-            )
-            return user_ids
-        except PyMongoError as e:
-            logger.error(f"Error getting all harem users: {e}")
-            return []
-    
-    # Get character by various fields
-    async def get_characters_by_name(self, char_name: str) -> List[Dict[str, Any]]:
-        """Get characters by name"""
-        try:
-            characters = await asyncio.get_event_loop().run_in_executor(
-                None,
-                lambda: list(self.characters.find({"char_name": {"$regex": f"^{char_name}$", "$options": "i"}}))
-            )
-            return characters
-        except PyMongoError as e:
-            logger.error(f"Error getting characters by name: {e}")
-            return []
-    
-    async def get_characters_by_anime(self, anime_name: str) -> List[Dict[str, Any]]:
-        """Get characters by anime"""
-        try:
-            characters = await asyncio.get_event_loop().run_in_executor(
-                None,
-                lambda: list(self.characters.find({"anime_name": {"$regex": f"^{anime_name}$", "$options": "i"}}))
-            )
-            return characters
-        except PyMongoError as e:
-            logger.error(f"Error getting characters by anime: {e}")
-            return []
-    
-    async def get_characters_by_rarity(self, rarity: str) -> List[Dict[str, Any]]:
-        """Get characters by rarity"""
-        try:
-            characters = await asyncio.get_event_loop().run_in_executor(
-                None,
-                lambda: list(self.characters.find({"rarity": rarity}))
-            )
-            return characters
-        except PyMongoError as e:
-            logger.error(f"Error getting characters by rarity: {e}")
-            return []
-    
-    async def get_deleted_characters(self) -> List[int]:
-        """Get list of deleted character IDs (gaps in sequence)"""
-        try:
-            # Get current counter
-            current_counter = await self.get_current_counter()
-            
-            # Get all existing character IDs
-            characters = await asyncio.get_event_loop().run_in_executor(
-                None,
-                lambda: list(self.characters.find({}, {"character_id": 1}))
-            )
-            
-            existing_ids = {char['character_id'] for char in characters}
-            
-            # Find gaps from 1 to current_counter-1
-            deleted_ids = []
-            for i in range(1, current_counter):
-                if i not in existing_ids:
-                    deleted_ids.append(i)
-            
-            return sorted(deleted_ids)
-            
-        except PyMongoError as e:
-            logger.error(f"Error getting deleted characters: {e}")
-            return []
-    
-    async def get_first_deleted_id(self) -> Optional[int]:
-        """Get the first deleted character ID"""
-        try:
-            deleted_ids = await self.get_deleted_characters()
-            return deleted_ids[0] if deleted_ids else None
-        except PyMongoError as e:
-            logger.error(f"Error getting first deleted ID: {e}")
-            return None
+    def increment_user_downloads(self, user_id: int) -> bool:
+        """Increment user's download count"""
+        result = self.users.update_one(
+            {"user_id": user_id},
+            {"$inc": {"total_downloads": 1}}
+        )
+        return result.modified_count > 0
 
-# Global database instance
+# Initialize database
 db = MongoDB()
+db.connect()
 
-# ==================== HELPERS ====================
+# ==================== HELPER CLASSES ====================
 class UploadService:
-    """Handles media uploads exclusively with Catbox service"""
+    """Handles media uploads"""
     
     @staticmethod
-    async def upload_to_catbox(file_path: str, filename: str) -> Optional[str]:
+    async def upload_to_catbox(file_bytes: bytes, filename: str) -> Optional[str]:
         """Upload file to Catbox.moe"""
         try:
             timeout = aiohttp.ClientTimeout(total=30)
             async with aiohttp.ClientSession(timeout=timeout) as session:
-                with open(file_path, 'rb') as file:
-                    form_data = aiohttp.FormData()
-                    form_data.add_field('reqtype', 'fileupload')
-                    form_data.add_field('fileToUpload', file, filename=filename)
+                form_data = aiohttp.FormData()
+                form_data.add_field('reqtype', 'fileupload')
+                form_data.add_field('fileToUpload', file_bytes, filename=filename)
+                
+                async with session.post('https://catbox.moe/user/api.php', data=form_data) as response:
+                    if response.status == 200:
+                        media_url = await response.text()
+                        if media_url and media_url.startswith('http'):
+                            logger.info(f"Successfully uploaded to Catbox: {media_url}")
+                            return media_url.strip()
+                    logger.error(f"Catbox upload failed with status {response.status}")
+                    return None
                     
-                    async with session.post('https://catbox.moe/user/api.php', data=form_data) as response:
-                        if response.status == 200:
-                            media_url = await response.text()
-                            if media_url and media_url.startswith('http'):
-                                logger.info(f"Successfully uploaded to Catbox: {media_url}")
-                                return media_url.strip()
-                        logger.error(f"Catbox upload failed with status {response.status}")
-                        return None
-                        
         except asyncio.TimeoutError:
             logger.error("Catbox upload timeout")
             return None
         except Exception as e:
             logger.error(f"Catbox upload error: {e}")
-            return None
-    
-    @staticmethod
-    async def upload_json_to_catbox(data: Dict[str, Any], filename: str) -> Optional[str]:
-        """Upload JSON data to Catbox"""
-        try:
-            # Create JSON string
-            json_str = json.dumps(data, indent=2, ensure_ascii=False)
-            
-            # Create a temporary file
-            temp_file = f"/tmp/{filename}"
-            with open(temp_file, 'w', encoding='utf-8') as f:
-                f.write(json_str)
-            
-            # Upload to Catbox
-            url = await UploadService.upload_to_catbox(temp_file, filename)
-            
-            # Clean up
-            try:
-                os.remove(temp_file)
-            except:
-                pass
-            
-            return url
-        except Exception as e:
-            logger.error(f"Error uploading JSON to Catbox: {e}")
-            return None
-
-class BackupSystem:
-    """Handles backup creation and restoration"""
-    
-    @staticmethod
-    async def create_full_backup() -> tuple[Optional[bytes], Optional[str]]:
-        """Create a zip backup of entire database"""
-        try:
-            # Get backup data
-            backup_data = await db.create_backup_data()
-            if not backup_data:
-                return None, "Failed to create backup data"
-            
-            # Create zip in memory
-            zip_buffer = io.BytesIO()
-            with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
-                # Add characters backup
-                characters_json = json.dumps(backup_data["characters"], indent=2, ensure_ascii=False)
-                zip_file.writestr("characters.json", characters_json)
-                
-                # Add sudo users backup
-                sudo_json = json.dumps(backup_data["sudo_users"], indent=2, ensure_ascii=False)
-                zip_file.writestr("sudo_users.json", sudo_json)
-                
-                # Add harem backup
-                harem_json = json.dumps(backup_data["harem_data"], indent=2, ensure_ascii=False)
-                zip_file.writestr("harem_data.json", harem_json)
-                
-                # Add metadata
-                metadata = {
-                    "backup_timestamp": backup_data["timestamp"],
-                    "total_characters": backup_data["metadata"]["total_characters"],
-                    "total_sudo_users": backup_data["metadata"]["total_sudo_users"],
-                    "total_harem_entries": backup_data["metadata"]["total_harem_entries"],
-                    "backup_version": "1.0"
-                }
-                metadata_json = json.dumps(metadata, indent=2, ensure_ascii=False)
-                zip_file.writestr("metadata.json", metadata_json)
-            
-            # Reset buffer position
-            zip_buffer.seek(0)
-            
-            # Generate filename with timestamp
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            filename = f"catcherbot_backup_{timestamp}.zip"
-            
-            return zip_buffer.getvalue(), filename
-            
-        except Exception as e:
-            logger.error(f"Error creating backup zip: {e}")
-            return None, str(e)
-    
-    @staticmethod
-    async def create_all_harem_backup() -> tuple[Optional[bytes], Optional[str]]:
-        """Create backup of all users' harem data in a zip"""
-        try:
-            # Get all users with harem data
-            user_ids = await db.get_all_harem_users()
-            
-            if not user_ids:
-                return None, "No harem data found"
-            
-            # Create zip in memory
-            zip_buffer = io.BytesIO()
-            with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
-                backup_count = 0
-                
-                for user_id in user_ids:
-                    try:
-                        # Create backup for each user
-                        backup = await db.backup_user_harem(user_id)
-                        if backup:
-                            # Convert to JSON
-                            json_str = json.dumps(backup, indent=2, ensure_ascii=False)
-                            filename = f"harem_backup_{user_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
-                            zip_file.writestr(filename, json_str)
-                            backup_count += 1
-                    except Exception as e:
-                        logger.error(f"Error backing up harem for user {user_id}: {e}")
-                        continue
-            
-            if backup_count == 0:
-                return None, "Failed to create any harem backups"
-            
-            # Reset buffer position
-            zip_buffer.seek(0)
-            
-            # Generate filename
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            filename = f"all_harem_backups_{timestamp}.zip"
-            
-            return zip_buffer.getvalue(), filename
-            
-        except Exception as e:
-            logger.error(f"Error creating all harem backup: {e}")
-            return None, str(e)
-    
-    @staticmethod
-    async def create_specific_harem_backup(user_id: int) -> tuple[Optional[bytes], Optional[str]]:
-        """Create backup of specific user's harem"""
-        try:
-            backup = await db.backup_user_harem(user_id)
-            if not backup:
-                return None, "Failed to create harem backup"
-            
-            # Convert to JSON
-            json_str = json.dumps(backup, indent=2, ensure_ascii=False)
-            json_bytes = json_str.encode('utf-8')
-            
-            # Generate filename
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            filename = f"harem_backup_{user_id}_{timestamp}.json"
-            
-            return json_bytes, filename
-            
-        except Exception as e:
-            logger.error(f"Error creating specific harem backup: {e}")
-            return None, str(e)
-    
-    @staticmethod
-    async def parse_harem_backup_file(file_content: bytes) -> Optional[List[Dict[str, Any]]]:
-        """Parse harem backup file"""
-        try:
-            # Try to parse as JSON
-            json_str = file_content.decode('utf-8')
-            data = json.loads(json_str)
-            
-            # Validate structure
-            if not isinstance(data, dict):
-                return None
-            
-            if "harem_entries" in data and isinstance(data["harem_entries"], list):
-                return data["harem_entries"]
-            elif isinstance(data, list):
-                # Direct list of entries
-                return data
-            
-            return None
-            
-        except Exception as e:
-            logger.error(f"Error parsing harem backup: {e}")
             return None
 
 class Helpers:
@@ -955,1862 +799,1788 @@ class Helpers:
     
     def __init__(self):
         self.upload_service = UploadService()
-        self.backup_system = BackupSystem()
-    
-    async def upload_media(
-        self, 
-        client: Client, 
-        message: Message,
-        status_callback: callable = None
-    ) -> tuple[Optional[str], Optional[str]]:
-        """Upload media using Catbox service"""
-        import os
-        
-        try:
-            # Determine media type and file ID
-            media_type = None
-            file_id = None
-            filename = f"media_{uuid.uuid4().hex[:8]}"
-            
-            if message.photo:
-                file_id = message.photo.file_id
-                media_type = "photo"
-                filename += ".jpg"
-            elif message.video:
-                file_id = message.video.file_id
-                media_type = "video"
-                filename = message.video.file_name or f"{filename}.mp4"
-            elif message.audio:
-                file_id = message.audio.file_id
-                media_type = "audio"
-                filename = message.audio.file_name or f"{filename}.mp3"
-            elif message.document:
-                file_id = message.document.file_id
-                media_type = "document"
-                filename = message.document.file_name or f"{filename}.bin"
-            else:
-                return None, None
-            
-            # Check file size
-            file_size = 0
-            if message.photo:
-                file_size = message.photo.file_size or 0
-            elif message.video:
-                file_size = message.video.file_size or 0
-            elif message.audio:
-                file_size = message.audio.file_size or 0
-            elif message.document:
-                file_size = message.document.file_size or 0
-                
-            if file_size > config.MAX_FILE_SIZE:
-                logger.error(f"File too large: {file_size} bytes")
-                return None, None
-            
-            # Download file
-            if status_callback:
-                await status_callback("📥 Downloading media file...")
-                
-            file_path = await client.download_media(
-                file_id, 
-                file_name=filename
-            )
-            
-            if not file_path:
-                logger.error("Failed to download media file")
-                return None, None
-            
-            try:
-                # Upload to Catbox
-                if status_callback:
-                    await status_callback("🔄 Uploading to Catbox...")
-                    
-                media_url = await self.upload_service.upload_to_catbox(file_path, filename)
-                
-                if media_url:
-                    if status_callback:
-                        await status_callback("✅ Upload successful!")
-                    return media_url, media_type
-                else:
-                    if status_callback:
-                        await status_callback("❌ Catbox upload failed")
-                    return None, None
-                    
-            finally:
-                # Clean up temporary file
-                try:
-                    if os.path.exists(file_path):
-                        os.remove(file_path)
-                except Exception as e:
-                    logger.warning(f"Failed to clean up temp file: {e}")
-            
-        except Exception as e:
-            logger.error(f"Error in upload_media: {e}")
-            if status_callback:
-                await status_callback("❌ Upload process failed")
-            return None, None
     
     @staticmethod
-    def format_character_info(character_data: Dict[str, Any]) -> str:
-        """Format character data for display"""
-        info = f"👤 **Name:** {character_data['char_name']}\n"
-        info += f"🎞️ **Anime:** {character_data['anime_name']}\n"
-        info += f"🏅 **Rarity:** {character_data['rarity']}\n"
+    def format_size(size_bytes: int) -> str:
+        """Convert bytes to human readable format"""
+        if size_bytes == 0:
+            return "0 B"
+        units = ["B", "KB", "MB", "GB", "TB"]
+        i = 0
+        while size_bytes >= 1024 and i < len(units) - 1:
+            size_bytes /= 1024.0
+            i += 1
+        return f"{size_bytes:.2f} {units[i]}"
+    
+    @staticmethod
+    def format_file_info(file_data: Dict) -> str:
+        """Format file data for display"""
+        info = f"📁 **Name:** {file_data.get('file_name', 'N/A')}\n"
+        info += f"📝 **Description:** {file_data.get('description', 'N/A')}\n"
+        info += f"🏷️ **Rarity:** {file_data.get('rarity', 'N/A')}\n"
+        info += f"🆔 **ID:** `{file_data.get('file_id', 'N/A')}`\n"
+        info += f"📏 **Size:** {Helpers.format_size(file_data.get('file_size', 0))}\n"
         
-        if character_data.get('subrarity'):
-            info += f"💠 **Sub-Rarity:** {character_data['subrarity']}\n"
-        
-        info += f"🆔 **ID:** `{character_data['character_id']}`\n"
-        
-        if character_data.get('timestamp'):
-            from datetime import datetime
-            timestamp = character_data['timestamp']
+        if file_data.get('timestamp'):
+            timestamp = file_data['timestamp']
             if isinstance(timestamp, datetime):
                 info += f"📅 **Added:** {timestamp.strftime('%Y-%m-%d %H:%M:%S')}\n"
+        
+        if file_data.get('added_by'):
+            info += f"👤 **Uploaded by:** {file_data['added_by']}\n"
+        
+        if file_data.get('tags'):
+            info += f"🏷️ **Tags:** {', '.join(file_data['tags'])}\n"
+        
+        if file_data.get('views') is not None:
+            info += f"👁️ **Views:** {file_data['views']}\n"
+        
+        if file_data.get('downloads') is not None:
+            info += f"📥 **Downloads:** {file_data['downloads']}\n"
         
         return info
     
     @staticmethod
-    async def send_to_log_channel(
-        client: Client, 
-        character_data: Dict[str, Any], 
-        username: str,
-        user_id: int
-    ) -> bool:
-        """Send character data to log channel"""
-        try:
-            log_message = (
-                f"🆕 **New Character Added!**\n\n"
-                f"👤 **Name:** {character_data['char_name']}\n"
-                f"🎞️ **Anime:** {character_data['anime_name']}\n"
-                f"🏅 **Rarity:** {character_data['rarity']}\n"
-            )
-            
-            if character_data.get('subrarity'):
-                log_message += f"💠 **Sub-Rarity:** {character_data['subrarity']}\n"
-            
-            log_message += f"🧍 **Added by:** @{username} ({user_id})\n"
-            log_message += f"🆔 **Character ID:** {character_data['character_id']}"
-            
-            # Send media if available
-            if character_data.get('media_url') and character_data.get('media_type'):
-                try:
-                    if character_data.get('media_type') == 'photo':
-                        await client.send_photo(
-                            chat_id=config.LOG_CHANNEL,
-                            photo=character_data['media_url'],
-                            caption=log_message
-                        )
-                    elif character_data.get('media_type') == 'video':
-                        await client.send_video(
-                            chat_id=config.LOG_CHANNEL,
-                            video=character_data['media_url'],
-                            caption=log_message
-                        )
-                    elif character_data.get('media_type') == 'audio':
-                        await client.send_audio(
-                            chat_id=config.LOG_CHANNEL,
-                            audio=character_data['media_url'],
-                            caption=log_message
-                        )
-                    else:
-                        await client.send_document(
-                            chat_id=config.LOG_CHANNEL,
-                            document=character_data['media_url'],
-                            caption=log_message
-                        )
-                except Exception as e:
-                    logger.warning(f"Failed to send media to log channel: {e}")
-                    log_message += f"\n\n📸 **Media URL:** {character_data['media_url']}"
-                    await client.send_message(
-                        chat_id=config.LOG_CHANNEL,
-                        text=log_message
-                    )
-            else:
-                await client.send_message(
-                    chat_id=config.LOG_CHANNEL,
-                    text=log_message
+    def format_deleted_file_info(file_data: Dict) -> str:
+        """Format deleted file data for display"""
+        info = f"🗑️ **Deleted File**\n\n"
+        info += f"📁 **Name:** {file_data.get('file_name', 'N/A')}\n"
+        info += f"📝 **Description:** {file_data.get('description', 'N/A')}\n"
+        info += f"🏷️ **Rarity:** {file_data.get('rarity', 'N/A')}\n"
+        info += f"🆔 **ID:** `{file_data.get('file_id', 'N/A')}`\n"
+        
+        if file_data.get('timestamp'):
+            timestamp = file_data['timestamp']
+            if isinstance(timestamp, datetime):
+                info += f"📅 **Originally Added:** {timestamp.strftime('%Y-%m-%d %H:%M:%S')}\n"
+        
+        if file_data.get('deleted_at'):
+            deleted_at = file_data['deleted_at']
+            if isinstance(deleted_at, datetime):
+                info += f"🗑️ **Deleted On:** {deleted_at.strftime('%Y-%m-%d %H:%M:%S')}\n"
+                days_ago = (datetime.utcnow() - deleted_at).days
+                info += f"⏳ **Deleted {days_ago} days ago**\n"
+        
+        if file_data.get('deleted_by'):
+            info += f"👤 **Deleted by:** {file_data['deleted_by']}\n"
+        
+        if file_data.get('deleted_reason'):
+            info += f"📝 **Reason:** {file_data['deleted_reason']}\n"
+        
+        return info
+    
+    @staticmethod
+    def get_rarity_emoji(rarity_name: str) -> str:
+        """Get emoji for rarity name"""
+        if rarity_name and len(rarity_name) > 0:
+            for char in rarity_name:
+                if not char.isalnum() and char not in ' .-_':
+                    return char
+        return "⚪"
+    
+    @staticmethod
+    def create_pagination_keyboard(current_page: int, total_pages: int, callback_prefix: str, extra_data: str = "") -> InlineKeyboardMarkup:
+        """Create pagination keyboard"""
+        keyboard = []
+        
+        # Previous button
+        if current_page > 0:
+            keyboard.append(
+                InlineKeyboardButton(
+                    "⬅️ Previous",
+                    callback_data=f"{callback_prefix}_page_{current_page - 1}_{extra_data}"
                 )
-            
-            logger.info(f"Character sent to log channel: {config.LOG_CHANNEL}")
-            return True
-            
-        except Exception as e:
-            logger.error(f"Error sending to log channel: {e}")
-            return False
+            )
+        
+        # Page info
+        keyboard.append(
+            InlineKeyboardButton(
+                f"📄 {current_page + 1}/{total_pages}",
+                callback_data="noop"
+            )
+        )
+        
+        # Next button
+        if current_page < total_pages - 1:
+            keyboard.append(
+                InlineKeyboardButton(
+                    "Next ➡️",
+                    callback_data=f"{callback_prefix}_page_{current_page + 1}_{extra_data}"
+                )
+            )
+        
+        return InlineKeyboardMarkup([keyboard])
     
     @staticmethod
-    def is_owner(user_id: int) -> bool:
-        """Check if user is bot owner"""
-        return user_id in config.OWNER_IDS
+    def create_rarity_keyboard(current_view: str = "main") -> InlineKeyboardMarkup:
+        """Create keyboard with all rarity options"""
+        keyboard = []
+        
+        # Add main rarities in 2 columns
+        row = []
+        for rarity_num, rarity_name in Config.RARITY_MAP.items():
+            emoji = Helpers.get_rarity_emoji(rarity_name)
+            button = InlineKeyboardButton(
+                f"{emoji} {rarity_num}",
+                callback_data=f"rarity_{rarity_num}_{current_view}"
+            )
+            row.append(button)
+            
+            # Every 2 buttons, start a new row
+            if len(row) == 2:
+                keyboard.append(row)
+                row = []
+        
+        # Add any remaining buttons
+        if row:
+            keyboard.append(row)
+        
+        # Add all files option
+        keyboard.append([
+            InlineKeyboardButton(
+                "📊 All Files",
+                callback_data=f"view_all_{current_view}"
+            )
+        ])
+        
+        # Add recycle bin option
+        keyboard.append([
+            InlineKeyboardButton(
+                "🗑️ Recycle Bin",
+                callback_data=f"deleted_list_0_{current_view}"
+            )
+        ])
+        
+        # Add search option
+        keyboard.append([
+            InlineKeyboardButton(
+                "🔍 Search Files",
+                callback_data=f"search_{current_view}"
+            )
+        ])
+        
+        # Add stats option
+        keyboard.append([
+            InlineKeyboardButton(
+                "📈 Statistics",
+                callback_data=f"stats_{current_view}"
+            )
+        ])
+        
+        return InlineKeyboardMarkup(keyboard)
     
     @staticmethod
-    async def is_sudo_user(user_id: int) -> bool:
-        """Check if user is sudo user"""
+    def create_permission_keyboard(user_id: int, current_permissions: Set[str] = None) -> InlineKeyboardMarkup:
+        """Create keyboard for selecting sudo permissions"""
+        keyboard = []
+        
+        if current_permissions is None:
+            current_permissions = set()
+        
+        # Create permission buttons (2 per row)
+        row = []
+        for perm_key, perm_desc in Config.PERMISSIONS.items():
+            # Create button with checkbox
+            checked = "✅" if perm_key in current_permissions else "⬜"
+            button_text = f"{checked} {perm_desc}"
+            
+            button = InlineKeyboardButton(
+                button_text,
+                callback_data=f"toggle_perm_{user_id}_{perm_key}"
+            )
+            row.append(button)
+            
+            if len(row) == 2:
+                keyboard.append(row)
+                row = []
+        
+        if row:
+            keyboard.append(row)
+        
+        # Add action buttons
+        keyboard.append([
+            InlineKeyboardButton("✅ Save Permissions", callback_data=f"save_perms_{user_id}"),
+            InlineKeyboardButton("❌ Cancel", callback_data="cancel_perms")
+        ])
+        
+        return InlineKeyboardMarkup(keyboard)
+    
+    @staticmethod
+    def format_file_list(files: List[Dict], page: int, total_count: int, title: str = "Files") -> str:
+        """Format a list of files for display"""
+        if not files:
+            return f"❌ No {title.lower()} found."
+        
+        start_num = page * Config.ITEMS_PER_PAGE + 1
+        end_num = min(start_num + len(files) - 1, total_count)
+        
+        message = f"**{title}**\n"
+        message += f"📊 **Showing {start_num}-{end_num} of {total_count}**\n\n"
+        
+        for i, file in enumerate(files, start=start_num):
+            emoji = Helpers.get_rarity_emoji(file.get('rarity', ''))
+            message += f"{i}. **{file.get('file_name', 'Unknown')}**\n"
+            message += f"   {emoji} {file.get('rarity', 'Unknown')} | ID: `{file.get('file_id', 'N/A')}`\n\n"
+        
+        return message
+    
+    @staticmethod
+    def format_deleted_file_list(files: List[Dict], page: int, total_count: int) -> str:
+        """Format a list of deleted files for display"""
+        if not files:
+            return "🗑️ **Recycle Bin is empty!**\n\nNo deleted files found."
+        
+        start_num = page * Config.ITEMS_PER_PAGE + 1
+        end_num = min(start_num + len(files) - 1, total_count)
+        
+        message = f"🗑️ **Recycle Bin (Deleted Files)**\n"
+        message += f"📊 **Showing {start_num}-{end_num} of {total_count}**\n\n"
+        
+        for i, file in enumerate(files, start=start_num):
+            emoji = Helpers.get_rarity_emoji(file.get('rarity', ''))
+            
+            # Calculate days since deletion
+            days_ago = 0
+            if file.get('deleted_at') and isinstance(file['deleted_at'], datetime):
+                days_ago = (datetime.utcnow() - file['deleted_at']).days
+            
+            message += f"{i}. **{file.get('file_name', 'Unknown')}**\n"
+            message += f"   {emoji} {file.get('rarity', 'Unknown')}\n"
+            message += f"   🆔 `{file.get('file_id', 'N/A')}` | 🗑️ {days_ago}d ago\n\n"
+        
+        return message
+    
+    @staticmethod
+    def parse_rarity(rarity_input: str) -> Optional[str]:
+        """Parse rarity input for new rarity system (1-14)"""
         try:
-            return await db.is_sudo_user(user_id)
-        except Exception as e:
-            logger.error(f"Error checking sudo user: {e}")
-            return False
-    
-    @staticmethod
-    async def get_username_from_id(client: Client, user_id: int) -> str:
-        """Get username from user ID"""
-        try:
-            user = await client.get_users(user_id)
-            return f"@{user.username}" if user.username else user.first_name
-        except:
-            return f"User ({user_id})"
-    
-    @staticmethod
-    def parse_rarity(rarity_input: str) -> tuple[Optional[str], Optional[str]]:
-        """Parse rarity input (e.g., '5 valentine' or just '5')"""
-        try:
-            parts = rarity_input.strip().split()
-            if not parts:
-                return None, None
-            
-            rarity_num = int(parts[0])
-            if rarity_num not in config.RARITY_MAP:
-                return None, None
-            
-            rarity_name = config.RARITY_MAP[rarity_num]
-            subrarity = None
-            
-            # Check for Limited Edition subtype
-            if rarity_num == 5 and len(parts) > 1:
-                subtype_key = parts[1].lower()
-                if subtype_key in config.LIMITED_SUBTYPES:
-                    subrarity = config.LIMITED_SUBTYPES[subtype_key]
-            
-            return rarity_name, subrarity
-            
-        except (ValueError, IndexError):
-            return None, None
-    
-    @staticmethod
-    async def parse_fill_arguments(text: str) -> tuple[Optional[str], Optional[str], Optional[str], Optional[str], Optional[int]]:
-        """Parse fill command arguments"""
-        try:
-            parts = text.strip().split()
-            if not parts:
-                return None, None, None, None, None
-            
-            # Check if first part is a character ID
-            char_id = None
-            try:
-                if parts[0].isdigit():
-                    char_id = int(parts[0])
-                    parts = parts[1:]
-            except:
-                pass
-            
-            # Parse remaining parts for name, anime, rarity
-            char_name = None
-            anime_name = None
-            rarity_input = None
-            subrarity = None
-            
-            i = 0
-            while i < len(parts):
-                if parts[i] in ["name", "char", "character"] and i + 1 < len(parts):
-                    char_name = parts[i + 1]
-                    i += 2
-                elif parts[i] in ["anime", "series"] and i + 1 < len(parts):
-                    anime_name = parts[i + 1]
-                    i += 2
-                elif parts[i] in ["rarity", "rank", "level"] and i + 1 < len(parts):
-                    rarity_input = parts[i + 1]
-                    if i + 2 < len(parts) and parts[i + 2] in config.LIMITED_SUBTYPES:
-                        subrarity = parts[i + 2]
-                        i += 3
-                    else:
-                        i += 2
-                else:
-                    # If no keyword, assume format: name anime rarity
-                    if len(parts) >= 3:
-                        char_name = parts[0]
-                        anime_name = parts[1]
-                        rarity_input = parts[2]
-                        if len(parts) > 3:
-                            subrarity = parts[3]
-                    break
-            
-            return char_name, anime_name, rarity_input, subrarity, char_id
-            
-        except Exception as e:
-            logger.error(f"Error parsing fill arguments: {e}")
-            return None, None, None, None, None
+            rarity_num = int(rarity_input.strip())
+            if 1 <= rarity_num <= 14:
+                return Config.RARITY_MAP[rarity_num]
+            return None
+        except (ValueError, KeyError):
+            return None
 
 helpers = Helpers()
 
-# ==================== MAIN COMMAND HANDLERS ====================
-class SimpleUploadBot:
-    """Main bot class with simplified upload system"""
+# ==================== DECORATORS ====================
+def admin_only(func):
+    """Decorator to restrict access to bot owner only"""
+    @wraps(func)
+    async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE, *args, **kwargs):
+        user_id = update.effective_user.id
+        if user_id != Config.OWNER_ID:
+            await update.message.reply_text("⛔ This command is for bot owner only.")
+            return
+        return await func(update, context, *args, **kwargs)
+    return wrapper
+
+def sudo_only(permission: str):
+    """Decorator to restrict access to sudo users with specific permission"""
+    def decorator(func):
+        @wraps(func)
+        async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE, *args, **kwargs):
+            user_id = update.effective_user.id
+            
+            # Owner always has permission
+            if user_id == Config.OWNER_ID:
+                return await func(update, context, *args, **kwargs)
+            
+            # Check sudo permission
+            if not db.has_permission(user_id, permission):
+                await update.message.reply_text(
+                    f"❌ You are not authorized to use this command.\n\n"
+                    f"You need '{permission}' permission. Contact the bot owner."
+                )
+                return
+            
+            return await func(update, context, *args, **kwargs)
+        return wrapper
+    return decorator
+
+# ==================== COMMAND HANDLERS ====================
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Start command with complete feature overview"""
+    user = update.effective_user
+    db.ensure_user(user.id, user.username, user.first_name)
     
-    def __init__(self):
-        self.client = Client(
-            "upload_bot",
-            api_id=config.API_ID,
-            api_hash=config.API_HASH,
-            bot_token=config.BOT_TOKEN
+    welcome_text = f"""
+🌟 **Welcome to Complete Upload Bot** 🌟
+
+**Complete Bot with All Features:**
+
+📤 **UPLOAD SYSTEM:**
+• Upload files with rarity system (1-14)
+• Supports photos, videos, audio, documents
+• Automatic metadata extraction
+• Custom tags and descriptions
+
+🏷️ **RARITY SYSTEM (1-14):**
+1. ⚪ Common
+2. 🟢 Uncommon
+3. 🔴 Rare
+4. 🟡 Legendary
+5. 🎐 Limited Edition
+6. 💎 Premium
+7. 🥵 Exotic
+8. 🎬 Animated
+9. 🌩️ Thundra
+10. ☄️ Galvoria
+11. 🌈 Neon
+12. 🛡️ Supreme
+13. 🔮 Crystal
+14. 🎤 Celebrity
+
+🗑️ **RECYCLE BIN SYSTEM:**
+• Deleted files go to recycle bin
+• Restore deleted files anytime
+• Auto-cleanup after 30 days
+• View deleted file history
+
+🔄 **FILL SYSTEM:**
+• Fill deleted file slots with new files
+• Reuse deleted file IDs
+• Maintains ID continuity
+
+👑 **SUDO SYSTEM:**
+• Granular permission control
+• Different access levels
+• Inline permission management
+
+📚 **VIEWING SYSTEM:**
+• Browse files by rarity
+• Search files by name or description
+• View file details and statistics
+• Paginated browsing
+
+**Main Commands:**
+• /menu - Browse file database
+• /upload - Upload new file
+• /fill - Fill deleted slot
+• /restore - Restore deleted file
+• /deleted - View recycle bin
+• /search - Search files
+• /stats - View statistics
+• /help - Show detailed help
+• /sudolist - View sudo users (Owner only)
+• /addsudo - Add sudo user (Owner only)
+• /removesudo - Remove sudo user (Owner only)
+    """
+    
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("📚 Browse Database", callback_data="menu_main")],
+        [InlineKeyboardButton("📤 Upload File", callback_data="upload_help")],
+        [InlineKeyboardButton("🔄 Fill Deleted Slot", callback_data="fill_example")],
+        [InlineKeyboardButton("🗑️ View Recycle Bin", callback_data="deleted_list_0_main")],
+        [InlineKeyboardButton("ℹ️ Help Guide", callback_data="help_main")]
+    ])
+    
+    await update.message.reply_text(welcome_text, parse_mode=ParseMode.MARKDOWN, reply_markup=keyboard)
+
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show detailed help message"""
+    help_text = """
+ℹ️ **Complete Bot Help Guide**
+
+📤 **UPLOADING FILES:**
+1. Send a photo/video/audio/document
+2. Reply to it with: `/upload "File Name" "Description" Rarity`
+
+**Examples:**
+• `/upload "Project Report" "Q4 Financial Analysis" 3`
+• `/upload "Vacation Photos" "Summer 2024 Album" 10`
+
+**Rarity Numbers (1-14):**
+1. ⚪ Common
+2. 🟢 Uncommon
+3. 🔴 Rare
+4. 🟡 Legendary
+5. 🎐 Limited Edition
+6. 💎 Premium
+7. 🥵 Exotic
+8. 🎬 Animated
+9. 🌩️ Thundra
+10. ☄️ Galvoria
+11. 🌈 Neon
+12. 🛡️ Supreme
+13. 🔮 Crystal
+14. 🎤 Celebrity
+
+🔄 **FILLING DELETED SLOTS:**
+• `/fill ID "File Name" "Description" Rarity`
+• `/fill oldest "File Name" "Description" Rarity`
+• Reuses deleted file IDs from recycle bin
+
+🗑️ **RECYCLE BIN SYSTEM:**
+• /deleted - View deleted files
+• /restore ID - Restore a deleted file
+• /searchdeleted query - Search deleted files
+• /delete ID - Move file to recycle bin
+• Deleted files auto-clean after 30 days
+
+📚 **BROWSING FILES:**
+• /menu - Browse by rarity
+• /search query - Search files
+• /info ID - View file details
+• /myuploads - View your uploads
+• /stats - View database statistics
+
+⚙️ **EDITING FILES:**
+• /edit ID "New Name" "New Description" Rarity
+• /editmedia ID - Edit media (reply to new media)
+
+👑 **SUDO MANAGEMENT (Owner only):**
+• /addsudo @username - Add sudo user
+• /removesudo @username - Remove sudo user
+• /sudolist - List all sudo users
+• /setsudo @username - Set specific permissions
+
+⚠️ **DATABASE RESET (Owner only):**
+• /reset - Reset database (requires 3 confirmations)
+
+**Note:** Commands require appropriate sudo permissions.
+    """
+    
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("📚 Browse Database", callback_data="menu_main")],
+        [InlineKeyboardButton("📤 Upload Example", callback_data="upload_example")],
+        [InlineKeyboardButton("🔄 Fill Example", callback_data="fill_example")],
+        [InlineKeyboardButton("🗑️ Recycle Bin", callback_data="deleted_list_0_main")],
+        [InlineKeyboardButton("📊 View Stats", callback_data="stats_main")]
+    ])
+    
+    await update.message.reply_text(help_text, parse_mode=ParseMode.MARKDOWN, reply_markup=keyboard)
+
+@sudo_only('upload')
+async def upload_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /upload command with rarity system"""
+    user = update.effective_user
+    
+    # Check if message is a reply to media
+    if not update.message.reply_to_message or not (
+        update.message.reply_to_message.document or 
+        update.message.reply_to_message.photo or 
+        update.message.reply_to_message.video or 
+        update.message.reply_to_message.audio
+    ):
+        await update.message.reply_text(
+            "❌ **Please reply to a media file with this command!**\n\n"
+            "**Usage:** Reply to a photo/video/audio/document with:\n"
+            "`/upload \"File Name\" \"Description\" Rarity`\n\n"
+            "**Examples:**\n"
+            "• `/upload \"Project Report\" \"Q4 Financial Analysis\" 3`\n"
+            "• `/upload \"Vacation Photos\" \"Summer 2024 Album\" 10`\n\n"
+            "**Rarity Numbers (1-14):**\n"
+            "1. ⚪ Common\n"
+            "2. 🟢 Uncommon\n"
+            "3. 🔴 Rare\n"
+            "4. 🟡 Legendary\n"
+            "5. 🎐 Limited Edition\n"
+            "6. 💎 Premium\n"
+            "7. 🥵 Exotic\n"
+            "8. 🎬 Animated\n"
+            "9. 🌩️ Thundra\n"
+            "10. ☄️ Galvoria\n"
+            "11. 🌈 Neon\n"
+            "12. 🛡️ Supreme\n"
+            "13. 🔮 Crystal\n"
+            "14. 🎤 Celebrity"
         )
-        self._register_handlers()
+        return
     
-    def _register_handlers(self):
-        """Register all message handlers"""
+    # Parse arguments
+    args = update.message.text.split()
+    if len(args) < 4:
+        await update.message.reply_text(
+            "❌ **Invalid syntax!**\n\n"
+            "**Usage:** `/upload \"File Name\" \"Description\" Rarity`\n\n"
+            "**Note:** Use quotes for names with spaces\n"
+            "**Example:** `/upload \"Project Report\" \"Financial Analysis\" 3`"
+        )
+        return
+    
+    # Parse file name (support quotes)
+    file_name = ""
+    description = ""
+    rarity_input = ""
+    
+    text = update.message.text
+    text = text.replace('/upload', '', 1).strip()
+    
+    # Parse file name (might be in quotes)
+    if text.startswith('"'):
+        end_quote = text.find('"', 1)
+        if end_quote == -1:
+            await update.message.reply_text("❌ Invalid format. Missing closing quote for file name.")
+            return
+        file_name = text[1:end_quote]
+        text = text[end_quote + 1:].strip()
+    else:
+        parts = text.split()
+        file_name = parts[0]
+        text = ' '.join(parts[1:])
+    
+    # Parse description (might be in quotes)
+    if text.startswith('"'):
+        end_quote = text.find('"', 1)
+        if end_quote == -1:
+            await update.message.reply_text("❌ Invalid format. Missing closing quote for description.")
+            return
+        description = text[1:end_quote]
+        text = text[end_quote + 1:].strip()
+    else:
+        parts = text.split()
+        if not parts:
+            await update.message.reply_text("❌ Missing description.")
+            return
+        description = parts[0]
+        text = ' '.join(parts[1:])
+    
+    # The rest is rarity
+    rarity_input = text.strip()
+    
+    if not file_name or not description or not rarity_input:
+        await update.message.reply_text("❌ Missing required parameters.")
+        return
+    
+    # Parse rarity
+    rarity_name = helpers.parse_rarity(rarity_input)
+    if not rarity_name:
+        await update.message.reply_text(
+            "❌ Invalid rarity.\n\n"
+            "**Valid Rarity Numbers (1-14):**\n"
+            "1. ⚪ Common\n"
+            "2. 🟢 Uncommon\n"
+            "3. 🔴 Rare\n"
+            "4. 🟡 Legendary\n"
+            "5. 🎐 Limited Edition\n"
+            "6. 💎 Premium\n"
+            "7. 🥵 Exotic\n"
+            "8. 🎬 Animated\n"
+            "9. 🌩️ Thundra\n"
+            "10. ☄️ Galvoria\n"
+            "11. 🌈 Neon\n"
+            "12. 🛡️ Supreme\n"
+            "13. 🔮 Crystal\n"
+            "14. 🎤 Celebrity"
+        )
+        return
+    
+    # Get file from replied message
+    message = update.message.reply_to_message
+    file_obj = None
+    file_type = None
+    
+    if message.document:
+        file_obj = message.document
+        file_type = "document"
+    elif message.photo:
+        file_obj = message.photo[-1]
+        file_type = "photo"
+    elif message.video:
+        file_obj = message.video
+        file_type = "video"
+    elif message.audio:
+        file_obj = message.audio
+        file_type = "audio"
+    else:
+        await update.message.reply_text("❌ Unsupported file type.")
+        return
+    
+    # Check file size
+    if file_obj.file_size > Config.MAX_FILE_SIZE:
+        await update.message.reply_text(
+            f"❌ File too large! Maximum size is {helpers.format_size(Config.MAX_FILE_SIZE)}."
+        )
+        return
+    
+    # Send processing message
+    status_msg = await update.message.reply_text("🔄 Starting upload process...")
+    
+    try:
+        # Get next file ID
+        file_id = db.get_next_file_id()
         
-        @self.client.on_message(filters.command("start"))
-        async def start_command(client: Client, message: Message):
-            """Handle /start command"""
-            welcome_text = (
-                "👋 **Welcome to Character Upload Bot!**\n\n"
-                "**Simple Upload System:**\n"
-                "Just reply to any media file (photo/video/audio/document) with:\n"
-                "`/upload Character_Name Anime_Name Rarity_Number [subrarity]`\n\n"
-                "**Example:**\n"
-                "`/upload \"Ichigo Kurosaki\" Bleach 5 valentine`\n"
-                "`/upload Naruto Naruto 4`\n\n"
-                "**Fill Deleted IDs:**\n"
-                "`/fill` - Upload to first deleted ID (automatic)\n"
-                "`/fill ID \"Character\" \"Anime\" Rarity` - Upload to specific deleted ID\n\n"
-                "**Available Rarities (1-14):**\n"
-                "1. ⚪ Common\n"
-                "2. 🟢 Uncommon\n"
-                "3. 🔴 Rare\n"
-                "4. 🟡 Legendary\n"
-                "5. 🎐 Limited Edition (with subtypes)\n"
-                "6. 💎 Premium\n"
-                "7. 🥵 Exotic\n"
-                "8. 🎬 Animated\n"
-                "9. 🌩️ Thundra\n"
-                "10. ☄️ Galvoria\n"
-                "11. 🌈 Neon\n"
-                "12. 🛡️ Supreme\n"
-                "13. 🔮 Crystal\n"
-                "14. 🎤 Celebrity\n\n"
-                "**Limited Edition Subtypes:**\n"
-                "valentine, christmas, halloween, summer, winter, basketball, police, newyear, easter, wedding, karate\n\n"
-                "**All uploads are posted to:** @capture_database\n\n"
-                "**🔧 Admin Commands (Owner/Sudo):**\n"
-                "• `/add user_id` - Add sudo user (owner only)\n"
-                "• `/remove user_id` - Remove sudo user (owner only)\n"
-                "• `/sudos` - List all sudo users\n"
-                "• `/backup` - Backup entire database (owner only)\n"
-                "• `/backupharem [user_id]` - Backup all/specific user harem (owner only)\n\n"
-                "**📝 Character Commands:**\n"
-                "• `/edit ID new_name new_anime rarity` - Edit character\n"
-                "• `/editmedia ID` - Edit character media (reply to media)\n"
-                "• `/fill` - Fill deleted character IDs (reply to media)\n"
-                "• `/search query` - Search characters\n"
-                "• `/info ID` - View character details\n"
-                "• `/delete ID` - Delete character (owner only)\n\n"
-                "**💾 Harem Commands:**\n"
-                "• `/harembackup` - Backup your harem data\n"
-                "• `/haremupload` - Restore harem data (reply to JSON file)\n"
-                "• `/addharem ID` - Add character to your harem\n"
-                "• `/myharem` - View your harem\n\n"
-                "**📊 Utility Commands:**\n"
-                "• `/stats` - View bot statistics\n"
-                "• `/help` - Show this help message\n\n"
-                "**Note:** Uploading a character does NOT automatically add it to your harem.\n"
-                "You must use `/addharem ID` to add characters to your harem."
-            )
-            
-            await message.reply_text(welcome_text)
+        # Create file metadata
+        file_metadata = FileMetadata(
+            file_name=file_name,
+            description=description,
+            rarity=rarity_name,
+            file_id=file_id,
+            telegram_file_id=file_obj.file_id,
+            file_type=file_type,
+            file_size=file_obj.file_size,
+            added_by=user.id,
+            tags=[],  # Can be extended to parse tags from description
+            privacy="public"
+        )
         
-        @self.client.on_message(filters.command("fill"))
-        async def fill_command(client: Client, message: Message):
-            """Handle /fill command - upload character to deleted ID"""
-            user_id = message.from_user.id
-            
-            # Check authorization
-            if not await helpers.is_sudo_user(user_id):
-                await message.reply_text("❌ You are not authorized to fill deleted character IDs.")
-                return
-            
-            # Check if message is a reply to media
-            if not message.reply_to_message or not (
-                message.reply_to_message.photo or 
-                message.reply_to_message.video or 
-                message.reply_to_message.audio or 
-                message.reply_to_message.document
-            ):
-                await message.reply_text(
-                    "🔄 **Fill Deleted Character ID**\n\n"
-                    "**Usage:** Reply to a media file with:\n"
-                    "`/fill` - Automatically use first deleted ID\n"
-                    "`/fill ID \"Character Name\" \"Anime Name\" Rarity [subrarity]` - Specify ID and details\n\n"
-                    "**Examples:**\n"
-                    "• `/fill` (reply to media) - Auto fill first deleted ID\n"
-                    "• `/fill 5 \"New Character\" \"New Anime\" 4` (reply to media)\n"
-                    "• `/fill name \"Character\" anime \"Anime\" rarity 5` (reply to media)\n\n"
-                    "**Note:** You can only fill IDs that are deleted (gaps in sequence)."
+        # Save to database
+        inserted_id = db.insert_file(file_metadata)
+        
+        # Update user stats
+        db.increment_user_uploads(user.id)
+        
+        # Send success message
+        success_text = (
+            f"✅ **File #{file_id} Uploaded Successfully!**\n\n"
+            f"📁 **Name:** {file_name}\n"
+            f"📝 **Description:** {description}\n"
+            f"🏷️ **Rarity:** {rarity_name}\n"
+            f"📏 **Size:** {helpers.format_size(file_obj.file_size)}\n"
+            f"🆔 **File ID:** `{file_id}`\n\n"
+            f"**Use this ID to edit or delete the file.**"
+        )
+        
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("👁️ View File", callback_data=f"info_{file_id}")],
+            [InlineKeyboardButton("📚 Browse Database", callback_data="menu_main")]
+        ])
+        
+        await status_msg.edit_text(success_text, reply_markup=keyboard)
+        
+        # Log to channel if configured
+        if Config.LOG_CHANNEL:
+            try:
+                log_message = (
+                    f"🆕 **New File Uploaded!**\n\n"
+                    f"📁 **Name:** {file_name}\n"
+                    f"📝 **Description:** {description}\n"
+                    f"🏷️ **Rarity:** {rarity_name}\n"
+                    f"👤 **Uploaded by:** @{user.username or user.first_name}\n"
+                    f"🆔 **File ID:** {file_id}"
                 )
-                return
-            
-            args = message.text.split()
-            
-            # Parse arguments
-            text = message.text.replace('/fill', '', 1).strip()
-            char_name, anime_name, rarity_input, subrarity, specified_id = await helpers.parse_fill_arguments(text)
-            
-            # Determine character ID to use
-            character_id = None
-            
-            if specified_id:
-                # Check if specified ID is valid
-                character_id = specified_id
-                
-                # Check if ID already exists
-                existing_char = await db.get_character_by_id(character_id)
-                if existing_char:
-                    await message.reply_text(f"❌ Character ID `{character_id}` already exists!")
-                    return
-                
-                # Check if ID is in valid range (positive integer)
-                if character_id <= 0:
-                    await message.reply_text("❌ Character ID must be a positive number.")
-                    return
-            else:
-                # Get first deleted ID
-                character_id = await db.get_first_deleted_id()
-                if not character_id:
-                    await message.reply_text(
-                        "✅ **No deleted character IDs found!**\n\n"
-                        "All character IDs are currently in use.\n"
-                        "Use `/upload` to create a new character with the next available ID."
-                    )
-                    return
-            
-            # Parse character details
-            if char_name and anime_name and rarity_input:
-                # Use provided details
+                await context.bot.send_message(Config.LOG_CHANNEL, log_message)
+            except:
                 pass
-            elif len(args) >= 4:
-                # Parse in traditional format
-                text = message.text
-                # Remove command
-                text = text.replace('/fill', '', 1).strip()
-                
-                # Check if first part is ID
-                if text and text[0].isdigit():
-                    # Already handled above
-                    pass
-                else:
-                    # Parse character name (support quotes)
-                    char_name = ""
-                    anime_name = ""
-                    
-                    if text.startswith('"'):
-                        # Find closing quote
-                        end_quote = text.find('"', 1)
-                        if end_quote == -1:
-                            await message.reply_text("❌ Invalid format. Missing closing quote for character name.")
-                            return
-                        char_name = text[1:end_quote]
-                        text = text[end_quote + 1:].strip()
-                    else:
-                        # Take first word as character name
-                        parts = text.split()
-                        char_name = parts[0]
-                        text = ' '.join(parts[1:])
-                    
-                    # Parse anime name (might be in quotes)
-                    if text.startswith('"'):
-                        end_quote = text.find('"', 1)
-                        if end_quote == -1:
-                            await message.reply_text("❌ Invalid format. Missing closing quote for anime name.")
-                            return
-                        anime_name = text[1:end_quote]
-                        text = text[end_quote + 1:].strip()
-                    else:
-                        # Take first word as anime name
-                        parts = text.split()
-                        if not parts:
-                            await message.reply_text("❌ Missing anime name.")
-                            return
-                        anime_name = parts[0]
-                        text = ' '.join(parts[1:])
-                    
-                    # The rest is rarity (and optional subrarity)
-                    rarity_input = text.strip()
+        
+    except Exception as e:
+        logger.error(f"Error uploading file: {e}")
+        await status_msg.edit_text("❌ Failed to upload file. Please try again.")
+
+@admin_only
+async def addsudo_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Add sudo user (Owner only)"""
+    args = update.message.text.split()
+    if len(args) != 2:
+        await update.message.reply_text(
+            "👑 **Add Sudo User**\n\n"
+            "**Usage:** `/addsudo @username`\n\n"
+            "**Example:** `/addsudo @username`\n\n"
+            "**Note:** This will give the user all permissions by default.\n"
+            "Use /setsudo to set specific permissions."
+        )
+        return
+    
+    target_username = args[1].replace('@', '')
+    
+    try:
+        # Get user from mention or username
+        if update.message.reply_to_message:
+            target_user = update.message.reply_to_message.from_user
+        else:
+            # Try to get user by username (limited in Telegram Bot API)
+            await update.message.reply_text(
+                "Please reply to a user's message with `/addsudo` or use their numeric ID.\n\n"
+                "To get a user's ID, forward a message from them to @userinfobot"
+            )
+            return
+        
+        # Check if already sudo
+        existing_sudo = db.get_sudo_user(target_user.id)
+        if existing_sudo:
+            await update.message.reply_text(f"❌ @{target_user.username} is already a sudo user.")
+            return
+        
+        # Add with all permissions by default
+        all_permissions = list(Config.PERMISSIONS.keys())
+        db.add_sudo_user(target_user.id, all_permissions)
+        
+        await update.message.reply_text(
+            f"✅ **Sudo User Added!**\n\n"
+            f"👤 **User:** @{target_user.username or target_user.first_name} (ID: {target_user.id})\n"
+            f"🔑 **Permissions:** All permissions granted\n\n"
+            f"Use /setsudo to modify specific permissions."
+        )
+        
+        logger.info(f"Sudo user added: @{target_user.username} ({target_user.id})")
+        
+    except Exception as e:
+        logger.error(f"Error adding sudo user: {e}")
+        await update.message.reply_text("❌ Error adding sudo user.")
+
+@admin_only
+async def removesudo_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Remove sudo user (Owner only)"""
+    args = update.message.text.split()
+    if len(args) != 2:
+        await update.message.reply_text(
+            "👑 **Remove Sudo User**\n\n"
+            "**Usage:** `/removesudo @username`\n\n"
+            "**Example:** `/removesudo @username`"
+        )
+        return
+    
+    target_username = args[1].replace('@', '')
+    
+    try:
+        # Get user from mention
+        if update.message.reply_to_message:
+            target_user = update.message.reply_to_message.from_user
+        else:
+            await update.message.reply_text("Please reply to the user's message.")
+            return
+        
+        # Remove sudo
+        removed = db.remove_sudo_user(target_user.id)
+        
+        if removed:
+            await update.message.reply_text(
+                f"✅ **Sudo User Removed!**\n\n"
+                f"👤 **User:** @{target_user.username or target_user.first_name} (ID: {target_user.id})\n"
+                f"🔓 **Status:** All permissions revoked"
+            )
+            
+            logger.info(f"Sudo user removed: @{target_user.username} ({target_user.id})")
+        else:
+            await update.message.reply_text(f"❌ @{target_user.username} is not a sudo user.")
+            
+    except Exception as e:
+        logger.error(f"Error removing sudo user: {e}")
+        await update.message.reply_text("❌ Error removing sudo user.")
+
+@admin_only
+async def sudolist_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """List all sudo users (Owner only)"""
+    sudo_users = db.get_all_sudo_users()
+    
+    if not sudo_users:
+        await update.message.reply_text("👑 **No Sudo Users Found**\n\nNo sudo users have been added yet.")
+        return
+    
+    message_text = "👑 **Sudo Users List**\n\n"
+    
+    for i, sudo in enumerate(sudo_users, 1):
+        user_id = sudo.get('user_id')
+        permissions = sudo.get('permissions', [])
+        added_at = sudo.get('added_at', datetime.utcnow())
+        
+        # Try to get username from database
+        user_data = db.users.find_one({"user_id": user_id})
+        username = user_data.get('username', f"User {user_id}") if user_data else f"User {user_id}"
+        
+        # Format permissions
+        perm_text = ', '.join(permissions[:3])
+        if len(permissions) > 3:
+            perm_text += f" (+{len(permissions)-3} more)"
+        
+        # Format date
+        if isinstance(added_at, datetime):
+            date_str = added_at.strftime('%Y-%m-%d')
+        else:
+            date_str = "Unknown"
+        
+        message_text += f"{i}. {username}\n"
+        message_text += f"   🆔: {user_id}\n"
+        message_text += f"   🔑: {perm_text}\n"
+        message_text += f"   📅: {date_str}\n\n"
+    
+    # Add buttons to manage sudo users
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("➕ Add Sudo User", callback_data="add_sudo_ui")],
+        [InlineKeyboardButton("⚙️ Manage Permissions", callback_data="manage_perms_ui")]
+    ])
+    
+    await update.message.reply_text(message_text, reply_markup=keyboard)
+
+@admin_only
+async def reset_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Reset database with 3 warnings (Owner only)"""
+    user_id = update.effective_user.id
+    
+    # Get current warnings
+    warning_count, last_warning = db.get_reset_warnings(user_id)
+    
+    # Check if warnings have expired (24 hours)
+    warning_expired = False
+    if last_warning:
+        hours_since_warning = (datetime.utcnow() - last_warning).total_seconds() / 3600
+        if hours_since_warning > 24:
+            warning_expired = True
+            db.clear_reset_warnings(user_id)
+            warning_count = 0
+    
+    warnings_needed = 3 - warning_count
+    
+    if warnings_needed <= 0:
+        # All warnings given, show final confirmation
+        keyboard = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("🚨 YES, RESET DATABASE", callback_data="confirm_reset"),
+                InlineKeyboardButton("❌ Cancel", callback_data="cancel_reset")
+            ]
+        ])
+        
+        total_files = db.get_file_count()
+        total_deleted = db.get_deleted_files_count()
+        
+        await update.message.reply_text(
+            f"⚠️ **FINAL WARNING - DATABASE RESET** ⚠️\n\n"
+            f"🚨 **This is your FINAL warning!**\n\n"
+            f"📊 **Current Database Stats:**\n"
+            f"• Active Files: {total_files}\n"
+            f"• Deleted Files: {total_deleted}\n"
+            f"• Total: {total_files + total_deleted}\n\n"
+            f"❌ **THIS ACTION WILL:**\n"
+            f"1. Delete ALL files\n"
+            f"2. Delete ALL deleted files\n"
+            f"3. Reset file ID counter to 0\n"
+            f"4. Clear ALL data\n\n"
+            f"🔥 **THIS ACTION IS IRREVERSIBLE!**\n\n"
+            f"Are you ABSOLUTELY sure you want to reset the database?",
+            reply_markup=keyboard
+        )
+        
+    else:
+        # Add warning
+        new_warning_count, _ = db.add_reset_warning(user_id)
+        
+        total_files = db.get_file_count()
+        total_deleted = db.get_deleted_files_count()
+        
+        if new_warning_count == 1:
+            warning_text = "FIRST"
+        elif new_warning_count == 2:
+            warning_text = "SECOND"
+        else:
+            warning_text = "THIRD"
+        
+        await update.message.reply_text(
+            f"⚠️ **{warning_text} WARNING - DATABASE RESET** ⚠️\n\n"
+            f"🚨 **Warning {new_warning_count}/3**\n\n"
+            f"📊 **Current Database Stats:**\n"
+            f"• Active Files: {total_files}\n"
+            f"• Deleted Files: {total_deleted}\n"
+            f"• Total: {total_files + total_deleted}\n\n"
+            f"❌ **Resetting will delete ALL data!**\n\n"
+            f"⚠️ **You need {3 - new_warning_count} more warning(s) before you can reset.**\n"
+            f"Send `/reset` again to continue."
+        )
+
+@sudo_only('fill')
+async def fill_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /fill command - add file in place of deleted file"""
+    user = update.effective_user
+    
+    # Check if message is a reply to media
+    if not update.message.reply_to_message or not (
+        update.message.reply_to_message.document or 
+        update.message.reply_to_message.photo or 
+        update.message.reply_to_message.video or 
+        update.message.reply_to_message.audio
+    ):
+        await update.message.reply_text(
+            "🔄 **Fill Deleted File Slot**\n\n"
+            "**Usage:** Reply to a media file with:\n"
+            "`/fill file_id \"File Name\" \"Description\" Rarity`\n\n"
+            "**Examples:**\n"
+            "• `/fill 123 \"Project Report\" \"Financial Analysis\" 3`\n"
+            "• `/fill 456 \"Vacation Photos\" \"Summer Album\" 10`\n\n"
+            "**To fill oldest deleted slot:**\n"
+            "`/fill oldest \"File Name\" \"Description\" Rarity`\n\n"
+            "**To see available deleted IDs:**\n"
+            "Use `/deleted` to view recycle bin\n"
+            "Use `/searchdeleted` to search deleted files"
+        )
+        return
+    
+    # Parse arguments
+    args = update.message.text.split()
+    if len(args) < 4:
+        await update.message.reply_text(
+            "❌ **Invalid syntax!**\n\n"
+            "**Usage:** `/fill file_id \"File Name\" \"Description\" Rarity`\n\n"
+            "**Examples:**\n"
+            "• `/fill 123 \"Project Report\" \"Financial Analysis\" 3`\n"
+            "• `/fill oldest \"New File\" \"Description\" 4`\n\n"
+            "**Note:** Use quotes for names with spaces\n"
+            "Use `oldest` to fill the oldest deleted file slot."
+        )
+        return
+    
+    # Parse target ID (could be "oldest" or a number)
+    target_id_input = args[1].lower()
+    
+    if target_id_input == "oldest":
+        # Get the oldest deleted file
+        oldest_deleted = db.get_oldest_deleted_file()
+        if not oldest_deleted:
+            await update.message.reply_text("❌ No deleted files found in recycle bin!")
+            return
+        file_id = oldest_deleted.get("file_id")
+    else:
+        try:
+            file_id = int(target_id_input)
+        except ValueError:
+            await update.message.reply_text("❌ Invalid file ID. Must be a number or 'oldest'.")
+            return
+        
+        # Check if file exists in deleted collection
+        deleted_file = db.get_deleted_file_by_id(file_id)
+        if not deleted_file:
+            # Check if ID is already in use
+            active_file = db.get_file_by_id(file_id)
+            if active_file:
+                await update.message.reply_text(
+                    f"❌ File ID `{file_id}` is already in use!\n\n"
+                    f"**Current File:**\n"
+                    f"• Name: {active_file.get('file_name')}\n"
+                    f"• Description: {active_file.get('description')}\n\n"
+                    f"Use a different ID or delete the file first."
+                )
             else:
-                # Need more details
-                await message.reply_text(
-                    "❌ **Missing character details!**\n\n"
-                    "**Usage:** `/fill ID \"Character Name\" \"Anime Name\" Rarity [subrarity]`\n\n"
-                    "**Examples:**\n"
-                    "• `/fill 5 \"New Character\" \"New Anime\" 4`\n"
-                    "• `/fill 5 \"Character\" Anime 5 valentine`\n\n"
-                    "Or use keyword format:\n"
-                    "• `/fill 5 name \"Character\" anime \"Anime\" rarity 5`"
+                await update.message.reply_text(
+                    f"❌ File ID `{file_id}` not found in recycle bin!\n\n"
+                    f"**Available options:**\n"
+                    f"• Use `/deleted` to view deleted files\n"
+                    f"• Use `/fill oldest` to fill the oldest deleted slot\n"
+                    f"• Use a different deleted file ID"
                 )
-                return
+            return
+    
+    # Parse file details
+    text = update.message.text
+    text = text.replace(f'/fill {args[1]}', '', 1).strip()
+    
+    # Parse file name
+    file_name = ""
+    if text.startswith('"'):
+        end_quote = text.find('"', 1)
+        if end_quote == -1:
+            await update.message.reply_text("❌ Invalid format. Missing closing quote for file name.")
+            return
+        file_name = text[1:end_quote]
+        text = text[end_quote + 1:].strip()
+    else:
+        parts = text.split()
+        file_name = parts[0]
+        text = ' '.join(parts[1:])
+    
+    # Parse description
+    description = ""
+    if text.startswith('"'):
+        end_quote = text.find('"', 1)
+        if end_quote == -1:
+            await update.message.reply_text("❌ Invalid format. Missing closing quote for description.")
+            return
+        description = text[1:end_quote]
+        text = text[end_quote + 1:].strip()
+    else:
+        parts = text.split()
+        if not parts:
+            await update.message.reply_text("❌ Missing description.")
+            return
+        description = parts[0]
+        text = ' '.join(parts[1:])
+    
+    # Parse rarity
+    rarity_input = text.strip()
+    rarity_name = helpers.parse_rarity(rarity_input)
+    
+    if not rarity_name:
+        await update.message.reply_text(
+            "❌ Invalid rarity.\n\n"
+            "**Valid Rarity Numbers (1-14):**\n"
+            "1. ⚪ Common\n"
+            "2. 🟢 Uncommon\n"
+            "3. 🔴 Rare\n"
+            "4. 🟡 Legendary\n"
+            "5. 🎐 Limited Edition\n"
+            "6. 💎 Premium\n"
+            "7. 🥵 Exotic\n"
+            "8. 🎬 Animated\n"
+            "9. 🌩️ Thundra\n"
+            "10. ☄️ Galvoria\n"
+            "11. 🌈 Neon\n"
+            "12. 🛡️ Supreme\n"
+            "13. 🔮 Crystal\n"
+            "14. 🎤 Celebrity"
+        )
+        return
+    
+    # Get file from replied message
+    message = update.message.reply_to_message
+    file_obj = None
+    file_type = None
+    
+    if message.document:
+        file_obj = message.document
+        file_type = "document"
+    elif message.photo:
+        file_obj = message.photo[-1]
+        file_type = "photo"
+    elif message.video:
+        file_obj = message.video
+        file_type = "video"
+    elif message.audio:
+        file_obj = message.audio
+        file_type = "audio"
+    else:
+        await update.message.reply_text("❌ Unsupported file type.")
+        return
+    
+    # Check file size
+    if file_obj.file_size > Config.MAX_FILE_SIZE:
+        await update.message.reply_text(
+            f"❌ File too large! Maximum size is {helpers.format_size(Config.MAX_FILE_SIZE)}."
+        )
+        return
+    
+    # Send processing message
+    status_msg = await update.message.reply_text(f"🔄 Filling file slot #{file_id}...")
+    
+    try:
+        # Create file metadata
+        file_metadata = FileMetadata(
+            file_name=file_name,
+            description=description,
+            rarity=rarity_name,
+            file_id=file_id,
+            telegram_file_id=file_obj.file_id,
+            file_type=file_type,
+            file_size=file_obj.file_size,
+            added_by=user.id
+        )
+        
+        # Fill the deleted file slot
+        filled = db.fill_deleted_file(file_id, file_metadata)
+        
+        if filled:
+            # Update user stats
+            db.increment_user_uploads(user.id)
             
-            if not char_name or not anime_name or not rarity_input:
-                await message.reply_text("❌ Missing required parameters (name, anime, or rarity).")
-                return
-            
-            # Parse rarity
-            rarity_name, parsed_subrarity = helpers.parse_rarity(rarity_input)
-            if not rarity_name:
-                await message.reply_text("❌ Invalid rarity number. Must be 1-14.")
-                return
-            
-            # Use subrarity from parsing if provided
-            if parsed_subrarity:
-                subrarity = parsed_subrarity
-            
-            # Check for file size
-            file_size = 0
-            if message.reply_to_message.photo:
-                file_size = message.reply_to_message.photo.file_size or 0
-            elif message.reply_to_message.video:
-                file_size = message.reply_to_message.video.file_size or 0
-            elif message.reply_to_message.audio:
-                file_size = message.reply_to_message.audio.file_size or 0
-            elif message.reply_to_message.document:
-                file_size = message.reply_to_message.document.file_size or 0
-                
-            if file_size > config.MAX_FILE_SIZE:
-                await message.reply_text(
-                    f"❌ File too large. Maximum size is {config.MAX_FILE_SIZE // (1024*1024)}MB."
+            # Get info about the replaced file
+            replaced_file = db.get_deleted_file_by_id(file_id)
+            replaced_info = ""
+            if replaced_file:
+                replaced_info = (
+                    f"\n🔄 **Replaced Deleted File:**\n"
+                    f"• Name: {replaced_file.get('file_name', 'Unknown')}\n"
+                    f"• Description: {replaced_file.get('description', 'Unknown')}\n"
+                    f"• Deleted on: {replaced_file.get('deleted_at', 'Unknown')}\n"
                 )
-                return
             
-            # Start upload process
-            status_msg = await message.reply_text("🔄 Starting fill process...")
-            
-            async def update_status(text: str):
-                try:
-                    await status_msg.edit_text(text)
-                except Exception as e:
-                    logger.warning(f"Failed to update status: {e}")
-            
-            # Upload media
-            await update_status(f"📥 Uploading media to Catbox for ID {character_id}...")
-            
-            media_url, media_type = await helpers.upload_media(
-                client, 
-                message.reply_to_message,
-                status_callback=update_status
+            # Success message
+            success_text = (
+                f"🔄 **File Slot #{file_id} Filled Successfully!**\n\n"
+                f"📁 **New File:** {file_name}\n"
+                f"📝 **Description:** {description}\n"
+                f"🏷️ **Rarity:** {rarity_name}\n"
+                f"📏 **Size:** {helpers.format_size(file_obj.file_size)}\n"
+                f"🆔 **File ID:** `{file_id}`\n"
+                f"{replaced_info}\n"
+                f"✅ **Slot has been successfully reused!**"
             )
             
-            if not media_url:
-                await update_status("❌ Failed to upload media. Please try again.")
-                return
+            keyboard = InlineKeyboardMarkup([
+                [InlineKeyboardButton("👁️ View File", callback_data=f"info_{file_id}")],
+                [InlineKeyboardButton("🗑️ View Recycle Bin", callback_data="deleted_list_0_main")],
+                [InlineKeyboardButton("📚 Browse Database", callback_data="menu_main")]
+            ])
             
-            # Create character with specific ID
-            character = Character(
-                char_name=char_name,
-                anime_name=anime_name,
-                rarity=rarity_name,
-                character_id=character_id,
-                media_url=media_url,
-                media_type=media_type,
-                subrarity=subrarity,
-                added_by=user_id
+            await status_msg.edit_text(success_text, reply_markup=keyboard)
+            
+            logger.info(f"File slot {file_id} filled by user {user.id}")
+        else:
+            await status_msg.edit_text(f"❌ Failed to fill file slot #{file_id}. It may no longer exist in recycle bin.")
+            
+    except Exception as e:
+        logger.error(f"Error filling file: {e}")
+        await status_msg.edit_text("❌ Error filling file slot. Please try again.")
+
+@sudo_only('restore')
+async def restore_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /restore command - restore deleted file"""
+    args = update.message.text.split()
+    if len(args) != 2:
+        await update.message.reply_text(
+            "♻️ **Restore Deleted File**\n\n"
+            "**Usage:** `/restore file_id`\n\n"
+            "**Example:** `/restore 123`\n\n"
+            "You can find file IDs in the recycle bin using /deleted command."
+        )
+        return
+    
+    try:
+        file_id = int(args[1])
+        
+        # Check if file exists in deleted collection
+        file_data = db.get_deleted_file_by_id(file_id)
+        if not file_data:
+            await update.message.reply_text(f"❌ File with ID `{file_id}` not found in recycle bin!")
+            return
+        
+        # Restore file
+        restored = db.restore_file(file_id)
+        
+        if restored:
+            await update.message.reply_text(
+                f"♻️ **File #{file_id} Restored Successfully!**\n\n"
+                f"📁 **Name:** {file_data.get('file_name', 'Unknown')}\n"
+                f"📝 **Description:** {file_data.get('description', 'Unknown')}\n"
+                f"🏷️ **Rarity:** {file_data.get('rarity', 'Unknown')}\n\n"
+                f"The file has been moved back to the active database."
             )
             
-            try:
-                inserted_id = await db.insert_character_with_id(character)
-                
-                # Send to log channel
-                username = message.from_user.username or message.from_user.first_name or "Unknown"
-                await helpers.send_to_log_channel(
-                    client, character.to_dict(), username, user_id
+            logger.info(f"File {file_id} restored by user {update.effective_user.id}")
+        else:
+            await update.message.reply_text("❌ Failed to restore file.")
+            
+    except ValueError:
+        await update.message.reply_text("❌ Invalid file ID. Must be a number.")
+    except Exception as e:
+        logger.error(f"Error in restore command: {e}")
+        await update.message.reply_text("❌ Error restoring file.")
+
+@sudo_only('view_deleted')
+async def deleted_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show deleted files (recycle bin)"""
+    await update.message.reply_text("🗑️ Loading recycle bin...")
+    
+    # Get deleted files
+    files, total_count = db.get_deleted_files(page=0)
+    
+    if not files:
+        await update.message.reply_text(
+            "🗑️ **Recycle Bin is Empty!**\n\n"
+            "No deleted files found.\n"
+            "Deleted files are automatically cleaned up after 30 days."
+        )
+        return
+    
+    total_pages = (total_count + Config.ITEMS_PER_PAGE - 1) // Config.ITEMS_PER_PAGE
+    
+    # Format message
+    message_text = helpers.format_deleted_file_list(files, 0, total_count)
+    
+    # Create keyboard
+    keyboard = helpers.create_pagination_keyboard(0, total_pages, "deleted_list", "main")
+    
+    # Add action buttons for each file
+    buttons = []
+    for file in files[:3]:
+        file_id = file.get('file_id')
+        if file_id:
+            buttons.append([
+                InlineKeyboardButton(
+                    f"♻️ Restore {file.get('file_name', 'Unknown')[:10]}...",
+                    callback_data=f"restore_{file_id}"
                 )
-                
-                # Success message
-                success_text = (
-                    f"✅ **Character #{character_id} Added to Fill Gap!**\n\n"
-                    f"👤 **Name:** {char_name}\n"
-                    f"🎞️ **Anime:** {anime_name}\n"
-                    f"🏅 **Rarity:** {rarity_name}\n"
+            ])
+            buttons.append([
+                InlineKeyboardButton(
+                    f"👁️ View {file.get('file_name', 'Unknown')[:10]}...",
+                    callback_data=f"deleted_info_{file_id}"
                 )
-                
-                if subrarity:
-                    success_text += f"💠 **Sub-Rarity:** {subrarity}\n"
-                
-                success_text += (
-                    f"\n📸 **Media:** Uploaded to Catbox\n"
-                    f"📢 **Posted to:** @capture_database\n"
-                    f"🆔 **Character ID:** `{character_id}`\n\n"
-                    f"**Note:** This character was **NOT** automatically added to your harem.\n"
-                    f"Use `/addharem {character_id}` to add it to your collection.\n\n"
-                    f"**This ID was previously deleted and has now been filled.**"
+            ])
+    
+    if buttons:
+        keyboard.inline_keyboard.extend(buttons)
+    
+    # Add back button and cleanup button
+    keyboard.inline_keyboard.append([
+        InlineKeyboardButton(
+            "🔄 Cleanup Old",
+            callback_data=f"cleanup_deleted"
+        )
+    ])
+    keyboard.inline_keyroom=keyboard
+        await update.message.reply_text(message_text, reply_markup=keyboard)
+
+async def menu_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show main menu"""
+    total_files = db.get_file_count()
+    total_deleted = db.get_deleted_files_count()
+    
+    menu_text = (
+        f"📚 **File Database Menu**\n"
+        f"📊 **Active Files:** {total_files}\n"
+        f"🗑️ **Deleted Files:** {total_deleted}\n\n"
+        "Select a rarity to browse files:"
+    )
+    
+    keyboard = helpers.create_rarity_keyboard("main")
+    await update.message.reply_text(menu_text, reply_markup=keyboard)
+
+async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /search command"""
+    args = update.message.text.split()
+    if len(args) < 2:
+        await update.message.reply_text(
+            "🔍 **Search Files**\n\n"
+            "**Usage:** `/search query`\n\n"
+            "**Examples:**\n"
+            "• `/search project`\n"
+            "• `/search report`\n"
+            "• `/search vacation photos`\n\n"
+            "You can search by file name or description."
+        )
+        return
+    
+    query = ' '.join(args[1:])
+    await update.message.reply_text(f"🔍 Searching for: `{query}`...")
+    
+    # Perform search
+    files, total_count = db.search_files_paginated(query, page=0)
+    
+    if not files:
+        await update.message.reply_text(f"❌ No results found for: `{query}`")
+        return
+    
+    total_pages = (total_count + Config.ITEMS_PER_PAGE - 1) // Config.ITEMS_PER_PAGE
+    
+    # Format message
+    message_text = helpers.format_file_list(
+        files, 0, total_count, 
+        f"Search Results for: '{query}'"
+    )
+    
+    # Create keyboard
+    keyboard = helpers.create_pagination_keyboard(0, total_pages, "search", query)
+    
+    # Add view buttons for each file
+    buttons = []
+    for file in files[:5]:
+        file_id = file.get('file_id')
+        if file_id:
+            buttons.append([
+                InlineKeyboardButton(
+                    f"👁️ {file.get('file_name', 'Unknown')[:15]}...",
+                    callback_data=f"info_{file_id}"
                 )
-                
-                await update_status(success_text)
-                logger.info(f"Character {character_id} filled by user {user_id}")
-                
-            except ValueError as e:
-                await update_status(f"❌ Error: {str(e)}")
-            except Exception as e:
-                logger.error(f"Error filling character: {e}")
-                await update_status("❌ Error saving character to database. Please try again.")
+            ])
+    
+    if buttons:
+        keyboard.inline_keyboard.extend(buttons)
+    
+    # Add back to menu button
+    keyboard.inline_keyboard.append([
+        InlineKeyboardButton(
+            "🔙 Back to Menu",
+            callback_data="menu_main"
+        )
+    ])
+    
+    await update.message.reply_text(message_text, reply_markup=keyboard)
+
+async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show database statistics"""
+    # Get various stats
+    total_files = db.get_file_count()
+    total_deleted = db.get_deleted_files_count()
+    rarity_stats = db.get_rarity_stats()
+    top_uploaders = db.get_top_uploaders(10)
+    
+    # Clean up old deleted files
+    cleaned_count = db.cleanup_old_deleted()
+    
+    # Format stats message
+    stats_text = f"📈 **Database Statistics**\n\n"
+    stats_text += f"📊 **Active Files:** {total_files}\n"
+    stats_text += f"🗑️ **Deleted Files:** {total_deleted}\n"
+    if cleaned_count > 0:
+        stats_text += f"🧹 **Recently Cleaned:** {cleaned_count} (older than {Config.RECYCLE_BIN_MAX_DAYS} days)\n"
+    stats_text += f"📈 **Total (All Time):** {total_files + total_deleted}\n\n"
+    
+    stats_text += "**Files by Rarity:**\n"
+    for rarity_num, rarity_name in Config.RARITY_MAP.items():
+        count = rarity_stats.get(rarity_name, 0)
+        percentage = (count / total_files * 100) if total_files > 0 else 0
+        emoji = helpers.get_rarity_emoji(rarity_name)
+        stats_text += f"{emoji} **{rarity_name.split(' ', 1)[-1]}:** {count} ({percentage:.1f}%)\n"
+    
+    stats_text += f"\n**Top Uploaders:**\n"
+    for i, uploader in enumerate(top_uploaders, 1):
+        user_id = uploader["_id"]
+        count = uploader["count"]
         
-        @self.client.on_message(filters.command("upload"))
-        async def upload_command(client: Client, message: Message):
-            """Handle /upload command - SIMPLE UPLOAD SYSTEM"""
-            user_id = message.from_user.id
-            
-            # Check authorization
-            if not await helpers.is_sudo_user(user_id):
-                await message.reply_text("❌ You are not authorized to upload characters.")
-                return
-            
-            # Check if message is a reply to media
-            if not message.reply_to_message or not (
-                message.reply_to_message.photo or 
-                message.reply_to_message.video or 
-                message.reply_to_message.audio or 
-                message.reply_to_message.document
-            ):
-                await message.reply_text(
-                    "❌ **Please reply to a media file with this command!**\n\n"
-                    "**Usage:** Reply to a photo/video/audio/document with:\n"
-                    "`/upload \"Character Name\" \"Anime Name\" Rarity_Number [subrarity]`\n\n"
-                    "**Examples:**\n"
-                    "• `/upload \"Ichigo Kurosaki\" Bleach 4`\n"
-                    "• `/upload \"Goku\" \"Dragon Ball\" 5 valentine`"
-                )
-                return
-            
-            # Parse arguments
-            args = message.text.split()
-            if len(args) < 4:
-                await message.reply_text(
-                    "❌ **Invalid syntax!**\n\n"
-                    "**Usage:** `/upload \"Character Name\" \"Anime Name\" Rarity_Number [subrarity]`\n\n"
-                    "**Note:** Use quotes for names with spaces\n"
-                    "**Example:** `/upload \"Monkey D. Luffy\" OnePiece 3`"
-                )
-                return
-            
-            # Parse character name (support quotes)
-            char_name = ""
-            anime_name = ""
-            rarity_input = ""
-            
-            # Simple parsing logic
-            text = message.text
-            # Remove command
-            text = text.replace('/upload', '', 1).strip()
-            
-            # Parse character name (might be in quotes)
-            if text.startswith('"'):
-                # Find closing quote
-                end_quote = text.find('"', 1)
-                if end_quote == -1:
-                    await message.reply_text("❌ Invalid format. Missing closing quote for character name.")
-                    return
-                char_name = text[1:end_quote]
-                text = text[end_quote + 1:].strip()
-            else:
-                # Take first word as character name
-                parts = text.split()
-                char_name = parts[0]
-                text = ' '.join(parts[1:])
-            
-            # Parse anime name (might be in quotes)
-            if text.startswith('"'):
-                end_quote = text.find('"', 1)
-                if end_quote == -1:
-                    await message.reply_text("❌ Invalid format. Missing closing quote for anime name.")
-                    return
-                anime_name = text[1:end_quote]
-                text = text[end_quote + 1:].strip()
-            else:
-                # Take first word as anime name
-                parts = text.split()
-                if not parts:
-                    await message.reply_text("❌ Missing anime name.")
-                    return
-                anime_name = parts[0]
-                text = ' '.join(parts[1:])
-            
-            # The rest is rarity (and optional subrarity)
-            rarity_input = text.strip()
-            
-            if not char_name or not anime_name or not rarity_input:
-                await message.reply_text("❌ Missing required parameters.")
-                return
-            
-            # Parse rarity
-            rarity_name, subrarity = helpers.parse_rarity(rarity_input)
-            if not rarity_name:
-                await message.reply_text("❌ Invalid rarity number. Must be 1-14.")
-                return
-            
-            # Check for file size
-            file_size = 0
-            if message.reply_to_message.photo:
-                file_size = message.reply_to_message.photo.file_size or 0
-            elif message.reply_to_message.video:
-                file_size = message.reply_to_message.video.file_size or 0
-            elif message.reply_to_message.audio:
-                file_size = message.reply_to_message.audio.file_size or 0
-            elif message.reply_to_message.document:
-                file_size = message.reply_to_message.document.file_size or 0
-                
-            if file_size > config.MAX_FILE_SIZE:
-                await message.reply_text(
-                    f"❌ File too large. Maximum size is {config.MAX_FILE_SIZE // (1024*1024)}MB."
-                )
-                return
-            
-            # Start upload process
-            status_msg = await message.reply_text("🔄 Starting upload process...")
-            
-            async def update_status(text: str):
-                try:
-                    await status_msg.edit_text(text)
-                except Exception as e:
-                    logger.warning(f"Failed to update status: {e}")
-            
-            # Upload media
-            await update_status("📥 Uploading media to Catbox...")
-            
-            media_url, media_type = await helpers.upload_media(
-                client, 
-                message.reply_to_message,
-                status_callback=update_status
-            )
-            
-            if not media_url:
-                await update_status("❌ Failed to upload media. Please try again.")
-                return
-            
-            # Save to database with next available ID
-            character_id = await db.get_next_character_id()
-            character = Character(
-                char_name=char_name,
-                anime_name=anime_name,
-                rarity=rarity_name,
-                character_id=character_id,
-                media_url=media_url,
-                media_type=media_type,
-                subrarity=subrarity,
-                added_by=user_id
-            )
-            
-            try:
-                inserted_id = await db.insert_character(character)
-                
-                # Send to log channel
-                username = message.from_user.username or message.from_user.first_name or "Unknown"
-                await helpers.send_to_log_channel(
-                    client, character.to_dict(), username, user_id
-                )
-                
-                # Success message
-                success_text = (
-                    f"✅ **Character #{character_id} Uploaded Successfully!**\n\n"
-                    f"👤 **Name:** {char_name}\n"
-                    f"🎞️ **Anime:** {anime_name}\n"
-                    f"🏅 **Rarity:** {rarity_name}\n"
-                )
-                
-                if subrarity:
-                    success_text += f"💠 **Sub-Rarity:** {subrarity}\n"
-                
-                success_text += (
-                    f"\n📸 **Media:** Uploaded to Catbox\n"
-                    f"📢 **Posted to:** @capture_database\n"
-                    f"🆔 **Character ID:** `{character_id}`\n\n"
-                    f"**Note:** This character was **NOT** automatically added to your harem.\n"
-                    f"Use `/addharem {character_id}` to add it to your collection.\n\n"
-                    f"**Use this ID to edit or delete the character.**"
-                )
-                
-                await update_status(success_text)
-                
-            except Exception as e:
-                logger.error(f"Error saving character: {e}")
-                await update_status("❌ Error saving character to database. Please try again.")
+        # Try to get username from database
+        user_data = db.users.find_one({"user_id": user_id})
+        username = user_data.get('username', f"User {user_id}") if user_data else f"User {user_id}"
         
-        @self.client.on_message(filters.command("backup"))
-        async def backup_command(client: Client, message: Message):
-            """Handle /backup command - create database backup (owner only)"""
-            user_id = message.from_user.id
-            
-            # Check if owner
-            if not helpers.is_owner(user_id):
-                await message.reply_text("❌ Only bot owners can create backups.")
-                return
-            
-            status_msg = await message.reply_text("🔄 Creating database backup...")
-            
-            try:
-                # Create backup
-                backup_data, filename = await helpers.backup_system.create_full_backup()
-                
-                if not backup_data:
-                    await status_msg.edit_text("❌ Failed to create backup. Please check logs.")
-                    logger.error("Backup data creation failed")
-                    return
-                
-                await status_msg.edit_text("✅ Backup created! Sending to your DM...")
-                
-                # Get file size
-                file_size = len(backup_data)
-                file_size_mb = file_size / (1024 * 1024)
-                
-                # Send backup to owner's DM
-                try:
-                    await client.send_document(
-                        chat_id=user_id,
-                        document=backup_data,
-                        file_name=filename,
-                        caption=f"📦 **Database Backup**\n\n"
-                               f"🗓️ **Created:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
-                               f"📊 **File Size:** {file_size_mb:.2f} MB\n"
-                               f"👤 **Requested by:** {message.from_user.mention}\n\n"
-                               f"**Instructions:**\n"
-                               f"• Save this file securely\n"
-                               f"• Contains all characters, sudo users, and harem data"
-                    )
-                    await status_msg.edit_text("✅ Backup sent to your DM!")
-                    logger.info(f"Backup created and sent to owner {user_id} (Size: {file_size_mb:.2f} MB)")
-                    
-                except Exception as e:
-                    logger.error(f"Failed to send backup to DM: {e}")
-                    # Try sending in chat if DM fails
-                    try:
-                        await client.send_document(
-                            chat_id=message.chat.id,
-                            document=backup_data,
-                            file_name=filename,
-                            caption=f"📦 **Database Backup**\n\nSize: {file_size_mb:.2f} MB"
-                        )
-                        await status_msg.edit_text("✅ Backup created! (Sent in chat because DM failed)")
-                    except Exception as e2:
-                        logger.error(f"Failed to send backup in chat: {e2}")
-                        await status_msg.edit_text("❌ Failed to send backup. File might be too large.")
-                    
-            except Exception as e:
-                logger.error(f"Error in backup command: {e}")
-                await status_msg.edit_text("❌ Error creating backup.")
-        
-        @self.client.on_message(filters.command("backupharem"))
-        async def backup_harem_command(client: Client, message: Message):
-            """Handle /backupharem command - backup all or specific user harem"""
-            user_id = message.from_user.id
-            
-            # Check if owner
-            if not helpers.is_owner(user_id):
-                await message.reply_text("❌ Only bot owners can backup harem data.")
-                return
-            
-            args = message.text.split()
-            status_msg = await message.reply_text("🔄 Preparing harem backup...")
-            
-            try:
-                # If no argument, backup all users
-                if len(args) == 1:
-                    backup_data, filename = await helpers.backup_system.create_all_harem_backup()
-                    backup_type = "All Users"
-                else:
-                    # Try to parse user ID or username
-                    target = args[1]
-                    target_user_id = None
-                    
-                    # Check if it's a user ID (numeric)
-                    if target.isdigit():
-                        target_user_id = int(target)
-                    else:
-                        # Check if it's a username (with or without @)
-                        if target.startswith('@'):
-                            target = target[1:]
-                        
-                        try:
-                            # Try to get user by username
-                            user = await client.get_users(target)
-                            target_user_id = user.id
-                        except Exception as e:
-                            await status_msg.edit_text(f"❌ Invalid user: {target}")
-                            return
-                    
-                    if not target_user_id:
-                        await status_msg.edit_text("❌ Could not find user.")
-                        return
-                    
-                    # Check if user exists in harem
-                    user_harem = await db.get_user_harem(target_user_id)
-                    if not user_harem:
-                        await status_msg.edit_text(f"❌ User {target_user_id} has no harem data.")
-                        return
-                    
-                    backup_data, filename = await helpers.backup_system.create_specific_harem_backup(target_user_id)
-                    backup_type = f"User {target_user_id}"
-                
-                if not backup_data:
-                    await status_msg.edit_text("❌ Failed to create harem backup.")
-                    return
-                
-                await status_msg.edit_text(f"✅ {backup_type} harem backup created! Sending to your DM...")
-                
-                # Get file size
-                file_size = len(backup_data)
-                file_size_mb = file_size / (1024 * 1024)
-                
-                # Send backup to owner's DM
-                try:
-                    await client.send_document(
-                        chat_id=user_id,
-                        document=backup_data,
-                        file_name=filename,
-                        caption=f"💾 **Harem Backup - {backup_type}**\n\n"
-                               f"🗓️ **Created:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
-                               f"📊 **File Size:** {file_size_mb:.2f} MB\n"
-                               f"👤 **Requested by:** {message.from_user.mention}\n\n"
-                               f"**Instructions:**\n"
-                               f"• Save this file securely\n"
-                               f"• Use `/haremupload` to restore data"
-                    )
-                    await status_msg.edit_text(f"✅ {backup_type} harem backup sent to your DM!")
-                    logger.info(f"Harem backup created for {backup_type} by owner {user_id}")
-                    
-                except Exception as e:
-                    logger.error(f"Failed to send harem backup to DM: {e}")
-                    # Try sending in chat
-                    try:
-                        await client.send_document(
-                            chat_id=message.chat.id,
-                            document=backup_data,
-                            file_name=filename,
-                            caption=f"💾 **Harem Backup - {backup_type}**\n\nSize: {file_size_mb:.2f} MB"
-                        )
-                        await status_msg.edit_text(f"✅ {backup_type} harem backup created! (Sent in chat)")
-                    except Exception as e2:
-                        logger.error(f"Failed to send harem backup in chat: {e2}")
-                        await status_msg.edit_text("❌ Failed to send backup. File might be too large.")
-                    
-            except Exception as e:
-                logger.error(f"Error in backupharem command: {e}")
-                await status_msg.edit_text("❌ Error creating harem backup.")
-        
-        @self.client.on_message(filters.command("add"))
-        async def add_sudo_command(client: Client, message: Message):
-            """Handle /add command - add sudo user (owner only)"""
-            user_id = message.from_user.id
-            
-            # Check if owner
-            if not helpers.is_owner(user_id):
-                await message.reply_text("❌ Only bot owners can add sudo users.")
-                return
-            
-            args = message.text.split()
-            if len(args) != 2:
-                await message.reply_text(
-                    "👥 **Add Sudo User**\n\n"
-                    "**Usage:** `/add user_id`\n\n"
-                    "**Example:** `/add 1234567890`\n\n"
-                    "**Note:** User ID must be a number."
+        stats_text += f"{i}. {username}: {count} files\n"
+    
+    # Add keyboard
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🗑️ View Recycle Bin", callback_data="deleted_list_0_main")],
+        [InlineKeyboardButton("🔄 Refresh Stats", callback_data="stats_refresh")],
+        [InlineKeyboardButton("🔙 Back to Menu", callback_data="menu_main")]
+    ])
+    
+    await update.message.reply_text(stats_text, reply_markup=keyboard)
+
+async def myuploads_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show user's uploaded files"""
+    user_id = update.effective_user.id
+    
+    await update.message.reply_text("📂 Loading your uploaded files...")
+    
+    # Get user's files
+    files, total_count = db.get_user_files_paginated(user_id, page=0)
+    
+    if not files:
+        await update.message.reply_text("📭 You haven't uploaded any files yet.")
+        return
+    
+    total_pages = (total_count + Config.ITEMS_PER_PAGE - 1) // Config.ITEMS_PER_PAGE
+    
+    # Format message
+    message_text = helpers.format_file_list(
+        files, 0, total_count, 
+        "Your Uploaded Files"
+    )
+    
+    # Create keyboard
+    keyboard = helpers.create_pagination_keyboard(0, total_pages, "myuploads", "")
+    
+    # Add view buttons for each file
+    buttons = []
+    for file in files[:5]:
+        file_id = file.get('file_id')
+        if file_id:
+            buttons.append([
+                InlineKeyboardButton(
+                    f"👁️ {file.get('file_name', 'Unknown')[:15]}...",
+                    callback_data=f"info_{file_id}"
                 )
-                return
-            
-            try:
-                target_user_id = int(args[1])
-                
-                # Check if user is already sudo
-                if await helpers.is_sudo_user(target_user_id):
-                    await message.reply_text("❌ This user is already a sudo user.")
-                    return
-                
-                # Check if user is an owner
-                if target_user_id in config.OWNER_IDS:
-                    await message.reply_text("❌ This user is already an owner.")
-                    return
-                
-                # Add sudo user
-                success = await db.add_sudo_user(target_user_id, user_id)
-                
-                if success:
-                    try:
-                        target_user = await client.get_users(target_user_id)
-                        username = f"@{target_user.username}" if target_user.username else target_user.first_name
-                    except:
-                        username = f"User ({target_user_id})"
-                    
-                    await message.reply_text(
-                        f"✅ **Sudo User Added Successfully!**\n\n"
-                        f"👤 **User:** {username}\n"
-                        f"🆔 **User ID:** `{target_user_id}`\n"
-                        f"👑 **Added by:** {message.from_user.mention}\n\n"
-                        f"**This user can now upload and edit characters.**"
-                    )
-                    logger.info(f"Sudo user {target_user_id} added by {user_id}")
-                else:
-                    await message.reply_text("❌ Failed to add sudo user.")
-                    
-            except ValueError:
-                await message.reply_text("❌ Invalid user ID. Must be a number.")
-            except Exception as e:
-                logger.error(f"Error in add command: {e}")
-                await message.reply_text("❌ Error adding sudo user.")
+            ])
+    
+    if buttons:
+        keyboard.inline_keyboard.extend(buttons)
+    
+    # Add back to menu button
+    keyboard.inline_keyboard.append([
+        InlineKeyboardButton(
+            "🔙 Back to Menu",
+            callback_data="menu_main"
+        )
+    ])
+    
+    await update.message.reply_text(message_text, reply_markup=keyboard)
+
+async def info_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show file information by ID"""
+    args = update.message.text.split()
+    if len(args) != 2:
+        await update.message.reply_text(
+            "ℹ️ **File Information**\n\n"
+            "**Usage:** `/info file_id`\n\n"
+            "**Example:** `/info 123`\n\n"
+            "You can find file IDs by browsing the database or searching."
+        )
+        return
+    
+    try:
+        file_id = int(args[1])
+        await _show_file_info(update, context, file_id)
         
-        @self.client.on_message(filters.command(["remove", "removesudo"]))
-        async def remove_sudo_command(client: Client, message: Message):
-            """Handle /remove command - remove sudo user (owner only)"""
-            user_id = message.from_user.id
-            
-            # Check if owner
-            if not helpers.is_owner(user_id):
-                await message.reply_text("❌ Only bot owners can remove sudo users.")
-                return
-            
-            args = message.text.split()
-            if len(args) != 2:
-                await message.reply_text(
-                    "👥 **Remove Sudo User**\n\n"
-                    "**Usage:** `/remove user_id`\n\n"
-                    "**Example:** `/remove 1234567890`"
-                )
-                return
-            
-            try:
-                target_user_id = int(args[1])
-                
-                # Check if user is an owner
-                if target_user_id in config.OWNER_IDS:
-                    await message.reply_text("❌ Cannot remove an owner.")
-                    return
-                
-                # Check if user is sudo
-                if not await helpers.is_sudo_user(target_user_id):
-                    await message.reply_text("❌ This user is not a sudo user.")
-                    return
-                
-                # Remove sudo user
-                success = await db.remove_sudo_user(target_user_id)
-                
-                if success:
-                    try:
-                        target_user = await client.get_users(target_user_id)
-                        username = f"@{target_user.username}" if target_user.username else target_user.first_name
-                    except:
-                        username = f"User ({target_user_id})"
-                    
-                    await message.reply_text(
-                        f"✅ **Sudo User Removed Successfully!**\n\n"
-                        f"👤 **User:** {username}\n"
-                        f"🆔 **User ID:** `{target_user_id}`\n\n"
-                        f"**This user can no longer upload or edit characters.**"
-                    )
-                    logger.info(f"Sudo user {target_user_id} removed by {user_id}")
-                else:
-                    await message.reply_text("❌ Failed to remove sudo user.")
-                    
-            except ValueError:
-                await message.reply_text("❌ Invalid user ID. Must be a number.")
-            except Exception as e:
-                logger.error(f"Error in remove command: {e}")
-                await message.reply_text("❌ Error removing sudo user.")
+    except ValueError:
+        await update.message.reply_text("❌ Invalid file ID. Please enter a number.")
+    except Exception as e:
+        logger.error(f"Error in info command: {e}")
+        await update.message.reply_text("❌ Error fetching file information.")
+
+@sudo_only('edit')
+async def edit_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /edit command - edit file details"""
+    args = update.message.text.split()
+    if len(args) < 5:
+        await update.message.reply_text(
+            "✏️ **Edit File**\n\n"
+            "**Usage:** `/edit ID \"New Name\" \"New Description\" Rarity`\n\n"
+            "**Examples:**\n"
+            "• `/edit 123 \"Updated Report\" \"Revised Analysis\" 3`\n"
+            "• `/edit 456 \"New Name\" \"New Description\" 10`\n\n"
+            "**Note:** Use quotes for names with spaces"
+        )
+        return
+    
+    try:
+        file_id = int(args[1])
         
-        @self.client.on_message(filters.command("sudos"))
-        async def list_sudos_command(client: Client, message: Message):
-            """Handle /sudos command - list all sudo users"""
-            user_id = message.from_user.id
-            
-            # Check if owner or sudo
-            if not helpers.is_owner(user_id) and not await helpers.is_sudo_user(user_id):
-                await message.reply_text("❌ You are not authorized to view sudo users.")
-                return
-            
-            try:
-                sudo_users = await db.get_sudo_users()
-                
-                if not sudo_users:
-                    await message.reply_text("📋 **Sudo Users List:**\n\nNo sudo users found (only owners).")
-                    return
-                
-                # List owners
-                owners_text = "👑 **Bot Owners:**\n"
-                for owner_id in config.OWNER_IDS:
-                    try:
-                        owner = await client.get_users(owner_id)
-                        owners_text += f"• {owner.mention} (`{owner_id}`)\n"
-                    except:
-                        owners_text += f"• User (`{owner_id}`)\n"
-                
-                # List sudo users
-                sudo_text = "\n👥 **Sudo Users:**\n"
-                for sudo in sudo_users:
-                    sudo_id = sudo.get("user_id")
-                    added_by = sudo.get("added_by", "Unknown")
-                    added_at = sudo.get("added_at", datetime.utcnow())
-                    
-                    if isinstance(added_at, str):
-                        try:
-                            added_at = datetime.fromisoformat(added_at)
-                        except:
-                            added_at = datetime.utcnow()
-                    
-                    try:
-                        sudo_user = await client.get_users(sudo_id)
-                        sudo_name = f"@{sudo_user.username}" if sudo_user.username else sudo_user.first_name
-                        sudo_text += f"• {sudo_name} (`{sudo_id}`)\n"
-                    except:
-                        sudo_text += f"• User (`{sudo_id}`)\n"
-                    
-                    # Try to get added by username
-                    try:
-                        adder = await client.get_users(added_by)
-                        adder_name = f"@{adder.username}" if adder.username else adder.first_name
-                        sudo_text += f"  └─ Added by: {adder_name} on {added_at.strftime('%Y-%m-%d')}\n"
-                    except:
-                        sudo_text += f"  └─ Added by: User (`{added_by}`) on {added_at.strftime('%Y-%m-%d')}\n"
-                
-                full_text = owners_text + sudo_text
-                await message.reply_text(full_text)
-                
-            except Exception as e:
-                logger.error(f"Error listing sudo users: {e}")
-                await message.reply_text("❌ Error fetching sudo users list.")
+        # Simple parsing similar to upload
+        text = update.message.text
+        text = text.replace(f'/edit {args[1]}', '', 1).strip()
         
-        @self.client.on_message(filters.command("harembackup"))
-        async def harem_backup_command(client: Client, message: Message):
-            """Handle /harembackup command - backup user's harem"""
-            user_id = message.from_user.id
-            
-            status_msg = await message.reply_text("🔄 Creating your harem backup...")
-            
-            try:
-                # Create harem backup
-                backup_data, filename = await helpers.backup_system.create_specific_harem_backup(user_id)
-                
-                if not backup_data:
-                    await status_msg.edit_text("❌ Failed to create harem backup.")
-                    return
-                
-                # Get harem stats
-                harem = await db.get_user_harem(user_id)
-                total_chars = len(harem)
-                
-                if total_chars == 0:
-                    await status_msg.edit_text("❌ Your harem is empty!")
-                    return
-                
-                # Count characters by rarity
-                rarity_count = {}
-                for entry in harem:
-                    rarity = entry.get("character_data", {}).get("rarity", "Unknown")
-                    rarity_count[rarity] = rarity_count.get(rarity, 0) + 1
-                
-                rarity_stats = "\n".join([f"• {rarity}: {count}" for rarity, count in rarity_count.items()])
-                
-                # Get file size
-                file_size = len(backup_data)
-                file_size_kb = file_size / 1024
-                
-                # Send backup to user
-                await client.send_document(
-                    chat_id=user_id,
-                    document=backup_data,
-                    file_name=filename,
-                    caption=f"💾 **Your Harem Backup**\n\n"
-                           f"👤 **User:** {message.from_user.mention}\n"
-                           f"📅 **Backup Date:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
-                           f"📊 **File Size:** {file_size_kb:.1f} KB\n"
-                           f"👥 **Total Characters:** {total_chars}\n\n"
-                           f"**Rarity Distribution:**\n{rarity_stats}\n\n"
-                           f"**Instructions:**\n"
-                           f"• Save this file to restore your harem later\n"
-                           f"• Use `/haremupload` (reply to this file) to restore"
-                )
-                await status_msg.edit_text("✅ Your harem backup has been sent to your DM!")
-                logger.info(f"Harem backup created for user {user_id}")
-                
-            except Exception as e:
-                logger.error(f"Error in harem backup: {e}")
-                await status_msg.edit_text("❌ Error creating harem backup.")
-        
-        @self.client.on_message(filters.command("haremupload"))
-        async def harem_upload_command(client: Client, message: Message):
-            """Handle /haremupload command - restore harem from backup"""
-            user_id = message.from_user.id
-            
-            # Check if message is a reply to a document
-            if not message.reply_to_message or not message.reply_to_message.document:
-                await message.reply_text(
-                    "❌ **Please reply to a harem backup file with this command!**\n\n"
-                    "**Usage:**\n"
-                    "1. Create backup with `/harembackup`\n"
-                    "2. Reply to the backup file with `/haremupload`\n\n"
-                    "**Note:** This will replace your current harem!"
-                )
+        # Parse new file name
+        new_file_name = ""
+        if text.startswith('"'):
+            end_quote = text.find('"', 1)
+            if end_quote == -1:
+                await update.message.reply_text("❌ Missing closing quote for file name.")
                 return
+            new_file_name = text[1:end_quote]
+            text = text[end_quote + 1:].strip()
+        else:
+            parts = text.split()
+            new_file_name = parts[0]
+            text = ' '.join(parts[1:])
+        
+        # Parse new description
+        new_description = ""
+        if text.startswith('"'):
+            end_quote = text.find('"', 1)
+            if end_quote == -1:
+                await update.message.reply_text("❌ Missing closing quote for description.")
+                return
+            new_description = text[1:end_quote]
+            text = text[end_quote + 1:].strip()
+        else:
+            parts = text.split()
+            if not parts:
+                await update.message.reply_text("❌ Missing description.")
+                return
+            new_description = parts[0]
+            text = ' '.join(parts[1:])
+        
+        # Parse rarity
+        rarity_input = text.strip()
+        new_rarity = helpers.parse_rarity(rarity_input)
+        
+        if not new_rarity:
+            await update.message.reply_text("❌ Invalid rarity. Must be 1-14.")
+            return
+        
+        # Check if file exists
+        file_data = db.get_file_by_id(file_id)
+        if not file_data:
+            await update.message.reply_text("❌ File not found!")
+            return
+        
+        # Update file
+        updated = db.update_file(
+            file_id=file_id,
+            file_name=new_file_name,
+            description=new_description,
+            rarity=new_rarity
+        )
+        
+        if updated:
+            await update.message.reply_text(f"✅ File `{file_id}` updated successfully!")
+            logger.info(f"File {file_id} edited by user {update.effective_user.id}")
+        else:
+            await update.message.reply_text("❌ Failed to update file.")
             
-            status_msg = await message.reply_text("📥 Downloading backup file...")
-            
-            try:
-                # Download the backup file
-                file_path = await client.download_media(
-                    message.reply_to_message.document.file_id,
-                    file_name=f"harem_backup_{user_id}.json"
+    except ValueError:
+        await update.message.reply_text("❌ Invalid file ID. Must be a number.")
+    except Exception as e:
+        logger.error(f"Error in edit command: {e}")
+        await update.message.reply_text("❌ Error updating file. Please check the format.")
+
+@sudo_only('delete')
+async def delete_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /delete command - move file to recycle bin"""
+    args = update.message.text.split()
+    if len(args) != 2:
+        await update.message.reply_text(
+            "🗑️ **Delete File**\n\n"
+            "**Usage:** `/delete ID`\n\n"
+            "**Example:** `/delete 123`\n\n"
+            "**Note:** This moves the file to the recycle bin where it can be restored later."
+        )
+        return
+    
+    try:
+        file_id = int(args[1])
+        file_data = db.get_file_by_id(file_id)
+        
+        if not file_data:
+            await update.message.reply_text("❌ File not found!")
+            return
+        
+        # Show confirmation
+        keyboard = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("✅ Yes, Move to Recycle Bin", callback_data=f"soft_delete_{file_id}"),
+                InlineKeyboardButton("❌ Cancel", callback_data="cancel_delete")
+            ]
+        ])
+        
+        await update.message.reply_text(
+            f"⚠️ **Are you sure you want to move this file to the recycle bin?**\n\n"
+            f"**Name:** {file_data['file_name']}\n"
+            f"**Description:** {file_data.get('description', 'No description')}\n"
+            f"**ID:** `{file_id}`\n\n"
+            f"**Note:** The file can be restored from the recycle bin later.",
+            reply_markup=keyboard
+        )
+        
+    except ValueError:
+        await update.message.reply_text("❌ Invalid file ID. Must be a number.")
+    except Exception as e:
+        logger.error(f"Error in delete command: {e}")
+        await update.message.reply_text("❌ Error processing delete request.")
+
+# ==================== CALLBACK QUERY HANDLER ====================
+async def handle_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle all callback queries"""
+    query = update.callback_query
+    await query.answer()
+    
+    data = query.data
+    user_id = query.from_user.id
+    
+    try:
+        # Handle noop (do nothing)
+        if data == "noop":
+            return
+        
+        # Handle menu
+        elif data == "menu_main":
+            await _show_main_menu(query)
+        
+        # Handle rarity selection
+        elif data.startswith("rarity_"):
+            parts = data.split("_")
+            if len(parts) >= 3:
+                rarity_num = int(parts[1])
+                current_view = parts[2] if len(parts) > 2 else "main"
+                
+                # Show files for this rarity
+                files, total_count = db.get_files_by_rarity(
+                    Config.RARITY_MAP[rarity_num], 0
                 )
                 
-                if not file_path:
-                    await status_msg.edit_text("❌ Failed to download backup file.")
+                if not files:
+                    await query.answer(f"No files found for rarity {rarity_num}", show_alert=True)
                     return
                 
-                await status_msg.edit_text("🔍 Parsing backup data...")
+                total_pages = (total_count + Config.ITEMS_PER_PAGE - 1) // Config.ITEMS_PER_PAGE
                 
-                # Read and parse the backup file
-                with open(file_path, 'r', encoding='utf-8') as f:
-                    file_content = f.read().encode('utf-8')
-                
-                # Parse backup data
-                harem_data = await helpers.backup_system.parse_harem_backup_file(file_content)
-                
-                if not harem_data:
-                    await status_msg.edit_text("❌ Invalid backup file format.")
-                    # Clean up
-                    try:
-                        os.remove(file_path)
-                    except:
-                        pass
-                    return
-                
-                await status_msg.edit_text("🔄 Restoring your harem...")
-                
-                # Restore harem
-                success, added_count, failed_count = await db.restore_user_harem(user_id, harem_data)
-                
-                # Clean up downloaded file
-                try:
-                    os.remove(file_path)
-                except:
-                    pass
-                
-                if success:
-                    await status_msg.edit_text(
-                        f"✅ **Harem Restored Successfully!**\n\n"
-                        f"👤 **User:** {message.from_user.mention}\n"
-                        f"✅ **Characters Added:** {added_count}\n"
-                        f"❌ **Failed to Add:** {failed_count}\n"
-                        f"📊 **Total in Harem:** {added_count}\n\n"
-                        f"**Note:** Characters that no longer exist in the database were skipped."
-                    )
-                    logger.info(f"Harem restored for user {user_id}: {added_count} added, {failed_count} failed")
-                else:
-                    await status_msg.edit_text("❌ Failed to restore harem.")
-                    
-            except Exception as e:
-                logger.error(f"Error in harem upload: {e}")
-                await status_msg.edit_text("❌ Error restoring harem.")
-        
-        @self.client.on_message(filters.command("addharem"))
-        async def add_harem_command(client: Client, message: Message):
-            """Handle /addharem command - add character to user's harem"""
-            user_id = message.from_user.id
-            
-            args = message.text.split()
-            if len(args) != 2:
-                await message.reply_text(
-                    "💝 **Add to Harem**\n\n"
-                    "**Usage:** `/addharem character_id`\n\n"
-                    "**Example:** `/addharem 123`\n\n"
-                    "**Note:** You can only add characters that exist in the database."
-                )
-                return
-            
-            try:
-                character_id = int(args[1])
-                
-                # Check if character exists
-                character = await db.get_character_by_id(character_id)
-                if not character:
-                    await message.reply_text("❌ Character not found!")
-                    return
-                
-                # Add to harem
-                success = await db.add_to_harem(user_id, character_id)
-                
-                if success:
-                    await message.reply_text(
-                        f"✅ **Character Added to Your Harem!**\n\n"
-                        f"👤 **Name:** {character['char_name']}\n"
-                        f"🎞️ **Anime:** {character['anime_name']}\n"
-                        f"🏅 **Rarity:** {character['rarity']}\n"
-                        f"🆔 **ID:** `{character_id}`\n\n"
-                        f"**View your harem with** `/myharem`"
-                    )
-                else:
-                    await message.reply_text("❌ Character is already in your harem!")
-                    
-            except ValueError:
-                await message.reply_text("❌ Invalid character ID. Must be a number.")
-            except Exception as e:
-                logger.error(f"Error in addharem command: {e}")
-                await message.reply_text("❌ Error adding character to harem.")
-        
-        @self.client.on_message(filters.command("myharem"))
-        async def my_harem_command(client: Client, message: Message):
-            """Handle /myharem command - view user's harem"""
-            user_id = message.from_user.id
-            
-            try:
-                harem = await db.get_user_harem(user_id)
-                
-                if not harem:
-                    await message.reply_text(
-                        "💔 **Your Harem is Empty!**\n\n"
-                        "**To add characters to your harem:**\n"
-                        "1. Find characters using `/search`\n"
-                        "2. Add characters with `/addharem ID`\n"
-                        "3. Restore from backup with `/haremupload`\n\n"
-                        "**View character details with** `/info ID`"
-                    )
-                    return
-                
-                total_chars = len(harem)
-                
-                # Paginate results if too many
-                page = 0
-                args = message.text.split()
-                if len(args) > 1:
-                    try:
-                        page = int(args[1]) - 1
-                        if page < 0:
-                            page = 0
-                    except:
-                        pass
-                
-                chars_per_page = 10
-                total_pages = (total_chars + chars_per_page - 1) // chars_per_page
-                if page >= total_pages:
-                    page = total_pages - 1
-                
-                start_idx = page * chars_per_page
-                end_idx = min(start_idx + chars_per_page, total_chars)
-                
-                # Create harem list
-                harem_text = f"💝 **Your Harem** - Page {page + 1}/{total_pages}\n\n"
-                harem_text += f"📊 **Total Characters:** {total_chars}\n\n"
-                
-                # Count by rarity
-                rarity_count = {}
-                for i in range(start_idx, end_idx):
-                    entry = harem[i]
-                    character = entry.get("character_data", {})
-                    char_name = character.get("char_name", "Unknown")
-                    anime = character.get("anime_name", "Unknown")
-                    rarity = character.get("rarity", "Unknown")
-                    char_id = entry.get("character_id", "?")
-                    
-                    harem_text += f"{i+1}. **{char_name}**\n"
-                    harem_text += f"   ├─ 🎞️ {anime}\n"
-                    harem_text += f"   ├─ 🏅 {rarity}\n"
-                    harem_text += f"   └─ 🆔 `{char_id}`\n\n"
-                    
-                    # Count rarity
-                    rarity_count[rarity] = rarity_count.get(rarity, 0) + 1
-                
-                # Add rarity stats
-                if rarity_count:
-                    harem_text += "**📈 Rarity Distribution:**\n"
-                    for rarity, count in sorted(rarity_count.items()):
-                        percentage = (count / total_chars) * 100
-                        harem_text += f"• {rarity}: {count} ({percentage:.1f}%)\n"
-                
-                # Add navigation buttons if multiple pages
-                keyboard = None
-                if total_pages > 1:
-                    buttons = []
-                    if page > 0:
-                        buttons.append(InlineKeyboardButton("⬅️ Previous", callback_data=f"harem_page_{page-1}_{user_id}"))
-                    if page < total_pages - 1:
-                        buttons.append(InlineKeyboardButton("Next ➡️", callback_data=f"harem_page_{page+1}_{user_id}"))
-                    
-                    if buttons:
-                        keyboard = InlineKeyboardMarkup([buttons])
-                
-                await message.reply_text(harem_text, reply_markup=keyboard)
-                
-            except Exception as e:
-                logger.error(f"Error in myharem command: {e}")
-                await message.reply_text("❌ Error fetching your harem.")
-        
-        @self.client.on_message(filters.command("edit"))
-        async def edit_command(client: Client, message: Message):
-            """Handle /edit command - edit character details"""
-            user_id = message.from_user.id
-            
-            # Check authorization
-            if not await helpers.is_sudo_user(user_id):
-                await message.reply_text("❌ You are not authorized to edit characters.")
-                return
-            
-            args = message.text.split()
-            if len(args) < 5:
-                await message.reply_text(
-                    "✏️ **Edit Character**\n\n"
-                    "**Usage:** `/edit ID \"New Name\" \"New Anime\" Rarity [subrarity]`\n\n"
-                    "**Examples:**\n"
-                    "• `/edit 123 \"Naruto Uzumaki\" Naruto 4`\n"
-                    "• `/edit 123 \"Sakura\" Naruto 5 valentine`\n\n"
-                    "**Note:** Use quotes for names with spaces"
-                )
-                return
-            
-            try:
-                character_id = int(args[1])
-                
-                # Simple parsing similar to upload
-                text = message.text
-                # Remove command and ID
-                text = text.replace(f'/edit {args[1]}', '', 1).strip()
-                
-                # Parse new character name
-                new_char_name = ""
-                if text.startswith('"'):
-                    end_quote = text.find('"', 1)
-                    if end_quote == -1:
-                        await message.reply_text("❌ Missing closing quote for character name.")
-                        return
-                    new_char_name = text[1:end_quote]
-                    text = text[end_quote + 1:].strip()
-                else:
-                    parts = text.split()
-                    new_char_name = parts[0]
-                    text = ' '.join(parts[1:])
-                
-                # Parse new anime name
-                new_anime_name = ""
-                if text.startswith('"'):
-                    end_quote = text.find('"', 1)
-                    if end_quote == -1:
-                        await message.reply_text("❌ Missing closing quote for anime name.")
-                        return
-                    new_anime_name = text[1:end_quote]
-                    text = text[end_quote + 1:].strip()
-                else:
-                    parts = text.split()
-                    if not parts:
-                        await message.reply_text("❌ Missing anime name.")
-                        return
-                    new_anime_name = parts[0]
-                    text = ' '.join(parts[1:])
-                
-                # Parse rarity
-                rarity_input = text.strip()
-                new_rarity, new_subrarity = helpers.parse_rarity(rarity_input)
-                
-                if not new_rarity:
-                    await message.reply_text("❌ Invalid rarity. Must be 1-14.")
-                    return
-                
-                # Check if character exists
-                character = await db.get_character_by_id(character_id)
-                if not character:
-                    await message.reply_text("❌ Character not found!")
-                    return
-                
-                # Update character
-                updated = await db.update_character(
-                    character_id=character_id,
-                    char_name=new_char_name,
-                    anime_name=new_anime_name,
-                    rarity=new_rarity,
-                    subrarity=new_subrarity
+                message_text = helpers.format_file_list(
+                    files, 0, total_count,
+                    f"{Config.RARITY_MAP[rarity_num]} Files"
                 )
                 
-                if updated:
-                    await message.reply_text(f"✅ Character `{character_id}` updated successfully!")
-                    logger.info(f"Character {character_id} edited by user {user_id}")
-                else:
-                    await message.reply_text("❌ Failed to update character.")
-                    
-            except ValueError:
-                await message.reply_text("❌ Invalid character ID. Must be a number.")
-            except Exception as e:
-                logger.error(f"Error in edit command: {e}")
-                await message.reply_text("❌ Error updating character. Please check the format.")
-        
-        @self.client.on_message(filters.command("editmedia"))
-        async def editmedia_command(client: Client, message: Message):
-            """Handle /editmedia command - edit character media"""
-            user_id = message.from_user.id
-            
-            # Check authorization
-            if not await helpers.is_sudo_user(user_id):
-                await message.reply_text("❌ You are not authorized to edit character media.")
-                return
-            
-            # Check if message is a reply to media
-            if not message.reply_to_message or not (
-                message.reply_to_message.photo or 
-                message.reply_to_message.video or 
-                message.reply_to_message.audio or 
-                message.reply_to_message.document
-            ):
-                await message.reply_text(
-                    "❌ **Please reply to a media file with this command!**\n\n"
-                    "**Usage:** Reply to media with:\n"
-                    "`/editmedia Character_ID`\n\n"
-                    "**Example:**\n"
-                    "Send a photo, then reply: `/editmedia 123`"
-                )
-                return
-            
-            args = message.text.split()
-            if len(args) != 2:
-                await message.reply_text("❌ Usage: Reply to media with `/editmedia ID`")
-                return
-            
-            try:
-                character_id = int(args[1])
+                keyboard = helpers.create_pagination_keyboard(0, total_pages, "rarity", f"{rarity_num}_{current_view}")
                 
-                # Check if character exists
-                character = await db.get_character_by_id(character_id)
-                if not character:
-                    await message.reply_text("❌ Character not found!")
-                    return
-                
-                # Check file size
-                file_size = 0
-                if message.reply_to_message.photo:
-                    file_size = message.reply_to_message.photo.file_size or 0
-                elif message.reply_to_message.video:
-                    file_size = message.reply_to_message.video.file_size or 0
-                elif message.reply_to_message.audio:
-                    file_size = message.reply_to_message.audio.file_size or 0
-                elif message.reply_to_message.document:
-                    file_size = message.reply_to_message.document.file_size or 0
-                    
-                if file_size > config.MAX_FILE_SIZE:
-                    await message.reply_text(
-                        f"❌ File too large. Maximum size is {config.MAX_FILE_SIZE // (1024*1024)}MB."
-                    )
-                    return
-                
-                status_msg = await message.reply_text("🔄 Uploading new media...")
-                
-                # Upload new media
-                media_url, media_type = await helpers.upload_media(
-                    client, 
-                    message.reply_to_message
-                )
-                
-                if not media_url:
-                    await status_msg.edit_text("❌ Failed to upload media.")
-                    return
-                
-                # Update character media
-                updated = await db.update_character_media(character_id, media_url, media_type)
-                
-                if updated:
-                    await status_msg.edit_text(f"✅ Media updated for character `{character_id}`!")
-                    logger.info(f"Character {character_id} media updated by user {user_id}")
-                else:
-                    await status_msg.edit_text("❌ Failed to update media.")
-                    
-            except ValueError:
-                await message.reply_text("❌ Invalid character ID. Must be a number.")
-            except Exception as e:
-                logger.error(f"Error in editmedia command: {e}")
-                await message.reply_text("❌ Error updating media.")
-        
-        @self.client.on_message(filters.command(["search", "find"]))
-        async def search_command(client: Client, message: Message):
-            """Handle /search command - find characters"""
-            args = message.text.split()
-            if len(args) < 2:
-                await message.reply_text(
-                    "🔍 **Search Characters**\n\n"
-                    "**Usage:** `/search query`\n\n"
-                    "**Examples:**\n"
-                    "• `/search naruto`\n"
-                    "• `/search bleach`\n"
-                    "• `/search ichigo`"
-                )
-                return
-            
-            query = ' '.join(args[1:])
-            await message.reply_text(f"🔍 Searching for: `{query}`...")
-            
-            try:
-                results = await db.search_characters(query, limit=15)
-                
-                if not results:
-                    await message.reply_text("❌ No characters found.")
-                    return
-                
-                if len(results) == 1:
-                    # Show single result with details
-                    char = results[0]
-                    char_info = helpers.format_character_info(char)
-                    
-                    if char.get('media_url'):
-                        try:
-                            if char.get('media_type') == 'photo':
-                                await client.send_photo(
-                                    chat_id=message.chat.id,
-                                    photo=char['media_url'],
-                                    caption=f"**Search Result:**\n\n{char_info}"
-                                )
-                            elif char.get('media_type') == 'video':
-                                await client.send_video(
-                                    chat_id=message.chat.id,
-                                    video=char['media_url'],
-                                    caption=f"**Search Result:**\n\n{char_info}"
-                                )
-                            elif char.get('media_type') == 'audio':
-                                await client.send_audio(
-                                    chat_id=message.chat.id,
-                                    audio=char['media_url'],
-                                    caption=f"**Search Result:**\n\n{char_info}"
-                                )
-                            else:
-                                await client.send_document(
-                                    chat_id=message.chat.id,
-                                    document=char['media_url'],
-                                    caption=f"**Search Result:**\n\n{char_info}"
-                                )
-                        except:
-                            await message.reply_text(f"**Search Result:**\n\n{char_info}")
-                    else:
-                        await message.reply_text(f"**Search Result:**\n\n{char_info}")
-                else:
-                    # Show list of results
-                    result_text = f"🔍 **Search Results for:** `{query}`\n\n"
-                    
-                    for i, char in enumerate(results[:10], 1):
-                        result_text += f"{i}. **{char['char_name']}** - {char['anime_name']} - {char['rarity']} (ID: `{char['character_id']}`)\n"
-                    
-                    if len(results) > 10:
-                        result_text += f"\n... and {len(results) - 10} more results"
-                    
-                    result_text += "\n\n**Use** `/info ID` **to view details of a specific character.**"
-                    
-                    await message.reply_text(result_text)
-                    
-            except Exception as e:
-                logger.error(f"Error in search command: {e}")
-                await message.reply_text("❌ Error searching characters.")
-        
-        @self.client.on_message(filters.command(["info", "view", "check"]))
-        async def info_command(client: Client, message: Message):
-            """Handle /info command - view character details"""
-            args = message.text.split()
-            if len(args) != 2:
-                await message.reply_text(
-                    "ℹ️ **Character Info**\n\n"
-                    "**Usage:** `/info ID`\n\n"
-                    "**Example:** `/info 123`"
-                )
-                return
-            
-            try:
-                character_id = int(args[1])
-                character = await db.get_character_by_id(character_id)
-                
-                if not character:
-                    await message.reply_text("❌ Character not found!")
-                    return
-                
-                char_info = helpers.format_character_info(character)
-                uploaded_by = await helpers.get_username_from_id(client, character['added_by'])
-                char_info += f"👤 **Uploaded by:** {uploaded_by}"
-                
-                # Check if in user's harem
-                user_harem = await db.get_user_harem(message.from_user.id)
-                in_harem = any(entry.get("character_id") == character_id for entry in user_harem)
-                if in_harem:
-                    char_info += "\n💝 **Status:** In your harem!"
-                
-                # Add edit buttons if user is sudo
-                if await helpers.is_sudo_user(message.from_user.id):
-                    buttons = []
-                    buttons.append(InlineKeyboardButton("✏️ Edit Details", callback_data=f"edit_{character_id}"))
-                    buttons.append(InlineKeyboardButton("🖼️ Edit Media", callback_data=f"editmedia_{character_id}"))
-                    
-                    if not in_harem:
-                        buttons.append(InlineKeyboardButton("💝 Add to Harem", callback_data=f"addharem_{character_id}"))
-                    
-                    keyboard = InlineKeyboardMarkup([buttons])
-                else:
-                    if not in_harem:
-                        keyboard = InlineKeyboardMarkup([
-                            [InlineKeyboardButton("💝 Add to Harem", callback_data=f"addharem_{character_id}")]
+                buttons = []
+                for file in files[:3]:
+                    file_id = file.get('file_id')
+                    if file_id:
+                        buttons.append([
+                            InlineKeyboardButton(
+                                f"👁️ {file.get('file_name', 'Unknown')[:15]}...",
+                                callback_data=f"info_{file_id}"
+                            )
                         ])
-                    else:
-                        keyboard = None
                 
-                if character.get('media_url'):
-                    try:
-                        if character.get('media_type') == 'photo':
-                            await client.send_photo(
-                                chat_id=message.chat.id,
-                                photo=character['media_url'],
-                                caption=char_info,
-                                reply_markup=keyboard
-                            )
-                        elif character.get('media_type') == 'video':
-                            await client.send_video(
-                                chat_id=message.chat.id,
-                                video=character['media_url'],
-                                caption=char_info,
-                                reply_markup=keyboard
-                            )
-                        elif character.get('media_type') == 'audio':
-                            await client.send_audio(
-                                chat_id=message.chat.id,
-                                audio=character['media_url'],
-                                caption=char_info,
-                                reply_markup=keyboard
-                            )
-                        else:
-                            await client.send_document(
-                                chat_id=message.chat.id,
-                                document=character['media_url'],
-                                caption=char_info,
-                                reply_markup=keyboard
-                            )
-                    except Exception as e:
-                        logger.warning(f"Failed to send media: {e}")
-                        char_info += f"\n\n📸 **Media URL:** {character['media_url']}"
-                        await message.reply_text(char_info, reply_markup=keyboard)
-                else:
-                    await message.reply_text(char_info, reply_markup=keyboard)
-                    
-            except ValueError:
-                await message.reply_text("❌ Invalid character ID. Must be a number.")
-            except Exception as e:
-                logger.error(f"Error in info command: {e}")
-                await message.reply_text("❌ Error fetching character info.")
-        
-        @self.client.on_message(filters.command(["delete", "remove", "del"]))
-        async def delete_command(client: Client, message: Message):
-            """Handle /delete command - remove character"""
-            # Only owner can delete
-            if not helpers.is_owner(message.from_user.id):
-                await message.reply_text("❌ Only the bot owner can delete characters.")
-                return
-            
-            args = message.text.split()
-            if len(args) != 2:
-                await message.reply_text(
-                    "🗑️ **Delete Character**\n\n"
-                    "**Usage:** `/delete ID`\n\n"
-                    "**Example:** `/delete 123`"
-                )
-                return
-            
-            try:
-                character_id = int(args[1])
-                character = await db.get_character_by_id(character_id)
+                if buttons:
+                    keyboard.inline_keyboard.extend(buttons)
                 
-                if not character:
-                    await message.reply_text("❌ Character not found!")
-                    return
-                
-                # Show confirmation
-                keyboard = InlineKeyboardMarkup([
-                    [
-                        InlineKeyboardButton("✅ Yes, Delete", callback_data=f"confirm_delete_{character_id}"),
-                        InlineKeyboardButton("❌ Cancel", callback_data="cancel_delete")
-                    ]
+                keyboard.inline_keyboard.append([
+                    InlineKeyboardButton("🔙 Back to Menu", callback_data="menu_main")
                 ])
                 
-                await message.reply_text(
-                    f"⚠️ **Are you sure you want to delete this character?**\n\n"
-                    f"**Name:** {character['char_name']}\n"
-                    f"**Anime:** {character['anime_name']}\n"
-                    f"**ID:** `{character_id}`\n\n"
-                    f"**This will also remove it from all users' harems!**\n"
-                    f"**This action cannot be undone!**",
-                    reply_markup=keyboard
-                )
-                
-            except ValueError:
-                await message.reply_text("❌ Invalid character ID. Must be a number.")
-            except Exception as e:
-                logger.error(f"Error in delete command: {e}")
-                await message.reply_text("❌ Error processing delete request.")
+                await query.message.edit_text(message_text, reply_markup=keyboard)
         
-        @self.client.on_message(filters.command(["stats", "status"]))
-        async def stats_command(client: Client, message: Message):
-            """Handle /stats command - view bot statistics"""
-            try:
-                total_chars = await db.get_character_count()
-                user_chars = await db.get_user_characters(message.from_user.id)
-                user_harem = await db.get_user_harem(message.from_user.id)
-                is_sudo = await helpers.is_sudo_user(message.from_user.id)
-                is_owner_user = helpers.is_owner(message.from_user.id)
-                
-                # Get sudo users count
-                sudo_users = await db.get_sudo_users()
-                sudo_count = len(sudo_users)
-                
-                # Get deleted characters count
-                deleted_ids = await db.get_deleted_characters()
-                deleted_count = len(deleted_ids)
-                current_counter = await db.get_current_counter()
-                
-                stats_text = (
-                    "📊 **Bot Statistics**\n\n"
-                    f"• **Total Characters:** {total_chars}\n"
-                    f"• **Deleted IDs:** {deleted_count}\n"
-                    f"• **Current Counter:** {current_counter}\n"
-                    f"• **Sudo Users:** {sudo_count}\n"
-                    f"• **Your Uploads:** {len(user_chars)}\n"
-                    f"• **Your Harem Size:** {len(user_harem)}\n"
-                    f"• **Your Status:** {'👑 Owner' if is_owner_user else ('✅ Sudo User' if is_sudo else '👤 Regular User')}\n"
-                    f"• **Log Channel:** {config.LOG_CHANNEL}\n"
-                    f"• **Max File Size:** {config.MAX_FILE_SIZE // (1024*1024)}MB\n\n"
-                    "**Commands:**\n"
-                    "• `/upload` - Upload new character\n"
-                    "• `/fill` - Fill deleted character IDs\n"
-                    "• `/edit` - Edit character\n"
-                    "• `/search` - Search characters\n"
-                    "• `/info` - View character info\n"
-                    "• `/addharem` - Add character to harem\n"
-                    "• `/help` - Show help"
-                )
-                
-                await message.reply_text(stats_text)
-                
-            except Exception as e:
-                logger.error(f"Error in stats command: {e}")
-                await message.reply_text("❌ Error fetching statistics.")
+        # View all files
+        elif data.startswith("view_all_"):
+            parts = data.split("_")
+            current_view = parts[2] if len(parts) > 2 else "main"
+            await _show_all_files(query, 0, current_view)
         
-        @self.client.on_message(filters.command("help"))
-        async def help_command(client: Client, message: Message):
-            """Handle /help command"""
-            help_text = (
-                "ℹ️ **Character Upload Bot Help**\n\n"
-                "**📤 UPLOAD COMMAND:**\n"
-                "Reply to any media file with:\n"
-                "`/upload \"Character Name\" \"Anime Name\" Rarity [subrarity]`\n\n"
-                "**Examples:**\n"
-                "• `/upload \"Ichigo Kurosaki\" Bleach 4`\n"
-                "• `/upload \"Goku\" \"Dragon Ball\" 5 valentine`\n\n"
-                "**🔁 FILL DELETED IDs:**\n"
-                "Reply to media with `/fill` to use first deleted ID\n"
-                "Or specify ID: `/fill ID \"Character\" \"Anime\" Rarity`\n\n"
-                "**🔄 EDIT COMMANDS:**\n"
-                "• `/edit ID \"New Name\" \"New Anime\" Rarity [subrarity]`\n"
-                "• `/editmedia ID` (reply to new media)\n\n"
-                "**🔍 SEARCH COMMANDS:**\n"
-                "• `/search query` - Search by name or anime\n"
-                "• `/info ID` - View character details\n\n"
-                "**💾 HAREM COMMANDS:**\n"
-                "• `/harembackup` - Backup your harem data\n"
-                "• `/haremupload` - Restore harem (reply to backup)\n"
-                "• `/addharem ID` - Add character to harem\n"
-                "• `/myharem` - View your harem\n\n"
-                "**👑 ADMIN COMMANDS (Owner/Sudo):**\n"
-                "• `/add user_id` - Add sudo user (owner only)\n"
-                "• `/remove user_id` - Remove sudo user (owner only)\n"
-                "• `/sudos` - List all sudo users\n"
-                "• `/backup` - Backup database (owner only)\n"
-                "• `/backupharem [user_id]` - Backup all/specific harem (owner only)\n"
-                "• `/delete ID` - Delete character (owner only)\n\n"
-                "**🎯 RARITIES (1-14):**\n"
+        # View deleted files
+        elif data.startswith("deleted_list_"):
+            parts = data.split("_")
+            page = int(parts[2])
+            current_view = parts[3] if len(parts) > 3 else "main"
+            await _show_deleted_files(query, page, current_view)
+        
+        # Pagination for search
+        elif data.startswith("search_page_"):
+            parts = data.split("_")
+            page = int(parts[2])
+            query_text = '_'.join(parts[3:])
+            await _show_search_results(query, query_text, page)
+        
+        # File info
+        elif data.startswith("info_"):
+            file_id = int(data.split("_")[1])
+            await _show_file_info_callback(query, context, file_id)
+        
+        # Deleted file info
+        elif data.startswith("deleted_info_"):
+            file_id = int(data.split("_")[2])
+            file_data = db.get_deleted_file_by_id(file_id)
+            
+            if not file_data:
+                await query.answer("File not found in recycle bin", show_alert=True)
+                return
+            
+            file_info = helpers.format_deleted_file_info(file_data)
+            
+            keyboard = InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton("♻️ Restore File", callback_data=f"restore_{file_id}"),
+                    InlineKeyboardButton("🗑️ Delete Permanently", callback_data=f"perm_delete_{file_id}")
+                ],
+                [
+                    InlineKeyboardButton("🔙 Back to Recycle Bin", callback_data="deleted_list_0_main")
+                ]
+            ])
+            
+            await query.message.reply_text(f"**🗑️ Deleted File Information**\n\n{file_info}", reply_markup=keyboard)
+        
+        # Soft delete (move to recycle bin)
+        elif data.startswith("soft_delete_"):
+            file_id = int(data.split("_")[2])
+            
+            # Check authorization with permission
+            if not db.has_permission(user_id, 'delete'):
+                await query.answer("You are not authorized to delete files", show_alert=True)
+                return
+            
+            # Move to recycle bin
+            deleted = db.soft_delete_file(file_id, user_id, "Deleted via button")
+            
+            if deleted:
+                await query.message.edit_text(
+                    f"🗑️ **File `{file_id}` moved to recycle bin!**\n\n"
+                    f"The file has been moved to the recycle bin and can be restored later.\n\n"
+                    f"Use `/restore {file_id}` or the recycle bin menu to restore it."
+                )
+                logger.info(f"File {file_id} moved to recycle bin by user {user_id}")
+            else:
+                await query.answer("Failed to delete file", show_alert=True)
+        
+        # Restore file
+        elif data.startswith("restore_"):
+            file_id = int(data.split("_")[1])
+            
+            # Check authorization with permission
+            if not db.has_permission(user_id, 'restore'):
+                await query.answer("You are not authorized to restore files", show_alert=True)
+                return
+            
+            # Restore file
+            restored = db.restore_file(file_id)
+            
+            if restored:
+                await query.message.edit_text(
+                    f"♻️ **File `{file_id}` restored successfully!**\n\n"
+                    f"The file has been moved back to the active database.\n\n"
+                    f"Use `/info {file_id}` to view the file."
+                )
+                logger.info(f"File {file_id} restored by user {user_id}")
+            else:
+                await query.answer("Failed to restore file", show_alert=True)
+        
+        # Permanent delete
+        elif data.startswith("perm_delete_"):
+            file_id = int(data.split("_")[2])
+            
+            # Only owner can permanently delete
+            if user_id != Config.OWNER_ID:
+                await query.answer("Only the bot owner can permanently delete files", show_alert=True)
+                return
+            
+            # Show confirmation
+            keyboard = InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton("⚠️ Yes, Delete Permanently", callback_data=f"confirm_perm_delete_{file_id}"),
+                    InlineKeyboardButton("❌ Cancel", callback_data="cancel_perm_delete")
+                ]
+            ])
+            
+            await query.message.edit_text(
+                f"🚨 **Permanent Deletion Warning!**\n\n"
+                f"Are you sure you want to **PERMANENTLY DELETE** file `{file_id}`?\n\n"
+                f"**This action cannot be undone!**\n"
+                f"The file will be removed from the recycle bin forever.\n\n"
+                f"⚠️ **This is irreversible!**",
+                reply_markup=keyboard
+            )
+        
+        # Confirm permanent delete
+        elif data.startswith("confirm_perm_delete_"):
+            file_id = int(data.split("_")[3])
+            
+            # Only owner can permanently delete
+            if user_id != Config.OWNER_ID:
+                await query.answer("Unauthorized", show_alert=True)
+                return
+            
+            # Get file info before deleting
+            file_data = db.get_deleted_file_by_id(file_id)
+            
+            # Permanently delete
+            deleted = db.permanent_delete_file(file_id)
+            
+            if deleted:
+                await query.message.edit_text(
+                    f"💀 **File `{file_id}` permanently deleted!**\n\n"
+                    f"The file has been permanently removed from the database.\n\n"
+                    f"**Name:** {file_data.get('file_name', 'Unknown') if file_data else 'Unknown'}\n"
+                    f"**This action cannot be undone.**"
+                )
+                logger.info(f"File {file_id} permanently deleted by owner {user_id}")
+            else:
+                await query.message.edit_text(f"❌ Failed to permanently delete file `{file_id}`")
+        
+        # Cancel permanent delete
+        elif data == "cancel_perm_delete":
+            await query.message.edit_text("✅ Permanent deletion cancelled.")
+        
+        # Cleanup old deleted files
+        elif data == "cleanup_deleted":
+            # Only owner can cleanup
+            if user_id != Config.OWNER_ID:
+                await query.answer("Only the bot owner can cleanup old deleted files", show_alert=True)
+                return
+            
+            cleaned_count = db.cleanup_old_deleted()
+            
+            if cleaned_count > 0:
+                await query.message.edit_text(
+                    f"🧹 **Cleanup Complete!**\n\n"
+                    f"Removed {cleaned_count} old deleted files (older than {Config.RECYCLE_BIN_MAX_DAYS} days).\n\n"
+                    f"The recycle bin has been cleaned up."
+                )
+                logger.info(f"Cleaned up {cleaned_count} old deleted files by owner {user_id}")
+            else:
+                await query.message.edit_text(
+                    "🧹 **No old files to clean up.**\n\n"
+                    "All deleted files are within the retention period."
+                )
+        
+        # Search from menu
+        elif data == "search_main":
+            await query.message.edit_text(
+                "🔍 **Search Files**\n\n"
+                "Please use the /search command followed by your search query.\n\n"
+                "**Example:** `/search project report`\n\n"
+                "You can search by file name or description.",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔙 Back to Menu", callback_data="menu_main")]
+                ])
+            )
+        
+        # Stats from menu
+        elif data == "stats_main" or data == "stats_refresh":
+            await _show_stats(query)
+        
+        # Upload help
+        elif data == "upload_help":
+            await query.message.edit_text(
+                "📤 **Upload File**\n\n"
+                "1. Send a photo/video/audio/document\n"
+                "2. Reply to it with:\n"
+                "`/upload \"File Name\" \"Description\" Rarity`\n\n"
+                "**Example:**\n"
+                "`/upload \"Project Report\" \"Q4 Financial Analysis\" 3`\n"
+                "`/upload \"Vacation Photos\" \"Summer Album\" 10`\n\n"
+                "**Rarity Numbers (1-14):**\n"
                 "1. ⚪ Common\n"
                 "2. 🟢 Uncommon\n"
                 "3. 🔴 Rare\n"
@@ -2824,212 +2594,518 @@ class SimpleUploadBot:
                 "11. 🌈 Neon\n"
                 "12. 🛡️ Supreme\n"
                 "13. 🔮 Crystal\n"
-                "14. 🎤 Celebrity\n\n"
-                "**Important:** Uploading a character does **NOT** automatically add it to your harem.\n"
-                "You must use `/addharem ID` to add characters to your collection.\n\n"
-                "**All uploads are automatically posted to:** @capture_database"
+                "14. 🎤 Celebrity",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔙 Back to Menu", callback_data="menu_main")]
+                ])
             )
-            
-            await message.reply_text(help_text)
         
-        # Callback query handler for inline buttons
-        @self.client.on_callback_query()
-        async def handle_callbacks(client: Client, callback_query):
-            data = callback_query.data
-            user_id = callback_query.from_user.id
-            
-            try:
-                if data.startswith("edit_"):
-                    character_id = int(data.split("_")[1])
-                    await callback_query.message.edit_text(
-                        f"✏️ **Edit Character #{character_id}**\n\n"
-                        "Please use the `/edit` command:\n"
-                        "`/edit ID \"New Name\" \"New Anime\" Rarity [subrarity]`\n\n"
-                        f"**Example:**\n"
-                        f"`/edit {character_id} \"New Name\" \"New Anime\" 5 valentine`"
-                    )
-                    await callback_query.answer()
-                
-                elif data.startswith("editmedia_"):
-                    character_id = int(data.split("_")[1])
-                    await callback_query.message.edit_text(
-                        f"🖼️ **Edit Media for Character #{character_id}**\n\n"
-                        "Please reply to a media file with:\n"
-                        f"`/editmedia {character_id}`"
-                    )
-                    await callback_query.answer()
-                
-                elif data.startswith("addharem_"):
-                    character_id = int(data.split("_")[1])
-                    
-                    # Add to harem
-                    success = await db.add_to_harem(user_id, character_id)
-                    
-                    if success:
-                        await callback_query.answer("✅ Added to your harem!", show_alert=True)
-                        
-                        # Update message to show it's in harem
-                        try:
-                            message_text = callback_query.message.caption or callback_query.message.text
-                            if "💝 **Status:** In your harem!" not in message_text:
-                                new_text = message_text + "\n💝 **Status:** In your harem!"
-                                
-                                # Remove the add button
-                                keyboard = callback_query.message.reply_markup
-                                if keyboard:
-                                    new_keyboard = InlineKeyboardMarkup([])
-                                    for row in keyboard.inline_keyboard:
-                                        new_row = []
-                                        for button in row:
-                                            if button.callback_data != data:
-                                                new_row.append(button)
-                                        if new_row:
-                                            new_keyboard.inline_keyboard.append(new_row)
-                                    
-                                    await callback_query.message.edit_caption(
-                                        caption=new_text,
-                                        reply_markup=new_keyboard if new_keyboard.inline_keyboard else None
-                                    )
-                        except Exception as e:
-                            logger.warning(f"Error updating message: {e}")
-                    else:
-                        await callback_query.answer("❌ Already in your harem!", show_alert=True)
-                
-                elif data.startswith("harem_page_"):
-                    # Handle harem pagination
-                    parts = data.split("_")
-                    page = int(parts[2])
-                    target_user_id = int(parts[3])
-                    
-                    # Only allow user to navigate their own harem
-                    if user_id != target_user_id:
-                        await callback_query.answer("❌ You can only view your own harem!", show_alert=True)
-                        return
-                    
-                    # Fetch harem for the requested page
-                    harem = await db.get_user_harem(user_id)
-                    total_chars = len(harem)
-                    chars_per_page = 10
-                    total_pages = (total_chars + chars_per_page - 1) // chars_per_page
-                    
-                    if page >= total_pages:
-                        page = total_pages - 1
-                    if page < 0:
-                        page = 0
-                    
-                    start_idx = page * chars_per_page
-                    end_idx = min(start_idx + chars_per_page, total_chars)
-                    
-                    # Create harem list for this page
-                    harem_text = f"💝 **Your Harem** - Page {page + 1}/{total_pages}\n\n"
-                    harem_text += f"📊 **Total Characters:** {total_chars}\n\n"
-                    
-                    rarity_count = {}
-                    for i in range(start_idx, end_idx):
-                        entry = harem[i]
-                        character = entry.get("character_data", {})
-                        char_name = character.get("char_name", "Unknown")
-                        anime = character.get("anime_name", "Unknown")
-                        rarity = character.get("rarity", "Unknown")
-                        char_id = entry.get("character_id", "?")
-                        
-                        harem_text += f"{i+1}. **{char_name}**\n"
-                        harem_text += f"   ├─ 🎞️ {anime}\n"
-                        harem_text += f"   ├─ 🏅 {rarity}\n"
-                        harem_text += f"   └─ 🆔 `{char_id}`\n\n"
-                        
-                        rarity_count[rarity] = rarity_count.get(rarity, 0) + 1
-                    
-                    # Add rarity stats
-                    if rarity_count:
-                        harem_text += "**📈 Rarity Distribution:**\n"
-                        for rarity, count in sorted(rarity_count.items()):
-                            percentage = (count / total_chars) * 100
-                            harem_text += f"• {rarity}: {count} ({percentage:.1f}%)\n"
-                    
-                    # Update navigation buttons
-                    buttons = []
-                    if page > 0:
-                        buttons.append(InlineKeyboardButton("⬅️ Previous", callback_data=f"harem_page_{page-1}_{user_id}"))
-                    if page < total_pages - 1:
-                        buttons.append(InlineKeyboardButton("Next ➡️", callback_data=f"harem_page_{page+1}_{user_id}"))
-                    
-                    keyboard = InlineKeyboardMarkup([buttons]) if buttons else None
-                    
-                    await callback_query.message.edit_text(harem_text, reply_markup=keyboard)
-                    await callback_query.answer()
-                
-                elif data.startswith("confirm_delete_"):
-                    character_id = int(data.split("_")[2])
-                    
-                    # Only owner can delete
-                    if not helpers.is_owner(user_id):
-                        await callback_query.answer("❌ Only owners can delete characters!", show_alert=True)
-                        return
-                    
-                    deleted = await db.delete_character(character_id)
-                    if deleted:
-                        await callback_query.message.edit_text(f"✅ Character `{character_id}` deleted successfully!")
-                        logger.info(f"Character {character_id} deleted by user {user_id}")
-                    else:
-                        await callback_query.message.edit_text(f"❌ Failed to delete character `{character_id}`")
-                    
-                    await callback_query.answer()
-                
-                elif data == "cancel_delete":
-                    await callback_query.message.edit_text("❌ Delete cancelled.")
-                    await callback_query.answer()
-                    
-            except Exception as e:
-                logger.error(f"Error handling callback: {e}")
-                await callback_query.answer("An error occurred.", show_alert=True)
-    
-    async def start(self):
-        """Start the bot"""
-        try:
-            await db.connect()
-            logger.info("Database connection established")
-            
-            await self.client.start()
-            logger.info("Bot started successfully")
-            
-            me = await self.client.get_me()
-            logger.info(f"Logged in as @{me.username} (ID: {me.id})")
-            logger.info(f"Log channel: {config.LOG_CHANNEL}")
-            logger.info(f"Owner IDs: {config.OWNER_IDS}")
-            
-            # Keep the bot running
-            await asyncio.Event().wait()
-            
-        except Exception as e:
-            logger.error(f"Failed to start bot: {e}")
-            raise
+        # Upload example
+        elif data == "upload_example":
+            await query.message.edit_text(
+                "📤 **Upload Example:**\n\n"
+                "1. **Send a photo** of a document\n"
+                "2. **Reply to it with:**\n"
+                "`/upload \"Project Report\" \"Q4 Financial Analysis\" 3`\n\n"
+                "**This would create:**\n"
+                "• File: Project Report\n"
+                "• Description: Q4 Financial Analysis\n"
+                "• Rarity: 🔴 Rare",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("📤 Try Uploading", callback_data="upload_help")],
+                    [InlineKeyboardButton("🔙 Back to Menu", callback_data="menu_main")]
+                ])
+            )
         
-        finally:
-            await self.stop()
+        # Fill example
+        elif data == "fill_example":
+            await query.message.edit_text(
+                "🔄 **Fill Deleted File Slot Example:**\n\n"
+                "1. **Find a deleted file ID** using `/deleted`\n"
+                "2. **Send a photo** of a new file\n"
+                "3. **Reply to it with:**\n"
+                "`/fill 123 \"New Report\" \"Updated Analysis\" 3`\n\n"
+                "**This would:**\n"
+                "• Reuse deleted slot #123\n"
+                "• Create: New Report (Updated Analysis)\n"
+                "• Rarity: 🔴 Rare\n\n"
+                "**Or use `oldest` to fill the oldest slot:**\n"
+                "`/fill oldest \"New File\" \"Description\" 3`\n\n"
+                "**Note:** You need 'fill' permission to use this command.",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🗑️ View Recycle Bin", callback_data="deleted_list_0_main")],
+                    [InlineKeyboardButton("📤 Try Uploading", callback_data="upload_help")],
+                    [InlineKeyboardButton("🔙 Back to Menu", callback_data="menu_main")]
+                ])
+            )
+        
+        # Help from callback
+        elif data == "help_main":
+            await query.message.edit_text(
+                "ℹ️ **File Bot Help**\n\n"
+                "**Main Functions:**\n"
+                "📤 Upload files with rarity system\n"
+                "📚 Browse file database\n"
+                "🗑️ Recycle bin system (restore deleted)\n"
+                "🔄 Fill deleted file slots\n"
+                "🔍 Search for files\n"
+                "📊 View statistics\n\n"
+                "**Use buttons below to explore:**",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("📤 Upload System", callback_data="upload_help")],
+                    [InlineKeyboardButton("🔄 Fill System", callback_data="fill_example")],
+                    [InlineKeyboardButton("📚 Viewing System", callback_data="menu_main")],
+                    [InlineKeyboardButton("🗑️ Recycle Bin", callback_data="deleted_list_0_main")],
+                    [InlineKeyboardButton("📊 Statistics", callback_data="stats_main")]
+                ])
+            )
+        
+        # Confirm database reset
+        elif data == "confirm_reset":
+            if user_id != Config.OWNER_ID:
+                await query.answer("Only owner can reset database", show_alert=True)
+                return
+            
+            # Check if user has permission to reset
+            if not db.has_permission(user_id, 'reset_db'):
+                await query.answer("You don't have permission to reset database", show_alert=True)
+                return
+            
+            # Get stats before reset
+            total_files_before = db.get_file_count()
+            total_deleted_before = db.get_deleted_files_count()
+            
+            # Reset database
+            reset_success = db.reset_database()
+            
+            if reset_success:
+                # Clear warnings
+                db.clear_reset_warnings(user_id)
+                
+                await query.message.edit_text(
+                    f"♻️ **DATABASE RESET COMPLETE!**\n\n"
+                    f"✅ **All data has been cleared!**\n\n"
+                    f"📊 **Before Reset:**\n"
+                    f"• Active Files: {total_files_before}\n"
+                    f"• Deleted Files: {total_deleted_before}\n"
+                    f"• Total: {total_files_before + total_deleted_before}\n\n"
+                    f"🆕 **After Reset:**\n"
+                    f"• Active Files: 0\n"
+                    f"• Deleted Files: 0\n"
+                    f"• File ID Counter: 0\n\n"
+                    f"✨ **Database is now fresh and empty!**\n"
+                    f"You can start uploading new files from ID 1."
+                )
+                
+                logger.info(f"Database reset by owner {user_id}")
+            else:
+                await query.message.edit_text(
+                    "❌ **Database reset failed!**\n\n"
+                    "An error occurred while resetting the database."
+                )
+        
+        # Cancel reset
+        elif data == "cancel_reset":
+            if user_id != Config.OWNER_ID:
+                await query.answer("Unauthorized", show_alert=True)
+                return
+            
+            # Clear warnings
+            db.clear_reset_warnings(user_id)
+            
+            await query.message.edit_text(
+                "✅ **Database reset cancelled.**\n\n"
+                "No changes were made to the database."
+            )
+        
+        # Delete confirmation (old system)
+        elif data.startswith("confirm_delete_"):
+            file_id = int(data.split("_")[2])
+            
+            # Only owner can permanently delete (old system)
+            if user_id != Config.OWNER_ID:
+                await query.answer("Unauthorized", show_alert=True)
+                return
+            
+            # For backward compatibility, use soft delete
+            deleted = db.soft_delete_file(file_id, user_id, "Deleted via old delete command")
+            
+            if deleted:
+                await query.message.edit_text(f"🗑️ File `{file_id}` moved to recycle bin!")
+                logger.info(f"File {file_id} moved to recycle bin by user {user_id}")
+            else:
+                await query.message.edit_text(f"❌ Failed to delete file `{file_id}`")
+        
+        elif data == "cancel_delete":
+            await query.message.edit_text("✅ Delete cancelled.")
+        
+        # Unknown callback
+        else:
+            await query.answer("Unknown action", show_alert=True)
+            
+    except Exception as e:
+        logger.error(f"Error handling callback: {e}")
+        await query.answer("An error occurred", show_alert=True)
+
+# ==================== VIEWING METHODS ====================
+async def _show_main_menu(query):
+    """Show main menu"""
+    total_files = db.get_file_count()
+    total_deleted = db.get_deleted_files_count()
     
-    async def stop(self):
-        """Stop the bot gracefully"""
+    menu_text = (
+        f"📚 **File Database Menu**\n"
+        f"📊 **Active Files:** {total_files}\n"
+        f"🗑️ **Deleted Files:** {total_deleted}\n\n"
+        "Select a rarity to browse files:"
+    )
+    
+    keyboard = helpers.create_rarity_keyboard("main")
+    await query.message.edit_text(menu_text, reply_markup=keyboard)
+
+async def _show_all_files(query, page: int, current_view: str):
+    """Show all active files"""
+    files, total_count = db.get_all_files_paginated(page)
+    
+    if not files:
+        await query.answer("No files found", show_alert=True)
+        return
+    
+    total_pages = (total_count + Config.ITEMS_PER_PAGE - 1) // Config.ITEMS_PER_PAGE
+    
+    message_text = helpers.format_file_list(
+        files, page, total_count, 
+        "All Active Files"
+    )
+    
+    keyboard = helpers.create_pagination_keyboard(page, total_pages, "all", current_view)
+    
+    buttons = []
+    for file in files[:3]:
+        file_id = file.get('file_id')
+        if file_id:
+            buttons.append([
+                InlineKeyboardButton(
+                    f"👁️ {file.get('file_name', 'Unknown')[:15]}...",
+                    callback_data=f"info_{file_id}"
+                )
+            ])
+    
+    if buttons:
+        keyboard.inline_keyboard.extend(buttons)
+    
+    keyboard.inline_keyboard.append([
+        InlineKeyboardButton(
+            "🔙 Back to Menu",
+            callback_data="menu_main"
+        )
+    ])
+    
+    await query.message.edit_text(message_text, reply_markup=keyboard)
+
+async def _show_deleted_files(query, page: int, current_view: str):
+    """Show deleted files (recycle bin)"""
+    files, total_count = db.get_deleted_files(page)
+    
+    if not files:
+        await query.answer("Recycle bin is empty", show_alert=True)
+        return
+    
+    total_pages = (total_count + Config.ITEMS_PER_PAGE - 1) // Config.ITEMS_PER_PAGE
+    
+    message_text = helpers.format_deleted_file_list(files, page, total_count)
+    
+    keyboard = helpers.create_pagination_keyboard(page, total_pages, "deleted_list", current_view)
+    
+    buttons = []
+    for file in files[:3]:
+        file_id = file.get('file_id')
+        if file_id:
+            buttons.append([
+                InlineKeyboardButton(
+                    f"♻️ Restore {file.get('file_name', 'Unknown')[:10]}...",
+                    callback_data=f"restore_{file_id}"
+                )
+            ])
+            buttons.append([
+                InlineKeyboardButton(
+                    f"👁️ View {file.get('file_name', 'Unknown')[:10]}...",
+                    callback_data=f"deleted_info_{file_id}"
+                )
+            ])
+    
+    if buttons:
+        keyboard.inline_keyboard.extend(buttons)
+    
+    keyboard.inline_keyboard.append([
+        InlineKeyboardButton(
+            "🔄 Cleanup Old",
+            callback_data=f"cleanup_deleted"
+        )
+    ])
+    keyboard.inline_keyboard.append([
+        InlineKeyboardButton(
+            "🔙 Back to Menu",
+            callback_data="menu_main"
+        )
+    ])
+    
+    await query.message.edit_text(message_text, reply_markup=keyboard)
+
+async def _show_search_results(query, search_query: str, page: int):
+    """Show search results"""
+    files, total_count = db.search_files_paginated(search_query, page)
+    
+    if not files:
+        await query.answer("No more results", show_alert=True)
+        return
+    
+    total_pages = (total_count + Config.ITEMS_PER_PAGE - 1) // Config.ITEMS_PER_PAGE
+    
+    message_text = helpers.format_file_list(
+        files, page, total_count, 
+        f"Search Results for: '{search_query}'"
+    )
+    
+    keyboard = helpers.create_pagination_keyboard(page, total_pages, "search", search_query)
+    
+    buttons = []
+    for file in files[:3]:
+        file_id = file.get('file_id')
+        if file_id:
+            buttons.append([
+                InlineKeyboardButton(
+                    f"👁️ {file.get('file_name', 'Unknown')[:15]}...",
+                    callback_data=f"info_{file_id}"
+                )
+            ])
+    
+    if buttons:
+        keyboard.inline_keyboard.extend(buttons)
+    
+    keyboard.inline_keyboard.append([
+        InlineKeyboardButton(
+            "🔙 Back to Menu",
+            callback_data="menu_main"
+        )
+    ])
+    
+    await query.message.edit_text(message_text, reply_markup=keyboard)
+
+async def _show_file_info(update: Update, context: ContextTypes.DEFAULT_TYPE, file_id: int):
+    """Show file information"""
+    # First check active files
+    file_data = db.get_file_by_id(file_id)
+    is_deleted = False
+    
+    # If not found in active, check deleted
+    if not file_data:
+        file_data = db.get_deleted_file_by_id(file_id)
+        is_deleted = True
+    
+    if not file_data:
+        await update.message.reply_text(f"❌ File with ID `{file_id}` not found!")
+        return
+    
+    # Format file info
+    if is_deleted:
+        file_info = helpers.format_deleted_file_info(file_data)
+        title = "🗑️ Deleted File Information"
+    else:
+        file_info = helpers.format_file_info(file_data)
+        title = "File Information"
+    
+    # Create keyboard based on status
+    if is_deleted:
+        keyboard = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("♻️ Restore File", callback_data=f"restore_{file_id}"),
+                InlineKeyboardButton("🗑️ Delete Permanently", callback_data=f"perm_delete_{file_id}")
+            ],
+            [
+                InlineKeyboardButton("🔙 Back to Menu", callback_data="menu_main")
+            ]
+        ])
+    else:
+        keyboard = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("🗑️ Move to Recycle Bin", callback_data=f"soft_delete_{file_id}")
+            ],
+            [
+                InlineKeyboardButton("🔙 Back to Menu", callback_data="menu_main")
+            ]
+        ])
+    
+    await update.message.reply_text(f"**{title}**\n\n{file_info}", reply_markup=keyboard)
+
+async def _show_file_info_callback(query, context: ContextTypes.DEFAULT_TYPE, file_id: int):
+    """Show file information from callback"""
+    # First check active files
+    file_data = db.get_file_by_id(file_id)
+    is_deleted = False
+    
+    # If not found in active, check deleted
+    if not file_data:
+        file_data = db.get_deleted_file_by_id(file_id)
+        is_deleted = True
+    
+    if not file_data:
+        await query.answer(f"File with ID {file_id} not found", show_alert=True)
+        return
+    
+    # Format file info
+    if is_deleted:
+        file_info = helpers.format_deleted_file_info(file_data)
+        title = "🗑️ Deleted File Information"
+    else:
+        file_info = helpers.format_file_info(file_data)
+        title = "File Information"
+    
+    # Create keyboard based on status
+    if is_deleted:
+        keyboard = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("♻️ Restore File", callback_data=f"restore_{file_id}"),
+                InlineKeyboardButton("🗑️ Delete Permanently", callback_data=f"perm_delete_{file_id}")
+            ],
+            [
+                InlineKeyboardButton("🔙 Back to Menu", callback_data="menu_main")
+            ]
+        ])
+    else:
+        keyboard = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("🗑️ Move to Recycle Bin", callback_data=f"soft_delete_{file_id}")
+            ],
+            [
+                InlineKeyboardButton("🔙 Back to Menu", callback_data="menu_main")
+            ]
+        ])
+    
+    await query.message.reply_text(f"**{title}**\n\n{file_info}", reply_markup=keyboard)
+
+async def _show_stats(query):
+    """Show database statistics"""
+    # Get various stats
+    total_files = db.get_file_count()
+    total_deleted = db.get_deleted_files_count()
+    rarity_stats = db.get_rarity_stats()
+    top_uploaders = db.get_top_uploaders(10)
+    
+    # Clean up old deleted files
+    cleaned_count = db.cleanup_old_deleted()
+    
+    # Format stats message
+    stats_text = f"📈 **Database Statistics**\n\n"
+    stats_text += f"📊 **Active Files:** {total_files}\n"
+    stats_text += f"🗑️ **Deleted Files:** {total_deleted}\n"
+    if cleaned_count > 0:
+        stats_text += f"🧹 **Recently Cleaned:** {cleaned_count} (older than {Config.RECYCLE_BIN_MAX_DAYS} days)\n"
+    stats_text += f"📈 **Total (All Time):** {total_files + total_deleted}\n\n"
+    
+    stats_text += "**Files by Rarity:**\n"
+    for rarity_num, rarity_name in Config.RARITY_MAP.items():
+        count = rarity_stats.get(rarity_name, 0)
+        percentage = (count / total_files * 100) if total_files > 0 else 0
+        emoji = helpers.get_rarity_emoji(rarity_name)
+        stats_text += f"{emoji} **{rarity_name.split(' ', 1)[-1]}:** {count} ({percentage:.1f}%)\n"
+    
+    stats_text += f"\n**Top Uploaders:**\n"
+    for i, uploader in enumerate(top_uploaders, 1):
+        user_id = uploader["_id"]
+        count = uploader["count"]
+        
+        # Try to get username from database
+        user_data = db.users.find_one({"user_id": user_id})
+        username = user_data.get('username', f"User {user_id}") if user_data else f"User {user_id}"
+        
+        stats_text += f"{i}. {username}: {count} files\n"
+    
+    # Add keyboard
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🗑️ View Recycle Bin", callback_data="deleted_list_0_main")],
+        [InlineKeyboardButton("🔄 Refresh Stats", callback_data="stats_refresh")],
+        [InlineKeyboardButton("🔙 Back to Menu", callback_data="menu_main")]
+    ])
+    
+    await query.message.edit_text(stats_text, reply_markup=keyboard)
+
+# ==================== ERROR HANDLER ====================
+async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle errors"""
+    logger.error(f"Update {update} caused error: {context.error}", exc_info=True)
+    
+    # Notify user
+    if update and update.effective_message:
         try:
-            await self.client.stop()
-            await db.disconnect()
-            logger.info("Bot stopped gracefully")
-        except Exception as e:
-            logger.error(f"Error during shutdown: {e}")
+            await update.effective_message.reply_text(
+                "❌ An error occurred. Please try again later.\n"
+                "If the problem persists, contact support."
+            )
+        except:
+            pass
+
+# ==================== BACKGROUND TASKS ====================
+async def daily_cleanup(context: ContextTypes.DEFAULT_TYPE):
+    """Daily cleanup task"""
+    logger.info("Running daily cleanup...")
+    
+    # Clean up old deleted files
+    cleaned_count = db.cleanup_old_deleted()
+    if cleaned_count > 0:
+        logger.info(f"Cleaned up {cleaned_count} old deleted files")
+    
+    logger.info("Daily cleanup completed.")
 
 # ==================== MAIN FUNCTION ====================
-async def main():
-    """Main entry point"""
-    bot = SimpleUploadBot()
+def main():
+    """Start the bot"""
+    if not Config.BOT_TOKEN:
+        logger.error("❌ BOT_TOKEN environment variable is required!")
+        exit(1)
     
-    try:
-        await bot.start()
-    except KeyboardInterrupt:
-        logger.info("Received interrupt signal")
-    except Exception as e:
-        logger.error(f"Bot crashed: {e}")
-    finally:
-        await bot.stop()
+    # Create application
+    application = Application.builder().token(Config.BOT_TOKEN).build()
+    
+    # Add command handlers
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("help", help_command))
+    application.add_handler(CommandHandler("upload", upload_command))
+    application.add_handler(CommandHandler("menu", menu_command))
+    application.add_handler(CommandHandler("search", search_command))
+    application.add_handler(CommandHandler("stats", stats_command))
+    application.add_handler(CommandHandler("myuploads", myuploads_command))
+    application.add_handler(CommandHandler("info", info_command))
+    application.add_handler(CommandHandler("edit", edit_command))
+    application.add_handler(CommandHandler("delete", delete_command))
+    application.add_handler(CommandHandler("restore", restore_command))
+    application.add_handler(CommandHandler("deleted", deleted_command))
+    application.add_handler(CommandHandler("fill", fill_command))
+    application.add_handler(CommandHandler("addsudo", addsudo_command))
+    application.add_handler(CommandHandler("removesudo", removesudo_command))
+    application.add_handler(CommandHandler("sudolist", sudolist_command))
+    application.add_handler(CommandHandler("reset", reset_command))
+    
+    # Add callback query handler
+    application.add_handler(CallbackQueryHandler(handle_callbacks))
+    
+    # Add error handler
+    application.add_error_handler(error_handler)
+    
+    # Add job queue for background tasks
+    job_queue = application.job_queue
+    if job_queue:
+        # Daily cleanup at 3 AM
+        job_queue.run_daily(daily_cleanup, time=datetime.time(hour=3, minute=0))
+    
+    # Start the bot
+    logger.info("🤖 Bot is starting...")
+    print("=" * 50)
+    print("     COMPLETE UPLOAD BOT")
+    print("     with ALL FEATURES")
+    print("=" * 50)
+    
+    application.run_polling(allowed_updates=Update.ALL_TYPES)
 
-if __name__ == "__main__":
-    asyncio.run(main())
+if __name__ == '__main__':
+    main()
