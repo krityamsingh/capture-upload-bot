@@ -1,8 +1,5 @@
-pyrogram==2.0.106
-tgcrypto
-motor
-pymongo
-dnspython
-python-dotenv
-aiohttp==3.9.3
-telegram
+echo "python-telegram-bot==20.7" > requirements.txt
+echo "pymongo==4.6.0" >> requirements.txt
+echo "python-dotenv==1.0.0" >> requirements.txt
+echo "aiohttp==3.9.1" >> requirements.txt
+echo "httpx==0.25.2" >> requirements.txt
