@@ -11,7 +11,7 @@ import json
 import hashlib
 import uuid
 import re
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, time
 from typing import Dict, List, Optional, Tuple, Set
 from enum import Enum
 from io import BytesIO
@@ -1994,8 +1994,13 @@ async def deleted_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             callback_data=f"cleanup_deleted"
         )
     ])
-    keyboard.inline_keyroom=keyboard
-        await update.message.reply_text(message_text, reply_markup=keyboard)
+    keyboard.inline_keyboard.append([
+        InlineKeyboardButton(
+            "🔙 Back to Menu",
+            callback_data="menu_main"
+        )
+    ])
+    await update.message.reply_text(message_text, reply_markup=keyboard)
 
 async def menu_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show main menu"""
@@ -2321,6 +2326,107 @@ async def delete_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"Error in delete command: {e}")
         await update.message.reply_text("❌ Error processing delete request.")
 
+# ==================== ADDITIONAL COMMANDS ====================
+@admin_only
+async def setsudo_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Set specific sudo permissions"""
+    args = update.message.text.split()
+    if len(args) < 2:
+        await update.message.reply_text(
+            "👑 **Set Sudo Permissions**\n\n"
+            "**Usage:** Reply to user with:\n"
+            "`/setsudo permissions`\n\n"
+            "**Example:** `/setsudo upload,delete,edit`\n\n"
+            "**Available permissions:**\n" +
+            '\n'.join([f"• {k}: {v}" for k, v in Config.PERMISSIONS.items()])
+        )
+        return
+    
+    if not update.message.reply_to_message:
+        await update.message.reply_text("Please reply to a user's message.")
+        return
+    
+    target_user = update.message.reply_to_message.from_user
+    permissions = [p.strip() for p in args[1].split(',')]
+    
+    # Validate permissions
+    valid_perms = []
+    for perm in permissions:
+        if perm in Config.PERMISSIONS:
+            valid_perms.append(perm)
+        else:
+            await update.message.reply_text(f"⚠️ Unknown permission: {perm}")
+    
+    if not valid_perms:
+        await update.message.reply_text("❌ No valid permissions provided.")
+        return
+    
+    db.update_sudo_permissions(target_user.id, valid_perms)
+    
+    await update.message.reply_text(
+        f"✅ **Sudo Permissions Updated!**\n\n"
+        f"👤 **User:** @{target_user.username or target_user.first_name}\n"
+        f"🔑 **Permissions:** {', '.join(valid_perms)}"
+    )
+
+@sudo_only('view_deleted')
+async def searchdeleted_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Search deleted files"""
+    args = update.message.text.split()
+    if len(args) < 2:
+        await update.message.reply_text(
+            "🔍 **Search Deleted Files**\n\n"
+            "**Usage:** `/searchdeleted query`\n\n"
+            "**Example:** `/searchdeleted report`\n\n"
+            "Searches deleted files in recycle bin."
+        )
+        return
+    
+    query = ' '.join(args[1:])
+    await update.message.reply_text(f"🔍 Searching deleted files for: `{query}`...")
+    
+    files, total_count = db.search_deleted_files(query, page=0)
+    
+    if not files:
+        await update.message.reply_text(f"❌ No deleted files found for: `{query}`")
+        return
+    
+    total_pages = (total_count + Config.ITEMS_PER_PAGE - 1) // Config.ITEMS_PER_PAGE
+    
+    message_text = f"🗑️ **Deleted Files Search: '{query}'**\n\n"
+    message_text += f"📊 **Found:** {total_count} files\n\n"
+    
+    for i, file in enumerate(files, 1):
+        days_ago = 0
+        if file.get('deleted_at') and isinstance(file['deleted_at'], datetime):
+            days_ago = (datetime.utcnow() - file['deleted_at']).days
+        
+        message_text += f"{i}. **{file.get('file_name', 'Unknown')}**\n"
+        message_text += f"   🆔 `{file.get('file_id', 'N/A')}` | 🗑️ {days_ago}d ago\n\n"
+    
+    keyboard = helpers.create_pagination_keyboard(0, total_pages, "search_deleted", query)
+    
+    # Add action buttons
+    buttons = []
+    for file in files[:3]:
+        file_id = file.get('file_id')
+        if file_id:
+            buttons.append([
+                InlineKeyboardButton(
+                    f"♻️ Restore {file.get('file_name', 'Unknown')[:10]}...",
+                    callback_data=f"restore_{file_id}"
+                )
+            ])
+    
+    if buttons:
+        keyboard.inline_keyboard.extend(buttons)
+    
+    keyboard.inline_keyboard.append([
+        InlineKeyboardButton("🔙 Back to Menu", callback_data="menu_main")
+    ])
+    
+    await update.message.reply_text(message_text, reply_markup=keyboard)
+
 # ==================== CALLBACK QUERY HANDLER ====================
 async def handle_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle all callback queries"""
@@ -2411,26 +2517,28 @@ async def handle_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         # Deleted file info
         elif data.startswith("deleted_info_"):
-            file_id = int(data.split("_")[2])
-            file_data = db.get_deleted_file_by_id(file_id)
-            
-            if not file_data:
-                await query.answer("File not found in recycle bin", show_alert=True)
-                return
-            
-            file_info = helpers.format_deleted_file_info(file_data)
-            
-            keyboard = InlineKeyboardMarkup([
-                [
-                    InlineKeyboardButton("♻️ Restore File", callback_data=f"restore_{file_id}"),
-                    InlineKeyboardButton("🗑️ Delete Permanently", callback_data=f"perm_delete_{file_id}")
-                ],
-                [
-                    InlineKeyboardButton("🔙 Back to Recycle Bin", callback_data="deleted_list_0_main")
-                ]
-            ])
-            
-            await query.message.reply_text(f"**🗑️ Deleted File Information**\n\n{file_info}", reply_markup=keyboard)
+            parts = data.split("_")
+            if len(parts) >= 3:
+                file_id = int(parts[2])
+                file_data = db.get_deleted_file_by_id(file_id)
+                
+                if not file_data:
+                    await query.answer("File not found in recycle bin", show_alert=True)
+                    return
+                
+                file_info = helpers.format_deleted_file_info(file_data)
+                
+                keyboard = InlineKeyboardMarkup([
+                    [
+                        InlineKeyboardButton("♻️ Restore File", callback_data=f"restore_{file_id}"),
+                        InlineKeyboardButton("🗑️ Delete Permanently", callback_data=f"perm_delete_{file_id}")
+                    ],
+                    [
+                        InlineKeyboardButton("🔙 Back to Recycle Bin", callback_data="deleted_list_0_main")
+                    ]
+                ])
+                
+                await query.message.edit_text(f"**🗑️ Deleted File Information**\n\n{file_info}", reply_markup=keyboard)
         
         # Soft delete (move to recycle bin)
         elif data.startswith("soft_delete_"):
@@ -2478,55 +2586,59 @@ async def handle_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         # Permanent delete
         elif data.startswith("perm_delete_"):
-            file_id = int(data.split("_")[2])
+            parts = data.split("_")
+            if len(parts) >= 3:
+                file_id = int(parts[2])
             
-            # Only owner can permanently delete
-            if user_id != Config.OWNER_ID:
-                await query.answer("Only the bot owner can permanently delete files", show_alert=True)
-                return
-            
-            # Show confirmation
-            keyboard = InlineKeyboardMarkup([
-                [
-                    InlineKeyboardButton("⚠️ Yes, Delete Permanently", callback_data=f"confirm_perm_delete_{file_id}"),
-                    InlineKeyboardButton("❌ Cancel", callback_data="cancel_perm_delete")
-                ]
-            ])
-            
-            await query.message.edit_text(
-                f"🚨 **Permanent Deletion Warning!**\n\n"
-                f"Are you sure you want to **PERMANENTLY DELETE** file `{file_id}`?\n\n"
-                f"**This action cannot be undone!**\n"
-                f"The file will be removed from the recycle bin forever.\n\n"
-                f"⚠️ **This is irreversible!**",
-                reply_markup=keyboard
-            )
+                # Only owner can permanently delete
+                if user_id != Config.OWNER_ID:
+                    await query.answer("Only the bot owner can permanently delete files", show_alert=True)
+                    return
+                
+                # Show confirmation
+                keyboard = InlineKeyboardMarkup([
+                    [
+                        InlineKeyboardButton("⚠️ Yes, Delete Permanently", callback_data=f"confirm_perm_delete_{file_id}"),
+                        InlineKeyboardButton("❌ Cancel", callback_data="cancel_perm_delete")
+                    ]
+                ])
+                
+                await query.message.edit_text(
+                    f"🚨 **Permanent Deletion Warning!**\n\n"
+                    f"Are you sure you want to **PERMANENTLY DELETE** file `{file_id}`?\n\n"
+                    f"**This action cannot be undone!**\n"
+                    f"The file will be removed from the recycle bin forever.\n\n"
+                    f"⚠️ **This is irreversible!**",
+                    reply_markup=keyboard
+                )
         
         # Confirm permanent delete
         elif data.startswith("confirm_perm_delete_"):
-            file_id = int(data.split("_")[3])
+            parts = data.split("_")
+            if len(parts) >= 4:
+                file_id = int(parts[3])
             
-            # Only owner can permanently delete
-            if user_id != Config.OWNER_ID:
-                await query.answer("Unauthorized", show_alert=True)
-                return
-            
-            # Get file info before deleting
-            file_data = db.get_deleted_file_by_id(file_id)
-            
-            # Permanently delete
-            deleted = db.permanent_delete_file(file_id)
-            
-            if deleted:
-                await query.message.edit_text(
-                    f"💀 **File `{file_id}` permanently deleted!**\n\n"
-                    f"The file has been permanently removed from the database.\n\n"
-                    f"**Name:** {file_data.get('file_name', 'Unknown') if file_data else 'Unknown'}\n"
-                    f"**This action cannot be undone.**"
-                )
-                logger.info(f"File {file_id} permanently deleted by owner {user_id}")
-            else:
-                await query.message.edit_text(f"❌ Failed to permanently delete file `{file_id}`")
+                # Only owner can permanently delete
+                if user_id != Config.OWNER_ID:
+                    await query.answer("Unauthorized", show_alert=True)
+                    return
+                
+                # Get file info before deleting
+                file_data = db.get_deleted_file_by_id(file_id)
+                
+                # Permanently delete
+                deleted = db.permanent_delete_file(file_id)
+                
+                if deleted:
+                    await query.message.edit_text(
+                        f"💀 **File `{file_id}` permanently deleted!**\n\n"
+                        f"The file has been permanently removed from the database.\n\n"
+                        f"**Name:** {file_data.get('file_name', 'Unknown') if file_data else 'Unknown'}\n"
+                        f"**This action cannot be undone.**"
+                    )
+                    logger.info(f"File {file_id} permanently deleted by owner {user_id}")
+                else:
+                    await query.message.edit_text(f"❌ Failed to permanently delete file `{file_id}`")
         
         # Cancel permanent delete
         elif data == "cancel_perm_delete":
@@ -2720,21 +2832,23 @@ async def handle_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         # Delete confirmation (old system)
         elif data.startswith("confirm_delete_"):
-            file_id = int(data.split("_")[2])
+            parts = data.split("_")
+            if len(parts) >= 3:
+                file_id = int(parts[2])
             
-            # Only owner can permanently delete (old system)
-            if user_id != Config.OWNER_ID:
-                await query.answer("Unauthorized", show_alert=True)
-                return
-            
-            # For backward compatibility, use soft delete
-            deleted = db.soft_delete_file(file_id, user_id, "Deleted via old delete command")
-            
-            if deleted:
-                await query.message.edit_text(f"🗑️ File `{file_id}` moved to recycle bin!")
-                logger.info(f"File {file_id} moved to recycle bin by user {user_id}")
-            else:
-                await query.message.edit_text(f"❌ Failed to delete file `{file_id}`")
+                # Only owner can permanently delete (old system)
+                if user_id != Config.OWNER_ID:
+                    await query.answer("Unauthorized", show_alert=True)
+                    return
+                
+                # For backward compatibility, use soft delete
+                deleted = db.soft_delete_file(file_id, user_id, "Deleted via old delete command")
+                
+                if deleted:
+                    await query.message.edit_text(f"🗑️ File `{file_id}` moved to recycle bin!")
+                    logger.info(f"File {file_id} moved to recycle bin by user {user_id}")
+                else:
+                    await query.message.edit_text(f"❌ Failed to delete file `{file_id}`")
         
         elif data == "cancel_delete":
             await query.message.edit_text("✅ Delete cancelled.")
@@ -2982,7 +3096,7 @@ async def _show_file_info_callback(query, context: ContextTypes.DEFAULT_TYPE, fi
             ]
         ])
     
-    await query.message.reply_text(f"**{title}**\n\n{file_info}", reply_markup=keyboard)
+    await query.message.edit_text(f"**{title}**\n\n{file_info}", reply_markup=keyboard)
 
 async def _show_stats(query):
     """Show database statistics"""
@@ -3084,6 +3198,8 @@ def main():
     application.add_handler(CommandHandler("addsudo", addsudo_command))
     application.add_handler(CommandHandler("removesudo", removesudo_command))
     application.add_handler(CommandHandler("sudolist", sudolist_command))
+    application.add_handler(CommandHandler("setsudo", setsudo_command))
+    application.add_handler(CommandHandler("searchdeleted", searchdeleted_command))
     application.add_handler(CommandHandler("reset", reset_command))
     
     # Add callback query handler
@@ -3096,7 +3212,7 @@ def main():
     job_queue = application.job_queue
     if job_queue:
         # Daily cleanup at 3 AM
-        job_queue.run_daily(daily_cleanup, time=datetime.time(hour=3, minute=0))
+        job_queue.run_daily(daily_cleanup, time=time(hour=3, minute=0))
     
     # Start the bot
     logger.info("🤖 Bot is starting...")
