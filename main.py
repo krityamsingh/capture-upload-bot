@@ -27,8 +27,6 @@ from telegram import (
     Update, 
     InlineKeyboardButton, 
     InlineKeyboardMarkup,
-    User,
-    Chat,
     InputMediaPhoto,
     InputMediaVideo,
     InputMediaDocument
@@ -41,8 +39,7 @@ from telegram.ext import (
     CallbackQueryHandler,
     ContextTypes,
     filters,
-    ConversationHandler,
-    CallbackContext
+    ConversationHandler
 )
 from telegram.error import BadRequest, NetworkError, RetryAfter
 
