@@ -1,13 +1,13 @@
 # Bot Configuration
-BOT_TOKEN=your_bot_token_here
+BOT_TOKEN=8496337458:AAF7ORldWpN-C6hpzSDt1bPCOeGVxfbU4qg
 
 # Database Configuration
-MONGODB_URI=mongodb://localhost:27017
-DATABASE_NAME=upload_bot
+MONGODB_URI=mongodb+srv://erenxironman09:erenxironman09@catcherbot.koejwre.mongodb.net/?appName=catcherbot
+DATABASE_NAME=catcherbot
 REDIS_URL=redis://localhost:6379
 
 # Security & Administration
-ADMIN_IDS=123456789,987654321
+ADMIN_IDS=1653814030,7976292835
 LOG_CHAT_ID=-1001234567890
 CHANNEL_ID=-1001234567890
 
