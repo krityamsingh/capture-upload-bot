@@ -6,7 +6,7 @@ from datetime import datetime
 from database import collection, database_channel_collection
 from utils import UploadUtils
 from keyboards import UploadKeyboards
-from pixeldrain import PixelDrainUploader
+from catbox import CatboxUploader  # Changed from pixeldrain
 import aiohttp
 import logging
 from io import BytesIO
@@ -27,6 +27,14 @@ class UploadFlow:
         
         # Cache for user info to reduce API calls
         self.user_cache: Dict[int, Dict[str, Any]] = {}
+        
+        # Upload speed tracking
+        self.upload_stats = {
+            'total_uploads': 0,
+            'total_time': 0.0,
+            'fastest_upload': float('inf'),
+            'slowest_upload': 0.0
+        }
     
     async def get_user_info(self, user_id: int) -> Dict[str, Any]:
         """Get user info with caching for performance"""
@@ -47,7 +55,7 @@ class UploadFlow:
             return {"id": user_id, "username": "Unknown", "first_name": "Unknown"}
     
     async def handle_upload_command(self, message: Message) -> None:
-        """Handle /upload command with ultra-fast in-memory upload"""
+        """Handle /upload command with ultra-fast Catbox upload"""
         if message.chat.type not in [enums.ChatType.GROUP, enums.ChatType.SUPERGROUP]:
             await message.reply("❌ This command can only be used in groups!")
             return
@@ -84,7 +92,7 @@ class UploadFlow:
             
         character_name, anime_name = result
         
-        loading_msg = await message.reply("🚀 Starting upload...")
+        loading_msg = await message.reply("🚀 Starting Catbox upload...")
         
         try:
             start_time = time.time()
@@ -92,24 +100,40 @@ class UploadFlow:
             # Step 1: Download media directly to memory
             await loading_msg.edit("📥 Downloading media...")
             
-            file_bytes = await self.download_media_to_memory_simple(message.reply_to_message)
+            file_bytes, file_size = await self.download_media_to_memory_optimized(message.reply_to_message)
             if not file_bytes:
                 await loading_msg.edit("❌ Failed to download media!")
                 return
             
             download_time = time.time() - start_time
+            logger.info(f"Download completed in {download_time:.2f}s, size: {file_size:,} bytes")
             
-            # Step 2: Upload to PixelDrain
-            await loading_msg.edit(f"☁️ Uploading to PixelDrain...")
+            # Step 2: Upload to Catbox (Ultra-fast)
+            await loading_msg.edit(f"⚡ Uploading to Catbox.moe...\n📏 Size: {file_size // 1024} KB")
             
-            uploader = PixelDrainUploader()
-            upload_result = await uploader.upload_bytes(file_bytes, f"media_{int(time.time())}.jpg")
+            upload_start = time.time()
+            uploader = CatboxUploader()
+            
+            # Generate filename
+            timestamp = int(time.time())
+            file_extension = '.jpg' if media_type == 'photo' else '.mp4'
+            filename = f"char_{timestamp}{file_extension}"
+            
+            upload_result = await uploader.upload_bytes(file_bytes, filename)
+            
+            upload_time = time.time() - upload_start
+            
+            # Update upload statistics
+            self.upload_stats['total_uploads'] += 1
+            self.upload_stats['total_time'] += upload_time
+            self.upload_stats['fastest_upload'] = min(self.upload_stats['fastest_upload'], upload_time)
+            self.upload_stats['slowest_upload'] = max(self.upload_stats['slowest_upload'], upload_time)
             
             if not upload_result['success']:
-                await loading_msg.edit(f"❌ PixelDrain upload failed: {upload_result.get('error')}")
+                await loading_msg.edit(f"❌ Catbox upload failed: {upload_result.get('error', 'Unknown error')}")
                 return
             
-            upload_time = time.time() - start_time - download_time
+            logger.info(f"Catbox upload completed in {upload_time:.2f}s, URL: {upload_result.get('url', 'N/A')}")
             
             # Step 3: Create session
             session_id = UploadUtils.generate_session_id()
@@ -127,30 +151,38 @@ class UploadFlow:
                 "step": "rarity",
                 "character_name": character_name,
                 "anime_name": anime_name,
-                "media_url": upload_result['direct_url'],
-                "file_extension": f".{upload_result['name'].split('.')[-1]}" if '.' in upload_result['name'] else ".jpg",
+                "media_url": upload_result['url'],
+                "file_extension": file_extension,
                 "img_type": media_type,
                 "temp_id": display_id,  # Store without leading zeros
                 "file_id": upload_result.get('file_id'),
-                "size": upload_result.get('size', 0),
+                "size": file_size,
+                "upload_time": upload_time,
+                "download_time": download_time,
                 "created_at": datetime.utcnow(),
                 "file_bytes": file_bytes,
-                "pixeldrain_info": upload_result
+                "catbox_info": upload_result,
+                "filename": filename
             }
             
             total_time = time.time() - start_time
             
+            # Calculate speed
+            speed_kb_s = (file_size / 1024) / upload_time if upload_time > 0 else 0
+            
             # Send rarity selection with new keyboard
             keyboard = UploadKeyboards.get_rarity_keyboard(session_id)
             await loading_msg.edit(
-                f"✅ Upload Successful!\n\n"
+                f"✅ Catbox Upload Successful! ⚡\n\n"
                 f"🆔 ID: {display_id}\n"
                 f"👤 Character: {character_name}\n"
                 f"🎬 Anime: {anime_name}\n"
                 f"📁 Type: {'📸 Photo' if media_type == 'photo' else '🎞 Video'}\n"
-                f"📏 Size: {upload_result.get('size', 0) // 1024} KB\n"
-                f"📡 PixelDrain ID: {upload_result.get('file_id', 'N/A')}\n"
-                f"⏱ Time: {total_time:.2f}s\n\n"
+                f"📏 Size: {file_size // 1024} KB\n"
+                f"⚡ Speed: {speed_kb_s:.1f} KB/s\n"
+                f"⏱ Upload Time: {upload_time:.2f}s\n"
+                f"⏱ Total Time: {total_time:.2f}s\n"
+                f"🌐 URL: {upload_result.get('url', 'N/A')[:50]}...\n\n"
                 f"Select rarity:",
                 reply_markup=keyboard
             )
@@ -161,45 +193,61 @@ class UploadFlow:
             import traceback
             traceback.print_exc()
     
-    async def download_media_to_memory_simple(self, message) -> Optional[BytesIO]:
-        """Simple download method without progress callback"""
+    async def download_media_to_memory_optimized(self, message) -> tuple:
+        """Optimized download method for Catbox"""
         try:
-            # Create a temporary file path
-            temp_file_path = None
+            file_bytes = BytesIO()
+            file_size = 0
             
-            try:
-                # Create temp file
-                with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as tmp_file:
-                    temp_file_path = tmp_file.name
-                
-                # Download without progress callback
-                downloaded_path = await self.app.download_media(
-                    message,
-                    file_name=temp_file_path
+            # Determine the best method based on message type
+            if message.photo:
+                # Download photo
+                file = await self.app.download_media(
+                    message.photo.file_id,
+                    in_memory=True
                 )
+                file_bytes.write(file.getbuffer() if hasattr(file, 'getbuffer') else file.read())
+                file_size = message.photo.file_size or 0
                 
-                # Read file into memory
-                file_bytes = BytesIO()
-                with open(downloaded_path or temp_file_path, 'rb') as f:
-                    file_bytes.write(f.read())
+            elif message.video:
+                # Download video
+                file = await self.app.download_media(
+                    message.video.file_id,
+                    in_memory=True
+                )
+                file_bytes.write(file.getbuffer() if hasattr(file, 'getbuffer') else file.read())
+                file_size = message.video.file_size or 0
                 
-                file_bytes.seek(0)
-                return file_bytes
+            elif message.animation:
+                # Download animation (GIF)
+                file = await self.app.download_media(
+                    message.animation.file_id,
+                    in_memory=True
+                )
+                file_bytes.write(file.getbuffer() if hasattr(file, 'getbuffer') else file.read())
+                file_size = message.animation.file_size or 0
                 
-            finally:
-                # Clean up temp file
-                if temp_file_path and os.path.exists(temp_file_path):
-                    try:
-                        os.unlink(temp_file_path)
-                    except:
-                        pass
-                        
+            elif message.document:
+                # Download document
+                file = await self.app.download_media(
+                    message.document.file_id,
+                    in_memory=True
+                )
+                file_bytes.write(file.getbuffer() if hasattr(file, 'getbuffer') else file.read())
+                file_size = message.document.file_size or 0
+                
+            else:
+                return None, 0
+            
+            file_bytes.seek(0)
+            return file_bytes, file_size
+            
         except Exception as e:
             logger.error(f"Download error: {e}")
-            return None
+            return None, 0
     
     async def handle_update_character(self, message: Message) -> None:
-        """Handle /uchar command"""
+        """Handle /uchar command with Catbox"""
         # Check permissions
         if not await UploadUtils.is_uploader(message.from_user.id):
             await message.reply("❌ You don't have permission to update characters!")
@@ -291,40 +339,43 @@ class UploadFlow:
                 await message.reply("❌ Please reply to an image or video!")
                 return
             
-            loading_msg = await message.reply("🔄 Updating media...")
+            loading_msg = await message.reply("🔄 Updating media to Catbox...")
             
             try:
                 # Download to memory
-                file_bytes = await self.download_media_to_memory_simple(
+                file_bytes, file_size = await self.download_media_to_memory_optimized(
                     message.reply_to_message
                 )
                 if not file_bytes:
                     await loading_msg.edit("❌ Failed to download media!")
                     return
                 
-                # Upload to PixelDrain
-                filename = self.get_filename_from_message(message.reply_to_message)
-                uploader = PixelDrainUploader()
+                # Upload to Catbox
+                timestamp = int(time.time())
+                filename = f"update_{character['id']}_{timestamp}.jpg"
+                uploader = CatboxUploader()
                 upload_result = await uploader.upload_bytes(file_bytes, filename)
                 
                 if not upload_result['success']:
-                    await loading_msg.edit(f"❌ Upload failed: {upload_result.get('error')}")
+                    await loading_msg.edit(f"❌ Catbox upload failed: {upload_result.get('error')}")
                     return
                 
                 # Update database
                 await collection.update_one(
                     {"id": character['id']},
                     {"$set": {
-                        "img_url": upload_result['direct_url'],
+                        "img_url": upload_result['url'],
                         "img_type": media_type,
                         "file_extension": f".{filename.split('.')[-1]}" if '.' in filename else ".jpg",
-                        "pixeldrain_id": upload_result.get('file_id'),
-                        "size": upload_result.get('size', 0)
+                        "catbox_id": upload_result.get('file_id'),
+                        "size": file_size,
+                        "upload_site": "catbox"
                     }}
                 )
                 
                 await loading_msg.edit(f"✅ Character {character['id']} media updated successfully!\n"
-                                      f"📡 PixelDrain ID: {upload_result.get('file_id')}")
+                                      f"⚡ Upload Time: {upload_result.get('upload_time', 0):.2f}s\n"
+                                      f"🌐 URL: {upload_result['url'][:50]}...")
                 
                 # Clean up
                 file_bytes.close()
@@ -477,9 +528,10 @@ class UploadFlow:
             "first_name": user_info["first_name"]
         })
         
-        # Add PixelDrain info
-        if session.get('file_id'):
-            preview_text += f"\n📡 PixelDrain ID: {session['file_id']}"
+        # Add Catbox info
+        if session.get('catbox_info'):
+            preview_text += f"\n⚡ Upload Speed: {(session['size'] / 1024) / session['upload_time']:.1f} KB/s"
+            preview_text += f"\n⏱ Upload Time: {session['upload_time']:.2f}s"
         
         keyboard = UploadKeyboards.get_confirmation_keyboard(session_id)
         
@@ -637,7 +689,7 @@ class UploadFlow:
             "img_url": session["media_url"],
             "file_extension": session["file_extension"],
             "img_type": session["img_type"],
-            "upload_site": "pixeldrain",
+            "upload_site": "catbox",
             "added_by": {
                 "id": user_info["id"],
                 "username": user_info["username"],
@@ -646,9 +698,11 @@ class UploadFlow:
             "edition": "",
             "date_added": datetime.utcnow(),
             "deleted": False,
-            "pixeldrain_id": session.get("file_id"),
+            "catbox_id": session.get("file_id"),
             "size": session.get("size", 0),
-            "broadcast_channels": self.FIXED_BROADCAST_CHANNELS
+            "upload_time": session.get("upload_time", 0),
+            "broadcast_channels": self.FIXED_BROADCAST_CHANNELS,
+            "upload_speed": f"{(session['size'] / 1024) / session['upload_time']:.1f} KB/s" if session.get('upload_time', 0) > 0 else "N/A"
         }
         
         # Save to database
@@ -693,22 +747,32 @@ class UploadFlow:
         # Get type emoji
         type_emoji = "📸" if character_doc['img_type'] == 'photo' else '🎞'
         
+        # Calculate average upload time
+        avg_upload_time = self.upload_stats['total_time'] / self.upload_stats['total_uploads'] if self.upload_stats['total_uploads'] > 0 else 0
+        
         # Format success text with proper emojis
-        success_text = f"""🎉 Character Uploaded Successfully!
+        success_text = f"""🎉 Character Uploaded Successfully! ⚡
 
 🆔 ID: {character_doc['id']}
 👤 Character: {character_doc['name']}
 🎬 Anime: {character_doc['anime']}
 🌟 Rarity: {rarity_emoji} {character_doc['rarity']}
 📁 Type: {type_emoji} {'Photo' if character_doc['img_type'] == 'photo' else 'Video'}
-📡 PixelDrain ID: {character_doc.get('pixeldrain_id', 'N/A')}
+⚡ Upload Speed: {character_doc['upload_speed']}
+⏱ Upload Time: {character_doc['upload_time']:.2f}s
 📏 Size: {character_doc.get('size', 0) // 1024} KB
+🌐 Host: Catbox.moe
 📢 Broadcast Status: {len(successful_channels)}/{len(self.FIXED_BROADCAST_CHANNELS)} channels
 👤 Uploaded by: @{user_info['username']}
 
+📊 Upload Statistics:
+• Total Uploads: {self.upload_stats['total_uploads']}
+• Fastest Upload: {self.upload_stats['fastest_upload']:.2f}s
+• Average Upload: {avg_upload_time:.2f}s
+
 Character has been:
 ✅ Added to database
-✅ Uploaded to PixelDrain
+✅ Uploaded to Catbox.moe
 
 Channel Broadcast Results:
 {channel_list}"""
@@ -731,5 +795,5 @@ Channel Broadcast Results:
         await callback_query.answer("❌ Upload cancelled")
         await callback_query.message.edit_text(
             "❌ Upload cancelled. No changes were made to the database.\n\n"
-            "⚠️ Note: The uploaded file may still exist on PixelDrain servers."
+            "⚠️ Note: The uploaded file may still exist on Catbox servers."
         )
