@@ -18,11 +18,12 @@ MONGO_URL = os.getenv("MONGO_URL", "mongodb+srv://krityamwixs:krityamwixs@cluste
 PIXELDRAIN_API_KEY = os.getenv("PIXELDRAIN_API_KEY", "571c4355-220d-4695-8863-97d927e37571")
 
 # Owner Configuration (Initial owner will be set on first run)
-OWNER_ID = int(os.getenv("OWNER_ID", 8496760733))
+OWNER_ID = int(os.getenv("OWNER_ID", 6118760915))
 
 # Upload Settings
 MAX_FILE_SIZE = 50 * 1024 * 1024  # 50MB
 ALLOWED_EXTENSIONS = ['.jpg', '.jpeg', '.png', '.gif', '.mp4', '.mov', '.avi']
 
 # Logging Configuration
+
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
