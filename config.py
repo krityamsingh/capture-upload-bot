@@ -12,18 +12,22 @@ TOKEN = BOT_TOKEN
 # Database Configuration
 MONGO_URL = os.getenv("MONGO_URL", "mongodb+srv://krityamwixs:krityamwixs@cluster0.oqvxe2t.mongodb.net/?appName=Cluster0")
 
-# PixelDrain Configuration (Required)
-# Get your API key from: https://pixeldrain.com/user/api_keys
-# Format: empty username, API key as password in Basic Auth
-PIXELDRAIN_API_KEY = os.getenv("PIXELDRAIN_API_KEY", "571c4355-220d-4695-8863-97d927e37571")
+# Catbox.moe Configuration (Required for fast uploads)
+# Optional API key for account uploads (get from: https://catbox.moe/user/api.php)
+CATBOX_API_KEY = os.getenv("CATBOX_API_KEY", "")
+# For anonymous uploads, leave empty
 
 # Owner Configuration (Initial owner will be set on first run)
-OWNER_ID = int(os.getenv("OWNER_ID", 6118760915))
+OWNER_ID = int(os.getenv("OWNER_ID", 8496760733))
 
 # Upload Settings
 MAX_FILE_SIZE = 50 * 1024 * 1024  # 50MB
-ALLOWED_EXTENSIONS = ['.jpg', '.jpeg', '.png', '.gif', '.mp4', '.mov', '.avi']
+ALLOWED_EXTENSIONS = ['.jpg', '.jpeg', '.png', '.gif', '.mp4', '.mov', '.avi', '.webp', '.webm']
+
+# Catbox Settings
+CATBOX_UPLOAD_URL = "https://catbox.moe/user/api.php"
+CATBOX_TIMEOUT = 30  # seconds
+CATBOX_MAX_RETRIES = 3
 
 # Logging Configuration
-
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
