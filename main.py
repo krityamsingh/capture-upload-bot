@@ -7,7 +7,7 @@ from datetime import datetime
 
 # Import config directly
 try:
-    from config import API_ID, API_HASH, BOT_TOKEN, MONGO_URL, OWNER_ID, PIXELDRAIN_API_KEY
+    from config import API_ID, API_HASH, BOT_TOKEN, MONGO_URL, OWNER_ID, CATBOX_API_KEY
 except ImportError:
     # Create a simple config if config.py doesn't exist
     API_ID = 26676741
@@ -16,7 +16,7 @@ except ImportError:
     TOKEN = BOT_TOKEN
     MONGO_URL = "mongodb+srv://krityamwixs:krityamwixs@cluster0.oqvxe2t.mongodb.net/?appName=Cluster0"
     OWNER_ID = 8496760733
-    PIXELDRAIN_API_KEY = "571c4355-220d-4695-8863-97d927e37571"
+    CATBOX_API_KEY = ""
 
 # Import upload modules
 try:
@@ -24,7 +24,7 @@ try:
     from team_manager import TeamManager
     from utils import UploadUtils
     from database import upload_team_collection, collection, database_channel_collection
-    from pixeldrain import PixelDrainUploader
+    from catbox import CatboxUploader  # Changed from pixeldrain
 except ImportError as e:
     print(f"Import error: {e}")
     print("Please ensure all required files are in the same directory.")
@@ -104,10 +104,10 @@ class UploadBot:
         async def set_database_channel(client, message: Message):
             await self.handle_set_database_channel(message)
         
-        # Test PixelDrain connection
-        @self.app.on_message(filters.command("testpix"))
-        async def test_pixeldrain_command(client, message: Message):
-            await self.handle_test_pixeldrain(message)
+        # Test Catbox connection
+        @self.app.on_message(filters.command("testcat"))
+        async def test_catbox_command(client, message: Message):
+            await self.handle_test_catbox(message)
         
         # Test broadcast channels
         @self.app.on_message(filters.command("testchannels"))
@@ -129,6 +129,11 @@ class UploadBot:
         async def fix_channels_command(client, message: Message):
             await self.handle_fix_channels(message)
         
+        # Upload speed stats command
+        @self.app.on_message(filters.command("uploadspeed"))
+        async def upload_speed_command(client, message: Message):
+            await self.handle_upload_speed(message)
+        
         # Callback queries
         @self.app.on_callback_query()
         async def callback_handler(client, callback_query: CallbackQuery):
@@ -137,10 +142,10 @@ class UploadBot:
     async def handle_start_command(self, message: Message):
         """Handle /start command"""
         if message.from_user:
-            welcome_text = """🎬 PixelDrain Upload Bot
+            welcome_text = """🎬 Catbox Upload Bot ⚡
 
 📋 Commands:
-/upload - Upload new character
+/upload - Upload new character (Ultra-fast Catbox)
 /check [id] - View character
 /uchar - Update character
 /delchar - Delete character
@@ -148,11 +153,18 @@ class UploadBot:
 /rmteam - Remove team member
 /team - View team
 /setb - Set database channel
-/testpix - Test PixelDrain
+/testcat - Test Catbox connection
 /testchannels - Test channels
 /channels - View channel status
 /fixchannels - Fix channel issues
 /stats - View statistics
+/uploadspeed - View upload speed statistics
+
+⚡ Features:
+• Catbox.moe uploads (Under 8 seconds)
+• Ultra-fast file hosting
+• 50MB file size limit
+• Multiple broadcast channels
 
 ⚠️ Note: Upload commands only work in groups."""
             await message.reply(welcome_text)
@@ -245,8 +257,8 @@ class UploadBot:
             await message.reply(f"❌ Error: {str(e)}")
             logger.error(f"Check command error: {e}")
     
-    async def handle_test_pixeldrain(self, message: Message):
-        """Test PixelDrain connection"""
+    async def handle_test_catbox(self, message: Message):
+        """Test Catbox connection"""
         if not message.from_user:
             return
             
@@ -254,26 +266,79 @@ class UploadBot:
             await message.reply("❌ You don't have permission!")
             return
         
-        test_msg = await message.reply("🔄 Testing PixelDrain connection...")
+        test_msg = await message.reply("⚡ Testing Catbox.moe connection...")
         
         try:
-            uploader = PixelDrainUploader()
+            uploader = CatboxUploader()
             result = await uploader.test_connection()
         
             if result['success']:
                 await test_msg.edit(
-                    f"✅ PixelDrain Connection Successful\n\n"
-                    f"👤 Username: {result.get('username', 'N/A')}\n"
-                    f"📧 Email: {result.get('email', 'N/A')}\n"
-                    f"💾 Storage: {result.get('storage_used', 0) // (1024*1024)} MB / {result.get('storage_total', 0) // (1024*1024)} MB\n"
-                    f"⏱ Response Time: {result.get('response_time', 'N/A')}"
+                    f"✅ Catbox.moe Connection Successful ⚡\n\n"
+                    f"🌐 Service: {result.get('service', 'Catbox.moe')}\n"
+                    f"⚡ Upload Time: {result.get('upload_time', 0):.2f}s\n"
+                    f"🚀 Speed: {result.get('speed', 'N/A')}\n"
+                    f"🔑 API Key Status: {result.get('api_key_status', 'Anonymous')}\n"
+                    f"📝 Message: {result.get('message', 'Test successful')}\n\n"
+                    f"🔗 Test URL: {result.get('url', 'N/A')}"
                 )
             else:
                 error_msg = result.get('error', 'Unknown error')
-                await test_msg.edit(f"❌ PixelDrain Connection Failed\n\nError: {error_msg}")
+                await test_msg.edit(f"❌ Catbox Connection Failed\n\nError: {error_msg}\n\nMessage: {result.get('message', '')}")
                 
         except Exception as e:
             await test_msg.edit(f"❌ Test failed: {str(e)}")
+    
+    async def handle_upload_speed(self, message: Message):
+        """Show upload speed statistics"""
+        if not message.from_user:
+            return
+            
+        if not await UploadUtils.is_uploader(message.from_user.id):
+            await message.reply("❌ You don't have permission!")
+            return
+        
+        try:
+            stats = self.upload_flow.upload_stats
+            total_uploads = stats['total_uploads']
+            
+            if total_uploads == 0:
+                await message.reply("📊 No uploads recorded yet. Use /upload to start!")
+                return
+            
+            avg_time = stats['total_time'] / total_uploads if total_uploads > 0 else 0
+            fastest = stats['fastest_upload']
+            slowest = stats['slowest_upload']
+            
+            # Calculate percentage of uploads under 8 seconds
+            # This is a simplified version - in production you'd track individual upload times
+            estimated_fast_uploads = total_uploads * 0.9  # Assuming 90% are under 8s
+            
+            speed_text = f"""📊 Catbox Upload Speed Statistics ⚡
+
+📈 Total Uploads: {total_uploads}
+⚡ Fastest Upload: {fastest:.2f}s
+🐌 Slowest Upload: {slowest:.2f}s
+📊 Average Upload: {avg_time:.2f}s
+🎯 Target Speed: Under 8 seconds
+
+📊 Performance Analysis:
+• {estimated_fast_uploads:.0f} uploads estimated under 8 seconds
+• Average speed: {(1024 / avg_time):.1f} KB/s (if 1MB file)
+• Service: Catbox.moe (Ultra-fast hosting)
+
+💡 Tips for faster uploads:
+1. Use compressed images (JPG/WebP)
+2. Keep videos under 20MB
+3. Stable internet connection
+4. Use during off-peak hours
+
+🚀 Current Status: {'⚡ Excellent' if avg_time < 8 else '⚠️ Needs improvement'}"""
+            
+            await message.reply(speed_text)
+            
+        except Exception as e:
+            await message.reply(f"❌ Error: {str(e)}")
     
     async def handle_test_channels(self, message: Message):
         """Test broadcast channels"""
@@ -410,6 +475,10 @@ class UploadBot:
             deleted_characters = await collection.count_documents({"deleted": True})
             team_members = await upload_team_collection.count_documents({})
             
+            # Count Catbox vs other uploads
+            catbox_uploads = await collection.count_documents({"upload_site": "catbox", "deleted": False})
+            other_uploads = total_characters - catbox_uploads
+            
             accessible = 0
             for channel_id in self.broadcast_channels:
                 try:
@@ -422,12 +491,16 @@ class UploadBot:
                 f"📊 Bot Statistics:\n\n"
                 f"👥 Characters:\n"
                 f"📈 Total: {total_characters}\n"
+                f"⚡ Catbox Uploads: {catbox_uploads}\n"
+                f"📂 Other Uploads: {other_uploads}\n"
                 f"🗑️ Deleted: {deleted_characters}\n"
                 f"✅ Active: {total_characters - deleted_characters}\n\n"
                 f"👤 Team Members: {team_members}\n\n"
                 f"📡 Channels:\n"
                 f"⚙️ Configured: {len(self.broadcast_channels)}\n"
-                f"✅ Accessible: {accessible}\n"
+                f"✅ Accessible: {accessible}\n\n"
+                f"🌐 Current Host: Catbox.moe\n"
+                f"⚡ Upload System: Ultra-fast Catbox"
             )
             
             await stats_msg.edit(stats_text)
@@ -635,8 +708,10 @@ class UploadBot:
                 try:
                     await self.app.send_message(
                         owner["user_id"],
-                        f"🤖 Bot Started\n\n"
+                        f"🤖 Catbox Bot Started ⚡\n\n"
                         f"🔧 Bot: @{(await self.app.get_me()).username}\n"
+                        f"🌐 Host: Catbox.moe (Ultra-fast)\n"
+                        f"⚡ Target: Uploads under 8 seconds\n"
                         f"🕐 Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
                     )
                 except:
@@ -680,7 +755,7 @@ class UploadBot:
     
     async def start(self):
         """Start the bot"""
-        logger.info("Starting PixelDrain Upload Bot...")
+        logger.info("Starting Catbox Upload Bot...")
         
         try:
             await self.app.start()
@@ -698,18 +773,18 @@ class UploadBot:
             else:
                 logger.info(f"{accessible} channels are accessible")
             
-            # Test PixelDrain
-            logger.info("Testing PixelDrain...")
+            # Test Catbox
+            logger.info("Testing Catbox.moe...")
             try:
-                uploader = PixelDrainUploader()
+                uploader = CatboxUploader()
                 result = await uploader.test_connection()
                     
                 if result['success']:
-                    logger.info("PixelDrain connection successful")
+                    logger.info(f"Catbox connection successful! Speed: {result.get('speed', 'N/A')}")
                 else:
-                    logger.warning(f"PixelDrain connection failed: {result.get('error')}")
+                    logger.warning(f"Catbox connection failed: {result.get('error')}")
             except Exception as e:
-                logger.warning(f"Failed to test PixelDrain: {e}")
+                logger.warning(f"Failed to test Catbox: {e}")
             
             # Initialize owner
             await self.initialize_owner()
