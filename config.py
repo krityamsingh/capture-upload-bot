@@ -1,117 +1,28 @@
 import os
-from typing import Dict, Any
+from dotenv import load_dotenv
 
+load_dotenv()
 
-class Config:
-    """Central configuration for the Telegram bot"""
+# Bot Configuration
+API_ID = int(os.getenv("API_ID", 26676741))
+API_HASH = os.getenv("API_HASH", "6fbc29f23c15bdb0c7fbbefe65c9193a")
+BOT_TOKEN = os.getenv("BOT_TOKEN", "8440461627:AAFgko_wvAT-jK1lq2UBMtsnJejfcm-8ugo")
+TOKEN = BOT_TOKEN
 
-    # ───────────────────────────
-    # Telegram API Credentials
-    # ───────────────────────────
-    API_ID = int(os.getenv("API_ID", 26676741))
-    API_HASH = os.getenv("API_HASH", "6fbc29f23c15bdb0c7fbbefe65c9193a")
-    BOT_TOKEN = os.getenv(
-        "BOT_TOKEN",
-        "8496337458:AAF7ORldWpN-C6hpzSDt1bPCOeGVxfbU4qg"
-    )
-    CAPTURE_CHANNEL = os.getenv("CAPTURE_CHANNEL", "@capture_database")
-    # ───────────────────────────
-    # MongoDB Configuration
-    # ───────────────────────────
-    MONGO_URI = os.getenv(
-        "MONGO_URI",
-        "mongodb+srv://Capture:capture@cluster0.7jqepnf.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0"
-    )
-    DATABASE_NAME = os.getenv("DATABASE_NAME", "telegram_upload_bot")
+# Database Configuration
+MONGO_URL = os.getenv("MONGO_URL", "mongodb+srv://krityamwixs:krityamwixs@cluster0.oqvxe2t.mongodb.net/?appName=Cluster0")
 
-    # ───────────────────────────
-    # Bot Owner / Admin
-    # ───────────────────────────
-    OWNER_ID = int(os.getenv("OWNER_ID", 7878477646))
+# PixelDrain Configuration (Required)
+# Get your API key from: https://pixeldrain.com/user/api_keys
+# Format: empty username, API key as password in Basic Auth
+PIXELDRAIN_API_KEY = os.getenv("PIXELDRAIN_API_KEY", "571c4355-220d-4695-8863-97d927e37571")
 
-    # ───────────────────────────
-    # Upload & Performance Limits
-    # ───────────────────────────
-    UPLOAD_TIMEOUT = 60                  # seconds
-    MAX_FILE_SIZE = 50 * 1024 * 1024     # 50 MB
+# Owner Configuration (Initial owner will be set on first run)
+OWNER_ID = int(os.getenv("OWNER_ID", 8496760733))
 
-    # Mass / Batch Processing
-    MAX_BATCH_SIZE = 50
-    BATCH_PROCESSING_TIMEOUT = 300       # seconds
+# Upload Settings
+MAX_FILE_SIZE = 50 * 1024 * 1024  # 50MB
+ALLOWED_EXTENSIONS = ['.jpg', '.jpeg', '.png', '.gif', '.mp4', '.mov', '.avi']
 
-    # ───────────────────────────
-    # RARITY SYSTEM (UPDATED)
-    # ───────────────────────────
-    RARITY_MAP = {
-        1: "⚪ Common",
-        2: "🔴 Rare",
-        3: "🟡 Legendary",
-        4: "🥵 Exotic",
-        5: "🎐 Limited Edition",
-        6: "🌩️ Thundra",
-        7: "🎤 Celebrity",
-        8: "🎬 Animated"
-    }
-
-    # ───────────────────────────
-    # Rarities that support sub-types
-    # ───────────────────────────
-    RARITIES_WITH_SUBTYPES = [5, 7,]
-
-    # ───────────────────────────
-    # Subtype Groups
-    # ───────────────────────────
-    LIMITED_SUBTYPES = {
-        "valentine": "💝 Valentine",
-        "christmas": "🎄 Christmas",
-        "halloween": "🎃 Halloween",
-        "summer": "🏖️ Summer",
-        "winter": "❄️ Winter",
-        "newyear": "🎆 New Year",
-        "wedding": "💒 Wedding",
-    }
-
-    CELEBRITY_SUBTYPES = {
-        "phyco": "🎭 phyco",
-        "singer": "🎤 Singer",
-        "power": "🏆 power",
-        "influencer": "📸 Influencer",
-    }
-
-    # ───────────────────────────
-    # Auto Emoji Mapping (for captions)
-    # ───────────────────────────
-    SUBRARITY_EMOJI_MAP = {
-        # Limited
-        "valentine": "💝",
-        "christmas": "🎄",
-        "halloween": "🎃",
-        "summer": "🏖️",
-        "winter": "❄️",
-        "newyear": "🎆",
-        "wedding": "💒",
-
-        # Premium / Exotic
-        "gold": "🥇",
-        "diamond": "💠",
-        "royal": "👑",
-        "dark": "🌑",
-
-        # Supreme / Crystal
-        "mythic": "🛡️",
-        "ancient": "📜",
-        "celestial": "✨",
-
-        # Celebrity
-        "actor": "🎭",
-        "singer": "🎤",
-        "athlete": "🏆",
-        "influencer": "📸",
-    }
-
-
-# Export config instance
-config = Config()
-
-
-
+# Logging Configuration
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")

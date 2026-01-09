@@ -1,0 +1,76 @@
+2026-01-08 16:52:53,507 - pyrogram.connection.connection - INFO - Connecting...
+2026-01-08 16:52:53,850 - pyrogram.connection.connection - INFO - Connected! Production DC5 - IPv4
+2026-01-08 16:52:53,854 - pyrogram.session.session - INFO - NetworkTask started
+2026-01-08 16:52:54,960 - pyrogram.session.session - INFO - Session initialized: Layer 158
+2026-01-08 16:52:54,960 - pyrogram.session.session - INFO - Device: CPython 3.13.5 - Pyrogram 2.0.106
+2026-01-08 16:52:54,961 - pyrogram.session.session - INFO - System: Windows 11 (en)
+2026-01-08 16:52:54,961 - pyrogram.session.session - INFO - Session started
+2026-01-08 16:52:54,966 - pyrogram.session.session - INFO - PingTask started
+2026-01-08 16:52:55,370 - pyrogram.dispatcher - INFO - Started 28 HandlerTasks
+2026-01-08 16:53:00,969 - __main__ - INFO - Startup message sent to owner: 8496760733
+2026-01-08 16:53:24,966 - __main__ - ERROR - Channel test error: '<' not supported between instances of 'str' and 'int'
+2026-01-08 16:55:15,153 - pyrogram.dispatcher - ERROR - 'NoneType' object has no attribute 'id'
+Traceback (most recent call last):
+  File "C:\Users\pixlb\AppData\Local\Programs\Python\Python313\Lib\site-packages\pyrogram\dispatcher.py", line 240, in handler_worker
+    await handler.callback(self.client, *args)
+  File "c:\Users\pixlb\OneDrive\Documents\catchupload\main.py", line 109, in set_database_channel
+    await self.handle_set_database_channel(message)
+  File "c:\Users\pixlb\OneDrive\Documents\catchupload\main.py", line 814, in handle_set_database_channel
+    if not await UploadUtils.is_owner(message.from_user.id):
+                                      ^^^^^^^^^^^^^^^^^^^^
+AttributeError: 'NoneType' object has no attribute 'id'
+2026-01-08 16:56:05,320 - __main__ - ERROR - Channel test error: '<' not supported between instances of 'str' and 'int'
+2026-01-08 17:03:58,227 - __main__ - INFO - Starting PixelDrain Upload Bot...
+2026-01-08 17:03:58,564 - pyrogram.connection.connection - INFO - Connecting...
+2026-01-08 17:03:58,770 - pyrogram.connection.connection - INFO - Connected! Production DC5 - IPv4
+2026-01-08 17:03:58,776 - pyrogram.session.session - INFO - NetworkTask started
+2026-01-08 17:03:59,631 - pyrogram.session.session - INFO - Session initialized: Layer 158
+2026-01-08 17:03:59,632 - pyrogram.session.session - INFO - Device: CPython 3.13.5 - Pyrogram 2.0.106
+2026-01-08 17:03:59,632 - pyrogram.session.session - INFO - System: Windows 11 (en)
+2026-01-08 17:03:59,632 - pyrogram.session.session - INFO - Session started
+2026-01-08 17:03:59,634 - pyrogram.session.session - INFO - PingTask started
+2026-01-08 17:04:00,074 - pyrogram.dispatcher - INFO - Started 28 HandlerTasks
+2026-01-08 17:04:00,074 - __main__ - INFO - Bot client started
+2026-01-08 17:04:00,289 - __main__ - INFO - Bot started as @CatchUploadbot
+2026-01-08 17:04:00,290 - __main__ - WARNING - Channel inaccessible: -1003453826601 - Peer id invalid: -1003453826601
+2026-01-08 17:04:00,290 - __main__ - WARNING - Channel inaccessible: -1003476239550 - Peer id invalid: -1003476239550
+2026-01-08 17:04:00,290 - __main__ - WARNING - WARNING: No channels accessible!
+2026-01-08 17:04:00,290 - __main__ - WARNING - Uploads will fail. Use /fixchannels to try fixing.
+2026-01-08 17:04:00,290 - __main__ - INFO - Testing PixelDrain...
+2026-01-08 17:04:01,531 - __main__ - INFO - PixelDrain connection successful
+2026-01-08 17:04:03,959 - __main__ - INFO - Bot is now running. Press Ctrl+C to stop.
+2026-01-08 17:05:32,633 - pyrogram.connection.connection - INFO - Connecting...
+2026-01-08 17:05:32,773 - pyrogram.connection.connection - INFO - Connected! Production DC5 (media) - IPv4
+2026-01-08 17:05:32,774 - pyrogram.session.session - INFO - NetworkTask started
+2026-01-08 17:05:33,521 - pyrogram.session.session - INFO - Session initialized: Layer 158
+2026-01-08 17:05:33,522 - pyrogram.session.session - INFO - Device: CPython 3.13.5 - Pyrogram 2.0.106
+2026-01-08 17:05:33,522 - pyrogram.session.session - INFO - System: Windows 11 (en)
+2026-01-08 17:05:33,522 - pyrogram.session.session - INFO - Session started
+2026-01-08 17:05:33,524 - pyrogram.session.session - INFO - PingTask started
+2026-01-08 17:05:34,240 - pyrogram.session.session - INFO - PingTask stopped
+2026-01-08 17:05:34,241 - pyrogram.session.session - INFO - NetworkTask stopped
+2026-01-08 17:05:34,241 - pyrogram.connection.connection - INFO - Disconnected
+2026-01-08 17:05:34,241 - pyrogram.session.session - INFO - Session stopped
+2026-01-08 17:05:55,958 - upload_flow - INFO - ✅ Character saved to database: 0009
+2026-01-08 17:05:56,469 - upload_flow - INFO - Attempting to broadcast to channel: -1003453826601
+2026-01-08 17:05:56,470 - upload_flow - INFO - Channel ID type: <class 'int'>, value: -1003453826601
+2026-01-08 17:05:56,636 - upload_flow - INFO - Accessing channel: v (ID: -1003453826601)
+2026-01-08 17:05:58,117 - upload_flow - INFO - ✅ Broadcast attempt 1 successful for channel -1003453826601
+2026-01-08 17:05:58,117 - upload_flow - INFO - ✅ Successfully broadcast to channel: -1003453826601
+2026-01-08 17:05:58,117 - upload_flow - INFO - Attempting to broadcast to channel: -1003476239550
+2026-01-08 17:05:58,118 - upload_flow - INFO - Channel ID type: <class 'int'>, value: -1003476239550
+2026-01-08 17:05:58,275 - upload_flow - INFO - Accessing channel: . (ID: -1003476239550)
+2026-01-08 17:05:58,463 - upload_flow - INFO - ✅ Broadcast attempt 1 successful for channel -1003476239550
+2026-01-08 17:05:58,463 - upload_flow - INFO - ✅ Successfully broadcast to channel: -1003476239550
+2026-01-08 17:09:15,518 - pyrogram.connection.connection - INFO - Connecting...
+2026-01-08 17:09:15,752 - pyrogram.connection.connection - INFO - Connected! Production DC5 (media) - IPv4
+2026-01-08 17:09:15,753 - pyrogram.session.session - INFO - NetworkTask started
+2026-01-08 17:09:16,694 - pyrogram.session.session - INFO - Session initialized: Layer 158
+2026-01-08 17:09:16,695 - pyrogram.session.session - INFO - Device: CPython 3.13.5 - Pyrogram 2.0.106
+2026-01-08 17:09:16,695 - pyrogram.session.session - INFO - System: Windows 11 (en)
+2026-01-08 17:09:16,696 - pyrogram.session.session - INFO - Session started
+2026-01-08 17:09:16,700 - pyrogram.session.session - INFO - PingTask started
+2026-01-08 17:09:17,316 - pyrogram.session.session - INFO - PingTask stopped
+2026-01-08 17:09:17,316 - pyrogram.session.session - INFO - NetworkTask stopped
+2026-01-08 17:09:17,317 - pyrogram.connection.connection - INFO - Disconnected
+2026-01-08 17:09:17,317 - pyrogram.session.session - INFO - Session stopped
