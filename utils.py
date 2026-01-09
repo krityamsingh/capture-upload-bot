@@ -234,7 +234,7 @@ class UploadUtils:
 🌟 Rarity: {rarity_emoji} {session_data['rarity']}
 📁 Type: {'📸 Photo' if session_data['img_type'] == 'photo' else '🎞 Video'}
 👤 Added by: @{username}
-🌐 Host: PIXELDRAIN"""
+🌐 Host: Catbox.moe"""
         
         return text.strip()
     
@@ -301,7 +301,7 @@ class UploadUtils:
         if edition:
             caption += f"\n🎀 Edition: {edition}"
         
-        caption += "\n🌐 Host: PIXELDRAIN"
+        caption += "\n🌐 Host: Catbox.moe"
         
         return caption
     
