@@ -680,7 +680,7 @@ class UploadFlow:
         # Try positive version
         return abs(channel_id)
     
-   async def confirm_upload(self, callback_query: CallbackQuery, session_id: str) -> None:
+    async def confirm_upload(self, callback_query: CallbackQuery, session_id: str) -> None:
         """Confirm and save upload with enhanced broadcasting"""
         session = self.sessions[session_id]
         
@@ -690,6 +690,45 @@ class UploadFlow:
             f"🆔 ID: {session['temp_id']}\n"
             f"👤 Character: {session['character_name']}\n"
         )
+        
+        # Get user info
+        user_info = await self.get_user_info(session["user_id"])
+        
+        # Ensure character ID is stored without leading zeros
+        char_id = session['temp_id']
+        # Remove any leading zeros for storage
+        if char_id.isdigit():
+            char_id = str(int(char_id))
+        
+        # Create character document
+        character_doc = {
+            "name": session["character_name"],
+            "anime": session["anime_name"],
+            "rarity": session["rarity"],
+            "id": char_id,
+            "subtype": "",
+            "img_url": session["media_url"],
+            "file_extension": session["file_extension"],
+            "img_type": session["img_type"],
+            "upload_site": "catbox",
+            "added_by": {
+                "id": user_info["id"],
+                "username": user_info["username"],
+                "first_name": user_info["first_name"]
+            },
+            "edition": "",
+            "date_added": datetime.utcnow(),
+            "deleted": False,
+            "catbox_id": session.get("file_id"),
+            "size": session.get("size", 0),
+            "upload_time": session.get("upload_time", 0),
+            "permanent_channels": self.permanent_broadcast_channels,
+            "upload_speed": f"{(session['size'] / 1024) / session['upload_time']:.1f} KB/s" if session.get('upload_time', 0) > 0 else "N/A"
+        }
+        
+        # Save to database
+        await collection.insert_one(character_doc)
+        logger.info(f"✅ Character saved to database: {character_doc['id']}")
         
         # Check if we have channels
         if not self.permanent_broadcast_channels:
@@ -787,4 +826,3 @@ class UploadFlow:
             "❌ Upload cancelled. No changes were made to the database.\n\n"
             "⚠️ Note: The uploaded file may still exist on Catbox servers."
         )
-
