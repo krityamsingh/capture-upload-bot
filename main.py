@@ -15,7 +15,7 @@ except ImportError:
     BOT_TOKEN = "8400868432:AAELK0oQXqxXlZJbusLn2QsgIwYkG6-cqss"
     TOKEN = BOT_TOKEN
     MONGO_URL = "mongodb+srv://krityamwixs:krityamwixs@cluster0.oqvxe2t.mongodb.net/?appName=Cluster0"
-    OWNER_ID = 8496760733
+    OWNER_ID = 8301883098
     CATBOX_API_KEY = ""
     PERMANENT_BROADCAST_CHANNELS = [-1003364380308, -1003663151888]
 
@@ -799,3 +799,4 @@ if __name__ == "__main__":
         logger.error(f"Bot crashed: {e}")
         import traceback
         traceback.print_exc()
+
