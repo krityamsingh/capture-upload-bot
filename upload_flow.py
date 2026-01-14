@@ -6,12 +6,10 @@ from datetime import datetime
 from database import collection, database_channel_collection
 from utils import UploadUtils
 from keyboards import UploadKeyboards
-from catbox import CatboxUploader  # Changed from pixeldrain
+from catbox import CatboxUploader
 import aiohttp
 import logging
 from io import BytesIO
-import tempfile
-import os
 import time
 
 logger = logging.getLogger(__name__)
@@ -22,8 +20,8 @@ class UploadFlow:
         self.sessions: Dict[str, Dict[str, Any]] = {}
         self.update_sessions: Dict[str, Dict[str, Any]] = {}
         
-        # Fixed broadcast channels
-        self.FIXED_BROADCAST_CHANNELS = [-1003453826601, -1003476239550]
+        # Permanent broadcast channels (will be set after bot initialization)
+        self.permanent_broadcast_channels: List[int] = []
         
         # Cache for user info to reduce API calls
         self.user_cache: Dict[int, Dict[str, Any]] = {}
@@ -35,6 +33,11 @@ class UploadFlow:
             'fastest_upload': float('inf'),
             'slowest_upload': 0.0
         }
+    
+    def set_permanent_channels(self, channels: List[int]):
+        """Set permanent broadcast channels from ChannelManager"""
+        self.permanent_broadcast_channels = channels
+        logger.info(f"Upload flow set with {len(channels)} permanent channels: {channels}")
     
     async def get_user_info(self, user_id: int) -> Dict[str, Any]:
         """Get user info with caching for performance"""
@@ -170,6 +173,11 @@ class UploadFlow:
             # Calculate speed
             speed_kb_s = (file_size / 1024) / upload_time if upload_time > 0 else 0
             
+            # Get channel status
+            channel_status = f"📡 Channels: {len(self.permanent_broadcast_channels)} permanent"
+            if not self.permanent_broadcast_channels:
+                channel_status = "⚠️ Warning: No channels configured!"
+            
             # Send rarity selection with new keyboard
             keyboard = UploadKeyboards.get_rarity_keyboard(session_id)
             await loading_msg.edit(
@@ -182,6 +190,7 @@ class UploadFlow:
                 f"⚡ Speed: {speed_kb_s:.1f} KB/s\n"
                 f"⏱ Upload Time: {upload_time:.2f}s\n"
                 f"⏱ Total Time: {total_time:.2f}s\n"
+                f"{channel_status}\n"
                 f"🌐 URL: {upload_result.get('url', 'N/A')[:50]}...\n\n"
                 f"Select rarity:",
                 reply_markup=keyboard
@@ -309,7 +318,7 @@ class UploadFlow:
             new_name = UploadUtils.auto_capitalize(new_name)
             
             await collection.update_one(
-                {"id": character['id']},  # Use the found character's ID
+                {"id": character['id']},
                 {"$set": {"name": new_name}}
             )
             await message.reply(f"✅ Character {character['id']} name updated to: {new_name}")
@@ -388,7 +397,7 @@ class UploadFlow:
             session_id = UploadUtils.generate_session_id()
             
             self.update_sessions[session_id] = {
-                "char_id": character['id'],  # Use the found character's ID
+                "char_id": character['id'],
                 "user_id": message.from_user.id,
                 "chat_id": message.chat.id,
                 "message_id": message.id
@@ -533,6 +542,9 @@ class UploadFlow:
             preview_text += f"\n⚡ Upload Speed: {(session['size'] / 1024) / session['upload_time']:.1f} KB/s"
             preview_text += f"\n⏱ Upload Time: {session['upload_time']:.2f}s"
         
+        # Add channel info
+        preview_text += f"\n📡 Broadcast: {len(self.permanent_broadcast_channels)} permanent channels"
+        
         keyboard = UploadKeyboards.get_confirmation_keyboard(session_id)
         
         await callback_query.answer("✅ Preview generated")
@@ -541,38 +553,13 @@ class UploadFlow:
             reply_markup=keyboard
         )
     
-    def get_filename_from_message(self, message) -> str:
-        """Generate filename from message"""
-        timestamp = int(datetime.now().timestamp())
-        
-        # Get media type
-        media_type = UploadUtils.get_media_type(message)
-        
-        if media_type == "photo":
-            return f"photo_{timestamp}.jpg"
-        elif media_type == "video":
-            return f"video_{timestamp}.mp4"
-        elif media_type == "animation":
-            return f"animation_{timestamp}.gif"
-        elif message.document and message.document.file_name:
-            return message.document.file_name
-        else:
-            return f"file_{timestamp}.bin"
-    
     async def broadcast_to_all_channels(self, character_doc: Dict[str, Any]) -> List[int]:
-        """Broadcast character to all required channels"""
+        """Broadcast character to all permanent channels"""
         successful_channels = []
         
-        # Combine fixed channels and database channel
-        channels_to_broadcast = self.FIXED_BROADCAST_CHANNELS.copy()
-        
-        # Check database channel
-        try:
-            db_channel = await UploadUtils.get_database_channel()
-            if db_channel and db_channel not in channels_to_broadcast:
-                channels_to_broadcast.append(db_channel)
-        except Exception as e:
-            logger.error(f"Error getting database channel: {e}")
+        if not self.permanent_broadcast_channels:
+            logger.error("No permanent channels configured for broadcasting!")
+            return successful_channels
         
         # Get user info for caption
         user_info = await self.get_user_info(character_doc['added_by']['id'])
@@ -581,8 +568,8 @@ class UploadFlow:
             "first_name": user_info["first_name"]
         })
         
-        # Broadcast to each channel sequentially
-        for channel_id in channels_to_broadcast:
+        # Broadcast to each permanent channel
+        for channel_id in self.permanent_broadcast_channels:
             try:
                 result = await self.broadcast_to_single_channel(channel_id, character_doc, caption)
                 if result:
@@ -596,7 +583,7 @@ class UploadFlow:
         return successful_channels
     
     async def broadcast_to_single_channel(self, channel_id: int, character_doc: Dict[str, Any], caption: str) -> bool:
-        """Broadcast to a single channel with error handling"""
+        """Broadcast to a single channel with enhanced error handling"""
         try:
             # Ensure channel_id is integer
             if not isinstance(channel_id, int):
@@ -606,57 +593,92 @@ class UploadFlow:
                     logger.error(f"❌ Invalid channel ID format: {channel_id}")
                     return False
             
-            # Check if bot can access the channel
-            try:
-                chat = await self.app.get_chat(channel_id)
-            except Exception as e:
-                logger.error(f"❌ Cannot access channel {channel_id}: {e}")
-                return False
-            
-            media_url = character_doc['img_url']
-            media_type = character_doc['img_type']
-            
-            # Send media with retry mechanism
+            # Try multiple access methods
             for attempt in range(3):
                 try:
-                    if media_type == 'photo':
-                        await self.app.send_photo(
-                            chat_id=channel_id,
-                            photo=media_url,
-                            caption=caption
-                        )
-                    elif media_type == 'video':
-                        await self.app.send_video(
-                            chat_id=channel_id,
-                            video=media_url,
-                            caption=caption
-                        )
-                    elif media_type == 'animation':
-                        await self.app.send_animation(
-                            chat_id=channel_id,
-                            animation=media_url,
-                            caption=caption
-                        )
-                    else:
-                        await self.app.send_document(
-                            chat_id=channel_id,
-                            document=media_url,
-                            caption=caption
-                        )
-                    
-                    logger.info(f"✅ Broadcast attempt {attempt + 1} successful for channel {channel_id}")
-                    return True
-                    
+                    # First try: direct send
+                    return await self._send_media_to_channel(channel_id, character_doc, caption, attempt)
                 except Exception as e:
                     logger.warning(f"⚠️ Broadcast attempt {attempt + 1} failed for channel {channel_id}: {e}")
+                    
                     if attempt < 2:
+                        # Wait before retry
                         await asyncio.sleep(1)
+                        
+                        # Try alternative channel formats
+                        if attempt == 1:
+                            # Try different channel ID format
+                            alt_channel_id = self._get_alternative_channel_id(channel_id)
+                            if alt_channel_id != channel_id:
+                                try:
+                                    logger.info(f"Trying alternative channel ID: {alt_channel_id}")
+                                    return await self._send_media_to_channel(alt_channel_id, character_doc, caption, attempt)
+                                except:
+                                    continue
                     else:
-                        raise e
+                        logger.error(f"❌ Final broadcast failed for channel {channel_id}")
+                        return False
                         
         except Exception as e:
-            logger.error(f"❌ Final broadcast failed for channel {channel_id}: {e}")
+            logger.error(f"❌ Broadcast exception for channel {channel_id}: {e}")
             return False
+    
+    async def _send_media_to_channel(self, channel_id: int, character_doc: Dict[str, Any], caption: str, attempt: int) -> bool:
+        """Send media to channel with specific method"""
+        media_url = character_doc['img_url']
+        media_type = character_doc['img_type']
+        
+        try:
+            # Get chat info first to verify access
+            chat = await self.app.get_chat(channel_id)
+            
+            if media_type == 'photo':
+                await self.app.send_photo(
+                    chat_id=channel_id,
+                    photo=media_url,
+                    caption=caption
+                )
+            elif media_type == 'video':
+                await self.app.send_video(
+                    chat_id=channel_id,
+                    video=media_url,
+                    caption=caption
+                )
+            elif media_type == 'animation':
+                await self.app.send_animation(
+                    chat_id=channel_id,
+                    animation=media_url,
+                    caption=caption
+                )
+            else:
+                await self.app.send_document(
+                    chat_id=channel_id,
+                    document=media_url,
+                    caption=caption
+                )
+            
+            logger.info(f"✅ Broadcast attempt {attempt + 1} successful for channel {channel_id} ({chat.title})")
+            return True
+            
+        except Exception as e:
+            raise e
+    
+    def _get_alternative_channel_id(self, channel_id: int) -> int:
+        """Get alternative format for channel ID"""
+        # If -100 prefixed, try without -100
+        if str(channel_id).startswith("-100"):
+            try:
+                return int(str(channel_id).replace("-100", ""))
+            except:
+                pass
+        # If not -100 prefixed and negative, try with -100
+        elif channel_id < 0 and not str(channel_id).startswith("-100"):
+            try:
+                return int(f"-100{abs(channel_id)}")
+            except:
+                pass
+        # Try positive version
+        return abs(channel_id)
     
     async def confirm_upload(self, callback_query: CallbackQuery, session_id: str) -> None:
         """Confirm and save upload with enhanced broadcasting"""
@@ -667,7 +689,7 @@ class UploadFlow:
             "⏳ Processing your upload...\n"
             f"🆔 ID: {session['temp_id']}\n"
             f"👤 Character: {session['character_name']}\n"
-            "📡 Preparing to broadcast..."
+            f"📡 Broadcasting to {len(self.permanent_broadcast_channels)} permanent channels..."
         )
         
         # Get user info
@@ -684,7 +706,7 @@ class UploadFlow:
             "name": session["character_name"],
             "anime": session["anime_name"],
             "rarity": session["rarity"],
-            "id": char_id,  # Store without leading zeros
+            "id": char_id,
             "subtype": "",
             "img_url": session["media_url"],
             "file_extension": session["file_extension"],
@@ -701,7 +723,7 @@ class UploadFlow:
             "catbox_id": session.get("file_id"),
             "size": session.get("size", 0),
             "upload_time": session.get("upload_time", 0),
-            "broadcast_channels": self.FIXED_BROADCAST_CHANNELS,
+            "permanent_channels": self.permanent_broadcast_channels,
             "upload_speed": f"{(session['size'] / 1024) / session['upload_time']:.1f} KB/s" if session.get('upload_time', 0) > 0 else "N/A"
         }
         
@@ -709,12 +731,12 @@ class UploadFlow:
         await collection.insert_one(character_doc)
         logger.info(f"✅ Character saved to database: {character_doc['id']}")
         
-        # Broadcast to all channels
+        # Broadcast to all permanent channels
         await processing_msg.edit(
-            "📡 Broadcasting character to channels...\n"
+            "📡 Broadcasting character to permanent channels...\n"
             f"🆔 ID: {character_doc['id']}\n"
             f"👤 Character: {character_doc['name']}\n"
-            f"📊 Target channels: {len(self.FIXED_BROADCAST_CHANNELS)}"
+            f"📊 Target channels: {len(self.permanent_broadcast_channels)}"
         )
         
         successful_channels = await self.broadcast_to_all_channels(character_doc)
@@ -732,11 +754,11 @@ class UploadFlow:
         
         # Format channel status with emojis
         channel_status = []
-        for channel_id in self.FIXED_BROADCAST_CHANNELS:
+        for channel_id in self.permanent_broadcast_channels:
             if channel_id in successful_channels:
-                channel_status.append(f"Channel {channel_id} - ✅ Success")
+                channel_status.append(f"✅ Channel {channel_id} - Success")
             else:
-                channel_status.append(f"Channel {channel_id} - ❌ Failed")
+                channel_status.append(f"❌ Channel {channel_id} - Failed")
         
         channel_list = "\n".join(channel_status)
         
@@ -762,7 +784,7 @@ class UploadFlow:
 ⏱ Upload Time: {character_doc['upload_time']:.2f}s
 📏 Size: {character_doc.get('size', 0) // 1024} KB
 🌐 Host: Catbox.moe
-📢 Broadcast Status: {len(successful_channels)}/{len(self.FIXED_BROADCAST_CHANNELS)} channels
+📢 Broadcast: {len(successful_channels)}/{len(self.permanent_broadcast_channels)} channels
 👤 Uploaded by: @{user_info['username']}
 
 📊 Upload Statistics:
@@ -770,13 +792,16 @@ class UploadFlow:
 • Fastest Upload: {self.upload_stats['fastest_upload']:.2f}s
 • Average Upload: {avg_upload_time:.2f}s
 
-Character has been:
-✅ Added to database
-✅ Uploaded to Catbox.moe
+✅ Character has been:
+• Added to database
+• Uploaded to Catbox.moe
+• Broadcasted to permanent channels
 
-Channel Broadcast Results:
-{channel_list}"""
-        
+📡 Permanent Channels Results:
+{channel_list}
+
+🚀 Note: These channels will always receive uploads, even after bot restart."""
+
         await callback_query.answer("✅ Upload completed successfully!")
         await processing_msg.edit(success_text)
     
