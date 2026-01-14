@@ -6,19 +6,20 @@ load_dotenv()
 # Bot Configuration
 API_ID = int(os.getenv("API_ID", 26676741))
 API_HASH = os.getenv("API_HASH", "6fbc29f23c15bdb0c7fbbefe65c9193a")
-BOT_TOKEN = os.getenv("BOT_TOKEN", "8440461627:AAFgko_wvAT-jK1lq2UBMtsnJejfcm-8ugo")
+BOT_TOKEN = os.getenv("BOT_TOKEN", "8400868432:AAELK0oQXqxXlZJbusLn2QsgIwYkG6-cqss")
 TOKEN = BOT_TOKEN
 
 # Database Configuration
 MONGO_URL = os.getenv("MONGO_URL", "mongodb+srv://krityamwixs:krityamwixs@cluster0.oqvxe2t.mongodb.net/?appName=Cluster0")
 
-# Catbox.moe Configuration (Required for fast uploads)
-# Optional API key for account uploads (get from: https://catbox.moe/user/api.php)
+# Catbox.moe Configuration
 CATBOX_API_KEY = os.getenv("CATBOX_API_KEY", "")
-# For anonymous uploads, leave empty
 
-# Owner Configuration (Initial owner will be set on first run)
+# Owner Configuration
 OWNER_ID = int(os.getenv("OWNER_ID", 8496760733))
+
+# Permanent Broadcast Channels (These will always be used)
+PERMANENT_BROADCAST_CHANNELS = [-1003364380308, -1003663151888]
 
 # Upload Settings
 MAX_FILE_SIZE = 50 * 1024 * 1024  # 50MB
