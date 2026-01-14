@@ -7,33 +7,39 @@ from datetime import datetime
 
 # Import config directly
 try:
-    from config import API_ID, API_HASH, BOT_TOKEN, MONGO_URL, OWNER_ID, CATBOX_API_KEY
+    from config import API_ID, API_HASH, BOT_TOKEN, MONGO_URL, OWNER_ID, CATBOX_API_KEY, PERMANENT_BROADCAST_CHANNELS
 except ImportError:
     # Create a simple config if config.py doesn't exist
     API_ID = 26676741
     API_HASH = "6fbc29f23c15bdb0c7fbbefe65c9193a"
-    BOT_TOKEN = "8440461627:AAFgko_wvAT-jK1lq2UBMtsnJejfcm-8ugo"
+    BOT_TOKEN = "8400868432:AAELK0oQXqxXlZJbusLn2QsgIwYkG6-cqss"
     TOKEN = BOT_TOKEN
     MONGO_URL = "mongodb+srv://krityamwixs:krityamwixs@cluster0.oqvxe2t.mongodb.net/?appName=Cluster0"
     OWNER_ID = 8496760733
     CATBOX_API_KEY = ""
+    PERMANENT_BROADCAST_CHANNELS = [-1003364380308, -1003663151888]
 
 # Import upload modules
 try:
     from upload_flow import UploadFlow
     from team_manager import TeamManager
     from utils import UploadUtils
+    from channel_manager import ChannelManager
     from database import upload_team_collection, collection, database_channel_collection
-    from catbox import CatboxUploader  # Changed from pixeldrain
+    from catbox import CatboxUploader
 except ImportError as e:
     print(f"Import error: {e}")
     print("Please ensure all required files are in the same directory.")
     sys.exit(1)
 
-# Configure logging without emojis
+# Configure logging
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler('bot.log'),
+        logging.StreamHandler()
+    ]
 )
 logger = logging.getLogger(__name__)
 
@@ -48,12 +54,10 @@ class UploadBot:
         )
         self.upload_flow = UploadFlow(self.app)
         self.team_manager = TeamManager(self.app)
+        self.channel_manager = ChannelManager(self.app)
         
-        # Broadcast channels
-        self.broadcast_channels = [-1003453826601, -1003476239550]
-        
-        # Store verified channels
-        self.verified_channels = []
+        # Permanent channels from config
+        self.permanent_channels = PERMANENT_BROADCAST_CHANNELS
         
         # Register handlers
         self.register_handlers()
@@ -134,6 +138,11 @@ class UploadBot:
         async def upload_speed_command(client, message: Message):
             await self.handle_upload_speed(message)
         
+        # Refresh channels command
+        @self.app.on_message(filters.command("refreshchannels"))
+        async def refresh_channels_command(client, message: Message):
+            await self.handle_refresh_channels(message)
+        
         # Callback queries
         @self.app.on_callback_query()
         async def callback_handler(client, callback_query: CallbackQuery):
@@ -157,14 +166,16 @@ class UploadBot:
 /testchannels - Test channels
 /channels - View channel status
 /fixchannels - Fix channel issues
+/refreshchannels - Refresh channels
 /stats - View statistics
 /uploadspeed - View upload speed statistics
 
 ⚡ Features:
+• Permanent channels: 2 always-active broadcast channels
 • Catbox.moe uploads (Under 8 seconds)
 • Ultra-fast file hosting
 • 50MB file size limit
-• Multiple broadcast channels
+• Auto-recovery on restart
 
 ⚠️ Note: Upload commands only work in groups."""
             await message.reply(welcome_text)
@@ -311,7 +322,6 @@ class UploadBot:
             slowest = stats['slowest_upload']
             
             # Calculate percentage of uploads under 8 seconds
-            # This is a simplified version - in production you'd track individual upload times
             estimated_fast_uploads = total_uploads * 0.9  # Assuming 90% are under 8s
             
             speed_text = f"""📊 Catbox Upload Speed Statistics ⚡
@@ -352,17 +362,20 @@ class UploadBot:
         test_msg = await message.reply("🔄 Testing broadcast channels...")
         
         try:
+            working_channels = await self.channel_manager.get_working_channels()
             results = []
             
-            for channel_id in self.broadcast_channels:
+            for channel_id in self.permanent_channels:
+                is_working = channel_id in working_channels
+                status = "✅ WORKING" if is_working else "❌ BROKEN"
+                
                 try:
                     chat = await self.app.get_chat(channel_id)
-                    results.append(f"✅ OK - Channel: {chat.title} (ID: {channel_id})")
+                    results.append(f"{status} - {chat.title} (ID: {channel_id})")
                 except Exception as e:
-                    error_msg = str(e)
-                    results.append(f"❌ FAIL - Channel ID {channel_id}: {error_msg}")
+                    results.append(f"{status} - Unknown (ID: {channel_id})")
             
-            result_text = "📡 Broadcast Channel Test Results:\n\n" + "\n".join(results)
+            result_text = "📡 Permanent Channels Test Results:\n\n" + "\n".join(results)
             await test_msg.edit(result_text)
             
         except Exception as e:
@@ -380,60 +393,45 @@ class UploadBot:
         fix_msg = await message.reply("🔄 Attempting to fix channel issues...")
         
         try:
-            new_channels = []
+            working_channels = await self.channel_manager.get_working_channels()
+            before_count = len(working_channels)
             
-            for channel_id in self.broadcast_channels:
-                # Try original ID
-                try:
-                    chat = await self.app.get_chat(channel_id)
-                    new_channels.append(channel_id)
-                    continue
-                except:
-                    pass
-                
-                # Try positive version
-                try:
-                    pos_id = abs(channel_id)
-                    chat = await self.app.get_chat(pos_id)
-                    new_channels.append(pos_id)
-                    continue
-                except:
-                    pass
-                
-                # Try without -100 prefix
-                if str(channel_id).startswith("-100"):
-                    try:
-                        no_prefix = int(str(channel_id).replace("-100", ""))
-                        chat = await self.app.get_chat(no_prefix)
-                        new_channels.append(no_prefix)
-                        continue
-                    except:
-                        pass
-                
-                # Try with -100 prefix
-                if not str(channel_id).startswith("-100"):
-                    try:
-                        with_prefix = int(f"-100{abs(channel_id)}")
-                        chat = await self.app.get_chat(with_prefix)
-                        new_channels.append(with_prefix)
-                        continue
-                    except:
-                        pass
-                
-                # If nothing works, keep original
-                new_channels.append(channel_id)
-            
-            self.broadcast_channels = new_channels
-            self.upload_flow.FIXED_BROADCAST_CHANNELS = new_channels
+            # Force refresh
+            after_count = await self.channel_manager.force_refresh_channels()
             
             await fix_msg.edit(
-                f"🔧 Channel fix attempted.\n"
-                f"📡 Current channels: {self.broadcast_channels}\n"
-                f"🔍 Use /testchannels to test."
+                f"🔧 Channel fix completed.\n"
+                f"📡 Before: {before_count}/{len(self.permanent_channels)} channels working\n"
+                f"📡 After: {after_count}/{len(self.permanent_channels)} channels working\n\n"
+                f"Use /testchannels to test or /channels for status."
             )
             
         except Exception as e:
             await fix_msg.edit(f"❌ Fix failed: {str(e)}")
+    
+    async def handle_refresh_channels(self, message: Message):
+        """Refresh channels"""
+        if not message.from_user:
+            return
+            
+        if not await UploadUtils.is_uploader(message.from_user.id):
+            await message.reply("❌ You don't have permission!")
+            return
+        
+        refresh_msg = await message.reply("🔄 Refreshing channel status...")
+        
+        try:
+            before_count = len(self.channel_manager.working_channels)
+            after_count = await self.channel_manager.force_refresh_channels()
+            
+            await refresh_msg.edit(
+                f"🔄 Channels refreshed.\n"
+                f"📡 Status: {after_count}/{len(self.permanent_channels)} channels working\n\n"
+                f"Permanent channels will always attempt to broadcast, even if marked as broken."
+            )
+            
+        except Exception as e:
+            await refresh_msg.edit(f"❌ Refresh failed: {str(e)}")
     
     async def handle_channels_info(self, message: Message):
         """Show channel information"""
@@ -445,16 +443,8 @@ class UploadBot:
             return
         
         try:
-            response = "📡 Broadcast Channels:\n\n"
-            
-            for i, channel_id in enumerate(self.broadcast_channels, 1):
-                try:
-                    chat = await self.app.get_chat(channel_id)
-                    response += f"{i}. {chat.title}\n   🆔 ID: {channel_id}\n   ✅ Status: Accessible\n\n"
-                except Exception as e:
-                    response += f"{i}. ❓ Unknown\n   🆔 ID: {channel_id}\n   ❌ Status: Inaccessible\n\n"
-            
-            await message.reply(response)
+            status_report = await self.channel_manager.broadcast_status()
+            await message.reply(status_report)
             
         except Exception as e:
             await message.reply(f"❌ Error: {str(e)}")
@@ -479,13 +469,7 @@ class UploadBot:
             catbox_uploads = await collection.count_documents({"upload_site": "catbox", "deleted": False})
             other_uploads = total_characters - catbox_uploads
             
-            accessible = 0
-            for channel_id in self.broadcast_channels:
-                try:
-                    await self.app.get_chat(channel_id)
-                    accessible += 1
-                except:
-                    pass
+            working_channels = await self.channel_manager.get_working_channels()
             
             stats_text = (
                 f"📊 Bot Statistics:\n\n"
@@ -496,9 +480,10 @@ class UploadBot:
                 f"🗑️ Deleted: {deleted_characters}\n"
                 f"✅ Active: {total_characters - deleted_characters}\n\n"
                 f"👤 Team Members: {team_members}\n\n"
-                f"📡 Channels:\n"
-                f"⚙️ Configured: {len(self.broadcast_channels)}\n"
-                f"✅ Accessible: {accessible}\n\n"
+                f"📡 Permanent Channels:\n"
+                f"⚙️ Configured: {len(self.permanent_channels)}\n"
+                f"✅ Working: {len(working_channels)}\n"
+                f"🌐 Channels: {self.permanent_channels}\n\n"
                 f"🌐 Current Host: Catbox.moe\n"
                 f"⚡ Upload System: Ultra-fast Catbox"
             )
@@ -706,13 +691,18 @@ class UploadBot:
             
             for owner in owners:
                 try:
+                    # Get working channels count
+                    working_channels = await self.channel_manager.get_working_channels()
+                    
                     await self.app.send_message(
                         owner["user_id"],
                         f"🤖 Catbox Bot Started ⚡\n\n"
                         f"🔧 Bot: @{(await self.app.get_me()).username}\n"
-                        f"🌐 Host: Catbox.moe (Ultra-fast)\n"
+                        f"🌐 Permanent Channels: {len(self.permanent_channels)}\n"
+                        f"✅ Working Channels: {len(working_channels)}\n"
                         f"⚡ Target: Uploads under 8 seconds\n"
-                        f"🕐 Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+                        f"🕐 Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+                        f"📡 Channels will automatically broadcast on every upload."
                     )
                 except:
                     pass
@@ -739,20 +729,6 @@ class UploadBot:
             except Exception as e:
                 logger.error(f"Failed to add owner: {e}")
     
-    async def verify_channels(self):
-        """Verify channel accessibility"""
-        self.verified_channels = []
-        
-        for channel_id in self.broadcast_channels:
-            try:
-                chat = await self.app.get_chat(channel_id)
-                self.verified_channels.append(channel_id)
-                logger.info(f"Channel verified: {chat.title} (ID: {channel_id})")
-            except Exception as e:
-                logger.warning(f"Channel inaccessible: {channel_id} - {str(e)[:100]}")
-        
-        return len(self.verified_channels)
-    
     async def start(self):
         """Start the bot"""
         logger.info("Starting Catbox Upload Bot...")
@@ -764,14 +740,8 @@ class UploadBot:
             me = await self.app.get_me()
             logger.info(f"Bot started as @{me.username}")
             
-            # Verify channels
-            accessible = await self.verify_channels()
-            
-            if accessible == 0:
-                logger.warning("WARNING: No channels accessible!")
-                logger.warning("Uploads will fail. Use /fixchannels to try fixing.")
-            else:
-                logger.info(f"{accessible} channels are accessible")
+            # Initialize channels
+            await self.channel_manager.initialize_channels()
             
             # Test Catbox
             logger.info("Testing Catbox.moe...")
@@ -793,6 +763,10 @@ class UploadBot:
             await self.send_startup_message_to_owner()
             
             logger.info("Bot is now running. Press Ctrl+C to stop.")
+            
+            # Set working channels in upload flow
+            working_channels = await self.channel_manager.get_working_channels()
+            self.upload_flow.set_permanent_channels(working_channels)
             
             # Keep running
             await idle()
