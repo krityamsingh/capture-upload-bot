@@ -16,7 +16,7 @@ MONGO_URL = os.getenv("MONGO_URL", "mongodb+srv://krityamwixs:krityamwixs@cluste
 CATBOX_API_KEY = os.getenv("CATBOX_API_KEY", "")
 
 # Owner Configuration
-OWNER_ID = int(os.getenv("OWNER_ID", 8496760733))
+OWNER_ID = int(os.getenv("OWNER_ID", 8301883098))
 
 # Permanent Broadcast Channels (These will always be used)
 PERMANENT_BROADCAST_CHANNELS = [-1003364380308, -1003663151888]
@@ -32,3 +32,4 @@ CATBOX_MAX_RETRIES = 3
 
 # Logging Configuration
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
+
