@@ -5,13 +5,14 @@ from datetime import datetime
 
 # Import from config
 try:
-    from config import API_ID as api_id, API_HASH as api_hash, BOT_TOKEN as TOKEN, MONGO_URL
+    from config import API_ID as api_id, API_HASH as api_hash, BOT_TOKEN as TOKEN, MONGO_URL, PERMANENT_BROADCAST_CHANNELS
 except ImportError:
     # Fallback values
     api_id = 26676741
     api_hash = "6fbc29f23c15bdb0c7fbbefe65c9193a"
-    TOKEN = "8440461627:AAFgko_wvAT-jK1lq2UBMtsnJejfcm-8ugo"
+    TOKEN = "8400868432:AAELK0oQXqxXlZJbusLn2QsgIwYkG6-cqss"
     MONGO_URL = "mongodb+srv://krityamwixs:krityamwixs@cluster0.oqvxe2t.mongodb.net/?appName=Cluster0"
+    PERMANENT_BROADCAST_CHANNELS = [-1003364380308, -1003663151888]
 
 bot_start_time = datetime.now()
 
@@ -20,7 +21,6 @@ class Client(PyrogramClient):
         super().__init__(*args, **kwargs)
 
     async def resolve_peer(self, id):
-        # Using super class implementation
         return await super().resolve_peer(id)
 
 
@@ -34,7 +34,10 @@ app = Grabberu
 client = AsyncIOMotorClient(MONGO_URL)
 db = client['Character_catcher']
 
-# Existing collections
+# Permanent broadcast channels collection (stores which channels are working)
+permanent_channels_collection = db["permanent_channels"]
+
+# Other existing collections
 collection = db['anime_characters']
 user_totals_collection = db['user_totals']
 user_collection = db["user_collection"]
