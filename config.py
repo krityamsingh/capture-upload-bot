@@ -6,7 +6,7 @@ load_dotenv()
 # Bot Configuration
 API_ID = int(os.getenv("API_ID", 26676741))
 API_HASH = os.getenv("API_HASH", "6fbc29f23c15bdb0c7fbbefe65c9193a")
-BOT_TOKEN = os.getenv("BOT_TOKEN", "8400868432:AAELK0oQXqxXlZJbusLn2QsgIwYkG6-cqss")
+BOT_TOKEN = os.getenv("BOT_TOKEN", "8260866955:AAFyZ2LyG7tmHkOzDBXoZkx8sgcx1U3d7dE")
 TOKEN = BOT_TOKEN
 
 # Database Configuration
@@ -32,4 +32,5 @@ CATBOX_MAX_RETRIES = 3
 
 # Logging Configuration
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
+
 
