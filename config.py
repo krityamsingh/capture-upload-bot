@@ -19,7 +19,7 @@ CATBOX_API_KEY = os.getenv("CATBOX_API_KEY", "")
 OWNER_ID = int(os.getenv("OWNER_ID", 8301883098))
 
 # Permanent Broadcast Channels (These will always be used)
-PERMANENT_BROADCAST_CHANNELS = [-1003364380308, -1003663151888]
+PERMANENT_BROADCAST_CHANNELS = [-1003372587741, -1003663151888]
 
 # Upload Settings
 MAX_FILE_SIZE = 50 * 1024 * 1024  # 50MB
@@ -32,5 +32,6 @@ CATBOX_MAX_RETRIES = 3
 
 # Logging Configuration
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
+
 
 
