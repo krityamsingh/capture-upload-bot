@@ -18,7 +18,7 @@ from dotenv import load_dotenv
 # ==================== CONFIGURATION ====================
 load_dotenv()
 
-API_ID =  # GET FROM my.telegram.org
+API_ID =  26676741 # GET FROM my.telegram.org
 API_HASH = ""  # GET FROM my.telegram.org
 BOT_TOKEN = "8552100143:AAGMjxMfkvoXGTe-PHeRAPYGy-RvHonm7vk"
 
@@ -410,4 +410,5 @@ print(f"👤 Admin: @{ADMIN_USERNAME}")
 print("=" * 50)
 
 app.run()
+
 
