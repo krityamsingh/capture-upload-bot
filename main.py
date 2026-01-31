@@ -25,7 +25,7 @@ BOT_TOKEN = "8552100143:AAGMjxMfkvoXGTe-PHeRAPYGy-RvHonm7vk"
 # Your channels (Bot must be admin)
 CHANNEL_IDS = [-1003430763556, -1002769749639]
 # Your group where bot will enforce rules
-GROUP_ID =  # ADD YOUR GROUP ID HERE
+GROUP_ID = -1002313549356 # ADD YOUR GROUP ID HERE
 
 # MongoDB Configuration (USE A .env FILE IN PRODUCTION!)
 MONGO_URI = "mongodb+srv://Capture:capture@cluster0.7jqepnf.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0"
@@ -410,3 +410,4 @@ print(f"👤 Admin: @{ADMIN_USERNAME}")
 print("=" * 50)
 
 app.run()
+
