@@ -12,3 +12,5 @@ ujson==5.9.0
 pytz==2024.1
 tqdm==4.66.2
 aiofiles==23.2.1
+pyrogram
+pyrogram[raw]
