@@ -5,9 +5,6 @@ from config import MONGO_URL
 client = AsyncIOMotorClient(MONGO_URL)
 db = client['Character_catcher']
 
-# Permanent channels collection
-permanent_channels_collection = db["permanent_channels"]
-
 # Other existing collections
 collection = db['anime_characters']
 user_totals_collection = db['user_totals']
@@ -39,6 +36,5 @@ __all__ = [
     'guild', 'gban', 'clan_collection', 'join_requests_collection',
     'global_ban_users_collection', 'users_collection', 'videos_collection',
     'sales_collection', 'blocked_users_collection', 'db',
-    'upload_team_collection', 'database_channel_collection',
-    'permanent_channels_collection'  # Added
+    'upload_team_collection', 'database_channel_collection'
 ]
