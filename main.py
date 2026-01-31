@@ -4,6 +4,7 @@ import logging
 from datetime import datetime, timedelta
 from pyrogram import Client, filters, idle
 from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
+from pyrogram.errors import MessageNotModified
 from motor.motor_asyncio import AsyncIOMotorClient
 import random
 
@@ -18,8 +19,8 @@ CHANNEL_IDS = [-1003430763556, -1002769749639]
 CHANNEL_USERNAMES = ["Capture_Talks", "BLACKCLV"]
 CHANNEL_LINKS = ["https://t.me/Capture_Talks", "https://t.me/BLACKCLV"]
 
-# Group Configuration (MUST SET THIS - get from @RawDataBot)
-GROUP_ID = -1002313549356  # ⚠️ SET THIS: Example -1001234567890
+# Group Configuration
+GROUP_ID = -1002313549356  # ⚠️ SET THIS: Your group ID from @RawDataBot
 
 # Bot settings
 INSIDE_ADS_BOT = "InsideAds_bot"
@@ -40,7 +41,7 @@ verifications_col = db["verifications"]
 class PermanentVerification:
     def __init__(self, client):
         self.client = client
-        self.user_checks = {}  # Cache for user verification status
+        self.user_checks = {}
     
     async def check_user_channels(self, user_id: int) -> dict:
         """Check which channels user has joined/left"""
@@ -77,12 +78,12 @@ class PermanentVerification:
         }
     
     async def is_user_verified(self, user_id: int) -> bool:
-        """Check if user is currently verified (has joined both channels)"""
+        """Check if user is currently verified"""
         # Check cache first
         cache_key = f"verify_{user_id}"
         if cache_key in self.user_checks:
             cached = self.user_checks[cache_key]
-            if (datetime.now() - cached["checked_at"]).seconds < 300:  # 5 min cache
+            if (datetime.now() - cached["checked_at"]).seconds < 300:
                 return cached["all_joined"]
         
         # Check in database
@@ -219,6 +220,9 @@ class PermanentVerification:
                 )
                 return msg.id
                 
+        except MessageNotModified:
+            # Message already has same content, that's okay
+            return message_id
         except Exception as e:
             print(f"Error sending verification message: {e}")
             return None
@@ -379,13 +383,17 @@ async def verify_callback_handler(client, callback_query: CallbackQuery):
         
         if result["success"]:
             # Success - user verified
-            await callback_query.edit_message_text(
-                text=result["message"],
-                reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("🎯 Get Daily Task", callback_data=f"get_task_{user_id}")],
-                    [InlineKeyboardButton("💬 Start Chatting", callback_data="start_chatting")]
-                ])
-            )
+            try:
+                await callback_query.edit_message_text(
+                    text=result["message"],
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("🎯 Get Daily Task", callback_data=f"get_task_{user_id}")],
+                        [InlineKeyboardButton("💬 Start Chatting", callback_data="start_chatting")]
+                    ])
+                )
+            except MessageNotModified:
+                # Message already has this content, that's fine
+                pass
             
             # Send welcome message
             await callback_query.message.reply_text(
@@ -407,10 +415,14 @@ async def verify_callback_handler(client, callback_query: CallbackQuery):
                 InlineKeyboardButton("🔄 Check Again", callback_data=f"verify_{user_id}")
             ])
             
-            await callback_query.edit_message_text(
-                text=result["message"],
-                reply_markup=InlineKeyboardMarkup(keyboard)
-            )
+            try:
+                await callback_query.edit_message_text(
+                    text=result["message"],
+                    reply_markup=InlineKeyboardMarkup(keyboard)
+                )
+            except MessageNotModified:
+                # Message already has this content, that's fine
+                pass
             
     except Exception as e:
         print(f"Error in verify_callback: {e}")
@@ -461,11 +473,15 @@ async def status_callback_handler(client, callback_query: CallbackQuery):
             InlineKeyboardButton("📢 Join All Channels", callback_data="join_all")
         ])
         
-        await callback_query.edit_message_text(
-            text=status_message,
-            reply_markup=InlineKeyboardMarkup(keyboard),
-            disable_web_page_preview=True
-        )
+        try:
+            await callback_query.edit_message_text(
+                text=status_message,
+                reply_markup=InlineKeyboardMarkup(keyboard),
+                disable_web_page_preview=True
+            )
+        except MessageNotModified:
+            # Message already has same content
+            pass
         
     except Exception as e:
         print(f"Error in status_callback: {e}")
@@ -486,17 +502,21 @@ async def join_all_callback_handler(client, callback_query: CallbackQuery):
         InlineKeyboardButton("🔄 Check Status", callback_data=f"status_{callback_query.from_user.id}")
     ])
     
-    await callback_query.edit_message_text(
-        text="📢 **JOIN ALL CHANNELS**\n\n"
-             "Click the buttons below to join our channels.\n"
-             "After joining BOTH channels, click '✅ I Have Joined Both' to verify.\n\n"
-             "**Channels to join:**\n"
-             f"1. {CHANNEL_USERNAMES[0]}\n"
-             f"2. {CHANNEL_USERNAMES[1]}\n\n"
-             "✅ **Verification is permanent until you leave channels!**",
-        reply_markup=InlineKeyboardMarkup(keyboard),
-        disable_web_page_preview=True
-    )
+    try:
+        await callback_query.edit_message_text(
+            text="📢 **JOIN ALL CHANNELS**\n\n"
+                 "Click the buttons below to join our channels.\n"
+                 "After joining BOTH channels, click '✅ I Have Joined Both' to verify.\n\n"
+                 "**Channels to join:**\n"
+                 f"1. {CHANNEL_USERNAMES[0]}\n"
+                 f"2. {CHANNEL_USERNAMES[1]}\n\n"
+                 "✅ **Verification is permanent until you leave channels!**",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            disable_web_page_preview=True
+        )
+    except MessageNotModified:
+        # Message already has same content
+        pass
 
 @app.on_callback_query(filters.regex(r"^get_task_"))
 async def get_task_callback_handler(client, callback_query: CallbackQuery):
@@ -828,4 +848,3 @@ if __name__ == "__main__":
         import time
         time.sleep(10)
         loop.run_until_complete(main())
-
