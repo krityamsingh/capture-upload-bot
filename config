@@ -8,6 +8,13 @@ class Config:
     # ───────────────────────────
     # Telegram API Credentials
     # ───────────────────────────
+
+
+    API_ID = 26676741
+API_HASH = "6fbc29f23c15bdb0c7fbbefe65c9193a"
+
+
+
     API_ID = int(os.getenv("API_ID", 26676741))
     API_HASH = os.getenv("API_HASH", "6fbc29f23c15bdb0c7fbbefe65c9193a")
     BOT_TOKEN = os.getenv(
@@ -101,6 +108,7 @@ class Config:
 
 # Export config instance
 config = Config()
+
 
 
 
