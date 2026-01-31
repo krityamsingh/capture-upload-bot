@@ -19,7 +19,7 @@ CHANNEL_USERNAMES = ["Capture_Talks", "BLACKCLV"]
 CHANNEL_LINKS = ["https://t.me/Capture_Talks", "https://t.me/BLACKCLV"]
 
 # Group Configuration (MUST SET THIS - get from @RawDataBot)
-GROUP_ID = -1002313549356  # ⚠️ SET THIS: Example -1001234567890
+GROUP_ID = None  # ⚠️ SET THIS: Example -1001234567890
 
 # Bot settings
 INSIDE_ADS_BOT = "InsideAds_bot"
