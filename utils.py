@@ -358,4 +358,5 @@ class UploadUtils:
                 if character:
                     return character
         
+
         return None
