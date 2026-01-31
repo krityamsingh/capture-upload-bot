@@ -15,7 +15,7 @@ MONGO_URI = "mongodb+srv://Capture:capture@cluster0.7jqepnf.mongodb.net/?retryWr
 
 # Channel and Group IDs
 CHANNEL_IDS = [-1003430763556, -1002769749639]  # Your channels
-GROUP_ID = None  # ⚠️ Add your group ID here
+GROUP_ID = -1002313549356  # ⚠️ Add your group ID here
 
 # Bot settings
 INSIDE_ADS_BOT = "InsideAds_bot"
@@ -448,3 +448,4 @@ if __name__ == "__main__":
         loop.run_until_complete(main())
     except KeyboardInterrupt:
         print("\n👋 Bot stopped")
+
