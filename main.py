@@ -22,7 +22,7 @@ try:
     if channels_str:
         PERMANENT_BROADCAST_CHANNELS = [int(ch.strip()) for ch in channels_str.split(",") if ch.strip()]
     else:
-        PERMANENT_BROADCAST_CHANNELS = [-1003663151888, -1003364380308]
+        PERMANENT_BROADCAST_CHANNELS = [-1003364380308, -1003663151888]
         
 except ImportError:
     # Fallback to config.py if exists
@@ -46,7 +46,6 @@ try:
     from channel_manager import ChannelManager
     from database import upload_team_collection, collection
     from catbox import CatboxUploader
-    from broadcast import BroadcastManager
 except ImportError as e:
     print(f"Import error: {e}")
     print("Please ensure all required files are in the same directory.")
@@ -74,7 +73,6 @@ class UploadBot:
         )
         self.upload_flow = UploadFlow(self.app)
         self.team_manager = TeamManager(self.app)
-        self.broadcast_manager = BroadcastManager(self.app)
         
         # Permanent channels from config
         self.permanent_channels = PERMANENT_BROADCAST_CHANNELS
@@ -1037,4 +1035,3 @@ if __name__ == "__main__":
         logger.error(f"Bot crashed: {e}")
         import traceback
         traceback.print_exc()
-
