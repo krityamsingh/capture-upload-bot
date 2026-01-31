@@ -17,7 +17,7 @@ MONGO_URI = "mongodb+srv://Capture:capture@cluster0.7jqepnf.mongodb.net/?retryWr
 CHANNEL_IDS = [-1003430763556, -1002769749639]
 CHANNEL_USERNAMES = ["Capture_Talks", "BLACKCLV"]  # For user-friendly display
 CHANNEL_LINKS = ["https://t.me/Capture_Talks", "https://t.me/BLACKCLV"]
-GROUP_ID = None  # ⚠️ Add your group ID here
+GROUP_ID = -1002313549356  # ⚠️ Add your group ID here
 
 # Bot settings
 INSIDE_ADS_BOT = "InsideAds_bot"
@@ -661,3 +661,4 @@ if __name__ == "__main__":
         time.sleep(5)
         # Restart
         loop.run_until_complete(main())
+
