@@ -85,4 +85,5 @@ class TeamManager:
             text += f"   └─ {username} | ID: `{member['user_id']}`\n"
             text += f"   └─ Role: {member.get('role', 'team_member').title()}\n\n"
         
+
         await message.reply(text)
