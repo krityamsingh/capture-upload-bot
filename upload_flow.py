@@ -20,8 +20,8 @@ class UploadFlow:
         self.sessions: Dict[str, Dict[str, Any]] = {}
         self.update_sessions: Dict[str, Dict[str, Any]] = {}
         
-        # Permanent broadcast channels (will be set after bot initialization)
-        self.permanent_broadcast_channels: List[int] = []
+        # Database broadcast channel (single channel, will be set after bot initialization)
+        self.database_channel: Optional[int] = None
         
         # Cache for user info to reduce API calls
         self.user_cache: Dict[int, Dict[str, Any]] = {}
@@ -34,10 +34,13 @@ class UploadFlow:
             'slowest_upload': 0.0
         }
     
-    def set_permanent_channels(self, channels: List[int]):
-        """Set permanent broadcast channels from ChannelManager"""
-        self.permanent_broadcast_channels = channels
-        logger.info(f"Upload flow set with {len(channels)} permanent channels: {channels}")
+    def set_database_channel(self, channel_id: Optional[int]):
+        """Set database broadcast channel"""
+        self.database_channel = channel_id
+        if channel_id:
+            logger.info(f"Upload flow set with database channel: {channel_id}")
+        else:
+            logger.info("Upload flow: No database channel set")
     
     async def get_user_info(self, user_id: int) -> Dict[str, Any]:
         """Get user info with caching for performance"""
@@ -59,8 +62,8 @@ class UploadFlow:
     
     async def handle_upload_command(self, message: Message) -> None:
         """Handle /upload command with ultra-fast Catbox upload"""
-        if message.chat.type not in [enums.ChatType.GROUP, enums.ChatType.SUPERGROUP]:
-            await message.reply("❌ This command can only be used in groups!")
+        if message.chat.type in [enums.ChatType.PRIVATE, enums.ChatType.BOT]:
+            await message.reply("❌ This command can only be used in groups or channels!")
             return
             
         if not await UploadUtils.is_uploader(message.from_user.id):
@@ -174,9 +177,10 @@ class UploadFlow:
             speed_kb_s = (file_size / 1024) / upload_time if upload_time > 0 else 0
             
             # Get channel status
-            channel_status = f"📡 Channels: {len(self.permanent_broadcast_channels)} permanent"
-            if not self.permanent_broadcast_channels:
-                channel_status = "⚠️ Warning: No channels configured!"
+            if self.database_channel:
+                channel_status = f"📡 Database channel: {self.database_channel}"
+            else:
+                channel_status = "⚠️ Warning: No database channel set! Use /setchannel"
             
             # Send rarity selection with new keyboard
             keyboard = UploadKeyboards.get_rarity_keyboard(session_id)
@@ -543,7 +547,10 @@ class UploadFlow:
             preview_text += f"\n⏱ Upload Time: {session['upload_time']:.2f}s"
         
         # Add channel info
-        preview_text += f"\n📡 Broadcast: {len(self.permanent_broadcast_channels)} permanent channels"
+        if self.database_channel:
+            preview_text += f"\n📡 Broadcast: Database channel (ID: {self.database_channel})"
+        else:
+            preview_text += f"\n⚠️ No database channel set! Character will not be broadcasted."
         
         keyboard = UploadKeyboards.get_confirmation_keyboard(session_id)
         
@@ -553,13 +560,11 @@ class UploadFlow:
             reply_markup=keyboard
         )
     
-    async def broadcast_to_all_channels(self, character_doc: Dict[str, Any]) -> List[int]:
-        """Broadcast character to all permanent channels"""
-        successful_channels = []
-        
-        if not self.permanent_broadcast_channels:
-            logger.error("No permanent channels configured for broadcasting!")
-            return successful_channels
+    async def broadcast_to_database_channel(self, character_doc: Dict[str, Any]) -> bool:
+        """Broadcast character to the database channel (if set)"""
+        if not self.database_channel:
+            logger.error("No database channel set for broadcasting!")
+            return False
         
         # Get user info for caption
         user_info = await self.get_user_info(character_doc['added_by']['id'])
@@ -568,19 +573,18 @@ class UploadFlow:
             "first_name": user_info["first_name"]
         })
         
-        # Broadcast to each permanent channel
-        for channel_id in self.permanent_broadcast_channels:
-            try:
-                result = await self.broadcast_to_single_channel(channel_id, character_doc, caption)
-                if result:
-                    successful_channels.append(channel_id)
-                    logger.info(f"✅ Successfully broadcast to channel: {channel_id}")
-                else:
-                    logger.error(f"❌ Failed to broadcast to channel: {channel_id}")
-            except Exception as e:
-                logger.error(f"❌ Error broadcasting to channel {channel_id}: {e}")
-        
-        return successful_channels
+        # Broadcast to the database channel
+        try:
+            result = await self.broadcast_to_single_channel(self.database_channel, character_doc, caption)
+            if result:
+                logger.info(f"✅ Successfully broadcast to database channel: {self.database_channel}")
+                return True
+            else:
+                logger.error(f"❌ Failed to broadcast to database channel: {self.database_channel}")
+                return False
+        except Exception as e:
+            logger.error(f"❌ Error broadcasting to database channel {self.database_channel}: {e}")
+            return False
     
     async def broadcast_to_single_channel(self, channel_id: int, character_doc: Dict[str, Any], caption: str) -> bool:
         """Broadcast to a single channel with enhanced error handling"""
@@ -722,7 +726,7 @@ class UploadFlow:
             "catbox_id": session.get("file_id"),
             "size": session.get("size", 0),
             "upload_time": session.get("upload_time", 0),
-            "permanent_channels": self.permanent_broadcast_channels,
+            "database_channel": self.database_channel,
             "upload_speed": f"{(session['size'] / 1024) / session['upload_time']:.1f} KB/s" if session.get('upload_time', 0) > 0 else "N/A"
         }
         
@@ -730,20 +734,20 @@ class UploadFlow:
         await collection.insert_one(character_doc)
         logger.info(f"✅ Character saved to database: {character_doc['id']}")
         
-        # Check if we have channels
-        if not self.permanent_broadcast_channels:
+        # Check if we have a database channel set
+        if not self.database_channel:
             await processing_msg.edit(
-                "⚠️ Warning: No broadcast channels configured!\n"
+                "⚠️ Warning: No database channel configured!\n"
                 "Character will be saved to database but NOT broadcasted.\n\n"
-                "To fix: Add bot to channels and use /refreshchannels"
+                "To fix: Use /setchannel to set a broadcast channel."
             )
             # Still save character but skip broadcasting
-            successful_channels = []
+            broadcast_success = False
         else:
             await processing_msg.edit(
-                f"📡 Broadcasting to {len(self.permanent_broadcast_channels)} channels..."
+                f"📡 Broadcasting to database channel (ID: {self.database_channel})..."
             )
-            successful_channels = await self.broadcast_to_all_channels(character_doc)
+            broadcast_success = await self.broadcast_to_database_channel(character_doc)
         
         # Clean up memory
         if "file_bytes" in session:
@@ -755,16 +759,6 @@ class UploadFlow:
         # Clean session from memory
         if session_id in self.sessions:
             del self.sessions[session_id]
-        
-        # Format channel status with emojis
-        channel_status = []
-        for channel_id in self.permanent_broadcast_channels:
-            if channel_id in successful_channels:
-                channel_status.append(f"✅ Channel {channel_id} - Success")
-            else:
-                channel_status.append(f"❌ Channel {channel_id} - Failed")
-        
-        channel_list = "\n".join(channel_status)
         
         # Get rarity emoji
         from keyboards import UploadKeyboards
@@ -788,7 +782,7 @@ class UploadFlow:
 ⏱ Upload Time: {character_doc['upload_time']:.2f}s
 📏 Size: {character_doc.get('size', 0) // 1024} KB
 🌐 Host: Catbox.moe
-📢 Broadcast: {len(successful_channels)}/{len(self.permanent_broadcast_channels)} channels
+📢 Broadcast: {'✅ Success' if broadcast_success else '❌ Failed'}
 👤 Uploaded by: @{user_info['username']}
 
 📊 Upload Statistics:
@@ -799,12 +793,9 @@ class UploadFlow:
 ✅ Character has been:
 • Added to database
 • Uploaded to Catbox.moe
-• Broadcasted to permanent channels
+• {'Broadcasted to database channel' if broadcast_success else 'NOT broadcasted (no channel set)'}
 
-📡 Permanent Channels Results:
-{channel_list}
-
-🚀 Note: These channels will always receive uploads, even after bot restart."""
+{f'📡 Database Channel: {self.database_channel}' if self.database_channel else '⚠️ No database channel set. Use /setchannel to set one.'}"""
 
         await callback_query.answer("✅ Upload completed successfully!")
         await processing_msg.edit(success_text)
