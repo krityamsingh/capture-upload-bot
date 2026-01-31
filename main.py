@@ -1,611 +1,412 @@
-#!/usr/bin/env python3
-"""
-Telegram Upload Bot with MongoDB - Heroku Compatible
-Simplified working version
-"""
-
+import asyncio
 import os
-import logging
-import json
-import hashlib
-import re
-from datetime import datetime, timedelta
-from typing import Dict, List, Optional, Tuple
-from io import BytesIO
-from functools import wraps
+from datetime import datetime
+from typing import Optional
 
-from dotenv import load_dotenv
-from pymongo import MongoClient, DESCENDING
-from pymongo.errors import ConnectionFailure, DuplicateKeyError
-from bson import ObjectId
-from bson.errors import InvalidId
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, User
-from telegram.constants import ChatAction
-from telegram.ext import (
-    Application,
-    CommandHandler,
-    MessageHandler,
-    CallbackQueryHandler,
-    ContextTypes,
-    filters,
+from pyrogram import Client, filters, enums
+from pyrogram.types import (
+    Message,
+    InlineKeyboardMarkup,
+    InlineKeyboardButton,
+    CallbackQuery,
+    User,
+    ChatJoinRequest
 )
-from telegram.error import BadRequest
-
-# ==================== LOAD ENVIRONMENT ====================
-load_dotenv()
+from motor.motor_asyncio import AsyncIOMotorClient
+from dotenv import load_dotenv
 
 # ==================== CONFIGURATION ====================
-class Config:
-    BOT_TOKEN = os.getenv("BOT_TOKEN")
-    MONGODB_URI = os.getenv("MONGODB_URI", os.getenv("MONGODB_URI", "mongodb://localhost:27017"))
-    DATABASE_NAME = os.getenv("DATABASE_NAME", "upload_bot")
-    ADMIN_IDS = list(map(int, os.getenv("ADMIN_IDS", "").split(','))) if os.getenv("ADMIN_IDS") else []
-    MAX_FILE_SIZE = int(os.getenv("MAX_FILE_SIZE", 200 * 1024 * 1024))  # 200MB
+load_dotenv()
 
-# ==================== LOGGING ====================
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+API_ID =  # GET FROM my.telegram.org
+API_HASH = ""  # GET FROM my.telegram.org
+BOT_TOKEN = "8552100143:AAGMjxMfkvoXGTe-PHeRAPYGy-RvHonm7vk"
+
+# Your channels (Bot must be admin)
+CHANNEL_IDS = [-1003430763556, -1002769749639]
+# Your group where bot will enforce rules
+GROUP_ID =  # ADD YOUR GROUP ID HERE
+
+# MongoDB Configuration (USE A .env FILE IN PRODUCTION!)
+MONGO_URI = "mongodb+srv://Capture:capture@cluster0.7jqepnf.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0"
+DATABASE_NAME = "telegram_task_bot"
+
+# InsideAds bot username (without @)
+INSIDE_ADS_BOT = "InsideAds_bot"
+
+# Admin to tag for rewards
+ADMIN_USERNAME = "rajputanaxironman"
+
+# ==================== DATABASE SETUP ====================
+mongo_client = AsyncIOMotorClient(MONGO_URI)
+db = mongo_client[DATABASE_NAME]
+
+# Collections
+users_col = db["users"]
+posts_col = db["posts"]
+tasks_col = db["tasks"]
+clicks_col = db["clicks"]
+
+# ==================== BOT INITIALIZATION ====================
+app = Client(
+    "task_bot",
+    api_id=API_ID,
+    api_hash=API_HASH,
+    bot_token=BOT_TOKEN,
+    in_memory=True
 )
-logger = logging.getLogger(__name__)
-
-# ==================== DATABASE ====================
-class Database:
-    def __init__(self):
-        try:
-            self.client = MongoClient(Config.MONGODB_URI, serverSelectionTimeoutMS=5000)
-            self.client.server_info()
-            self.db = self.client[Config.DATABASE_NAME]
-            
-            # Collections
-            self.files = self.db.files
-            self.users = self.db.users
-            
-            # Create indexes
-            self._create_indexes()
-            logger.info("✅ Database initialized successfully")
-            
-        except ConnectionFailure as e:
-            logger.error(f"❌ Database connection failed: {e}")
-            raise
-    
-    def _create_indexes(self):
-        """Create database indexes"""
-        self.files.create_index([("file_id", 1)], unique=True, sparse=True)
-        self.files.create_index([("user_id", 1)])
-        self.files.create_index([("upload_date", DESCENDING)])
-        self.files.create_index([("tags", 1)])
-        self.users.create_index([("user_id", 1)], unique=True)
-        logger.info("✅ Database indexes created")
-
-# Initialize database
-try:
-    db = Database()
-except:
-    logger.error("Failed to initialize database")
-    # Continue without database for now
 
 # ==================== HELPER FUNCTIONS ====================
-def format_size(size_bytes: int) -> str:
-    """Convert bytes to human readable format"""
-    if size_bytes == 0:
-        return "0 B"
-    units = ["B", "KB", "MB", "GB", "TB"]
-    i = 0
-    while size_bytes >= 1024 and i < len(units) - 1:
-        size_bytes /= 1024.0
-        i += 1
-    return f"{size_bytes:.2f} {units[i]}"
-
-def parse_tags(text: str) -> List[str]:
-    """Parse hashtags from text"""
-    tags = re.findall(r'#(\w+)', text)
-    return [tag.lower() for tag in tags]
-
-# ==================== USER MANAGEMENT ====================
-async def ensure_user(user: User):
-    """Ensure user exists in database"""
-    user_data = {
-        "user_id": user.id,
-        "username": user.username,
-        "first_name": user.first_name,
-        "last_name": user.last_name,
-        "join_date": datetime.now(),
-        "last_seen": datetime.now(),
-        "storage_used": 0,
-        "total_uploads": 0,
-    }
-    
+async def is_user_joined(user_id: int) -> bool:
+    """Check if user has joined both channels"""
     try:
-        db.users.update_one(
-            {"user_id": user.id},
-            {"$setOnInsert": user_data, "$set": {"last_seen": datetime.now()}},
+        for channel_id in CHANNEL_IDS:
+            member = await app.get_chat_member(channel_id, user_id)
+            if member.status in [enums.ChatMemberStatus.LEFT, enums.ChatMemberStatus.BANNED]:
+                return False
+        return True
+    except:
+        return False
+
+async def save_new_post(post_message: Message):
+    """Save posts from InsideAds bot to database"""
+    if not post_message.from_user:
+        return
+    
+    if post_message.from_user.username == INSIDE_ADS_BOT:
+        post_data = {
+            "message_id": post_message.id,
+            "channel_id": post_message.chat.id,
+            "date": post_message.date,
+            "text": post_message.text or post_message.caption or "",
+            "links": [],
+            "has_button": False
+        }
+        
+        # Extract links from text
+        if post_message.text:
+            import re
+            links = re.findall(r'https?://[^\s]+', post_message.text)
+            post_data["links"] = links
+        
+        # Check for inline buttons
+        if post_message.reply_markup:
+            post_data["has_button"] = True
+            # Extract button links
+            for row in post_message.reply_markup.inline_keyboard:
+                for button in row:
+                    if button.url:
+                        post_data["links"].append(button.url)
+        
+        await posts_col.update_one(
+            {"message_id": post_message.id, "channel_id": post_message.chat.id},
+            {"$set": post_data},
             upsert=True
         )
-    except:
-        pass  # Silently fail if database is not available
+        print(f"📥 Saved post {post_message.id} from {INSIDE_ADS_BOT}")
+
+async def assign_task_to_user(user_id: int):
+    """Assign 2-3 random posts as task to user"""
+    # Get recent active posts (last 24 hours)
+    yesterday = datetime.now().timestamp() - 86400
+    recent_posts = await posts_col.find({
+        "date": {"$gte": yesterday}
+    }).to_list(length=10)
     
-    return user_data
-
-# ==================== COMMAND HANDLERS ====================
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Start command"""
-    user = update.effective_user
-    await ensure_user(user)
+    if not recent_posts:
+        return None
     
-    welcome_text = """
-🌟 *Welcome to Upload Bot* 🌟
-
-I can help you store and organize your files!
-
-*Available Commands:*
-/start - Start the bot
-/help - Show help message
-/myfiles - List your uploaded files
-/search - Search files by tags
-/stats - Your statistics
-
-*How to use:*
-1. Send me any file (document, photo, video, audio)
-2. Add tags in caption: #work #important
-3. Set privacy: Add !private or !public
-
-*Examples:*
-• Send a photo with caption: "#vacation !private Beach sunset"
-• Search: /search #vacation
-"""
+    import random
+    num_posts = random.randint(2, 3)
+    selected_posts = random.sample(recent_posts, min(num_posts, len(recent_posts)))
     
-    await update.message.reply_text(welcome_text, parse_mode='Markdown')
-
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Help command"""
-    help_text = """
-*Bot Commands:*
-
-/start - Start the bot
-/help - Show this help
-/myfiles - List your files
-/search <tags> - Search files
-/stats - Your statistics
-/info <file_id> - Get file info
-
-*Upload Instructions:*
-Just send me any file! You can add:
-• Tags: #work #project #important
-• Privacy: !private (only you) or !public (everyone)
-
-*Search Examples:*
-/search #work
-/search #vacation #beach
-"""
-    
-    await update.message.reply_text(help_text, parse_mode='Markdown')
-
-async def my_files(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """List user's files"""
-    user = update.effective_user
-    
-    try:
-        files = list(db.files.find(
-            {"user_id": user.id}
-        ).sort("upload_date", DESCENDING).limit(10))
-        
-        if not files:
-            await update.message.reply_text("📭 You haven't uploaded any files yet.")
-            return
-        
-        response = "📁 *Your Files*\n\n"
-        
-        for idx, file in enumerate(files, 1):
-            file_date = file['upload_date'].strftime("%Y-%m-%d")
-            file_size = format_size(file['size'])
-            
-            response += (
-                f"*{idx}.* `{file['file_name']}`\n"
-                f"   📏 {file_size} | 📅 {file_date}\n"
-                f"   🏷️ {', '.join(file.get('tags', ['No tags']))}\n"
-                f"   🔗 ID: `{file['_id']}`\n\n"
-            )
-        
-        await update.message.reply_text(response, parse_mode='Markdown')
-        
-    except Exception as e:
-        logger.error(f"Error fetching files: {e}")
-        await update.message.reply_text("❌ Failed to fetch your files.")
-
-async def search_files(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Search files by tags"""
-    if not context.args:
-        await update.message.reply_text("Usage: /search #tag1 #tag2")
-        return
-    
-    user = update.effective_user
-    tags = parse_tags(' '.join(context.args))
-    
-    if not tags:
-        await update.message.reply_text("Please use hashtags like: /search #work #important")
-        return
-    
-    try:
-        # Search in user's files and public files
-        query = {
-            "$or": [
-                {"user_id": user.id},  # User's own files
-                {"privacy": "public"}   # Public files
-            ],
-            "tags": {"$all": tags}
+    # Create task record
+    task_posts = []
+    for post in selected_posts:
+        task_post = {
+            "post_id": post["_id"],
+            "message_id": post["message_id"],
+            "channel_id": post["channel_id"],
+            "completed": False,
+            "clicked_at": None
         }
+        task_posts.append(task_post)
+    
+    task_data = {
+        "user_id": user_id,
+        "posts": task_posts,
+        "assigned_at": datetime.now(),
+        "completed_at": None,
+        "status": "assigned"
+    }
+    
+    result = await tasks_col.insert_one(task_data)
+    return str(result.inserted_id), selected_posts
+
+async def track_click(user_id: int, url: str):
+    """Track when a user clicks a link"""
+    click_data = {
+        "user_id": user_id,
+        "url": url,
+        "clicked_at": datetime.now(),
+        "credited": False
+    }
+    await clicks_col.insert_one(click_data)
+    
+    # Find and mark task post as completed
+    post = await posts_col.find_one({"links": url})
+    if post:
+        await tasks_col.update_one(
+            {"user_id": user_id, "posts.post_id": post["_id"]},
+            {"$set": {
+                "posts.$.completed": True,
+                "posts.$.clicked_at": datetime.now()
+            }}
+        )
+
+# ==================== MESSAGE HANDLERS ====================
+@app.on_message(filters.chat(CHANNEL_IDS))
+async def handle_channel_post(client: Client, message: Message):
+    """Monitor posts in channels"""
+    await save_new_post(message)
+
+@app.on_message(filters.group & filters.incoming)
+async def handle_group_message(client: Client, message: Message):
+    """Enforce channel join in group"""
+    if message.chat.id != GROUP_ID:
+        return
+    
+    user_id = message.from_user.id
+    
+    # Ignore messages from admins/bots
+    if message.from_user.is_bot:
+        return
+    
+    # Check if user has joined channels
+    joined = await is_user_joined(user_id)
+    
+    if not joined:
+        # Delete user's message
+        await message.delete()
         
-        files = list(db.files.find(query).limit(10))
+        # Send warning
+        warning_msg = await message.reply_text(
+            f"👤 **@{message.from_user.username or message.from_user.id}**\n\n"
+            "⚠️ **You must join both channels first!**\n\n"
+            f"🔗 {CHANNEL_IDS[0]}\n"
+            f"🔗 {CHANNEL_IDS[1]}\n\n"
+            "Join both channels and try again.",
+            reply_to_message_id=message.id
+        )
         
-        if not files:
-            await update.message.reply_text("🔍 No files found with these tags.")
-            return
+        # Delete warning after 10 seconds
+        await asyncio.sleep(10)
+        await warning_msg.delete()
+
+@app.on_message(filters.command("task"))
+async def handle_task_command(client: Client, message: Message):
+    """Handle /task command with inline interface"""
+    user_id = message.from_user.id
+    
+    # Check channel membership
+    if not await is_user_joined(user_id):
+        channels_text = "\n".join([f"• Channel {i+1}" for i in range(len(CHANNEL_IDS))])
+        await message.reply_text(
+            f"❌ **You must join all channels first!**\n\n"
+            f"{channels_text}\n\n"
+            "Join them and try /task again."
+        )
+        return
+    
+    # Assign new task
+    task_id, posts = await assign_task_to_user(user_id)
+    
+    if not posts:
+        await message.reply_text("📭 No posts available for tasks yet. Check back later!")
+        return
+    
+    # Create inline buttons for each post
+    keyboard = []
+    for i, post in enumerate(posts, 1):
+        # Get channel info for the post
+        try:
+            chat = await client.get_chat(post["channel_id"])
+            channel_name = chat.title
+        except:
+            channel_name = f"Channel {i}"
         
-        response = f"🔍 *Found {len(files)} files*\n\n"
+        # Create button that links directly to the post
+        post_link = f"https://t.me/c/{str(post['channel_id']).replace('-100', '')}/{post['message_id']}"
         
-        for idx, file in enumerate(files, 1):
-            privacy_icon = "🔒" if file.get('privacy') == 'private' else "🌐"
-            response += (
-                f"*{idx}.* {privacy_icon} `{file['file_name']}`\n"
-                f"   👤 {file.get('username', 'Unknown')}\n"
-                f"   🔗 ID: `{file['_id']}`\n\n"
+        keyboard.append([
+            InlineKeyboardButton(
+                f"📰 Post {i} - {channel_name[:15]}",
+                url=post_link
             )
-        
-        await update.message.reply_text(response, parse_mode='Markdown')
-        
-    except Exception as e:
-        logger.error(f"Error searching files: {e}")
-        await update.message.reply_text("❌ Search failed.")
-
-async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Show user statistics"""
-    user = update.effective_user
+        ])
     
-    try:
-        user_data = db.users.find_one({"user_id": user.id}) or {}
-        total_files = db.files.count_documents({"user_id": user.id})
-        
-        stats_text = f"""
-📊 *Your Statistics*
+    # Add completion button
+    keyboard.append([
+        InlineKeyboardButton(
+            "✅ I Visited All Posts",
+            callback_data=f"complete_task_{task_id}"
+        )
+    ])
+    
+    keyboard.append([
+        InlineKeyboardButton(
+            "🔄 Check Progress",
+            callback_data=f"check_progress_{task_id}"
+        )
+    ])
+    
+    await message.reply_text(
+        f"🎯 **DAILY TASK ASSIGNED**\n\n"
+        f"**Posts to visit:** {len(posts)}\n"
+        f"**User:** @{message.from_user.username or message.from_user.id}\n\n"
+        "**Instructions:**\n"
+        "1. Click each post button below\n"
+        "2. Click ALL links in each post\n"
+        "3. Click '✅ I Visited All Posts' when done\n\n"
+        "⚠️ **You MUST click all links for verification**",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
 
-👤 *User Info:*
-• Username: @{user.username or 'N/A'}
-• User ID: `{user.id}`
-• Joined: {user_data.get('join_date', datetime.now()).strftime('%Y-%m-%d')}
-
-📁 *Files:*
-• Total Files: {total_files}
-• Storage Used: {format_size(user_data.get('storage_used', 0))}
-
-📈 *Activity:*
-• Total Uploads: {user_data.get('total_uploads', 0)}
-• Last Seen: {user_data.get('last_seen', datetime.now()).strftime('%Y-%m-%d %H:%M')}
-"""
-        
-        await update.message.reply_text(stats_text, parse_mode='Markdown')
-        
-    except Exception as e:
-        logger.error(f"Error getting stats: {e}")
-        await update.message.reply_text("❌ Failed to get statistics.")
-
-async def file_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Get file information"""
-    if not context.args:
-        await update.message.reply_text("Usage: /info <file_id>")
+@app.on_callback_query(filters.regex(r"^complete_task_"))
+async def handle_completion(client: Client, callback_query: CallbackQuery):
+    """Handle task completion"""
+    task_id = callback_query.data.split("_")[-1]
+    user_id = callback_query.from_user.id
+    
+    # Get task
+    task = await tasks_col.find_one({"_id": task_id})
+    if not task:
+        await callback_query.answer("Task not found!", show_alert=True)
         return
     
-    file_id = context.args[0]
-    user = update.effective_user
+    # Check if all posts are completed
+    all_completed = all(post.get("completed", False) for post in task["posts"])
     
-    try:
-        file_data = db.files.find_one({"_id": ObjectId(file_id)})
-    except InvalidId:
-        await update.message.reply_text("❌ Invalid file ID format.")
-        return
-    
-    if not file_data:
-        await update.message.reply_text("❌ File not found.")
-        return
-    
-    # Check permissions
-    if file_data.get('privacy') == 'private' and file_data['user_id'] != user.id:
-        await update.message.reply_text("⛔ You don't have permission to view this file.")
-        return
-    
-    # Format file info
-    info_text = f"""
-📄 *File Information*
-
-📛 *Name:* `{file_data['file_name']}`
-📁 *Type:* {file_data['file_type']}
-📏 *Size:* {format_size(file_data['size'])}
-📅 *Uploaded:* {file_data['upload_date'].strftime('%Y-%m-%d %H:%M:%S')}
-👤 *Uploader:* @{file_data.get('username', 'Unknown')}
-🔒 *Privacy:* {file_data.get('privacy', 'public')}
-🏷️ *Tags:* {', '.join(file_data.get('tags', [])) or 'None'}
-
-📊 *Statistics:*
-👁️ Views: {file_data.get('views', 0)}
-📥 Downloads: {file_data.get('downloads', 0)}
-"""
-    
-    keyboard = [
-        [InlineKeyboardButton("📥 Download", callback_data=f"download:{file_data['_id']}")],
-    ]
-    
-    if user.id == file_data['user_id']:
-        keyboard[0].append(InlineKeyboardButton("🗑️ Delete", callback_data=f"delete:{file_data['_id']}"))
-    
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.message.reply_text(info_text, parse_mode='Markdown', reply_markup=reply_markup)
-
-# ==================== FILE UPLOAD HANDLER ====================
-async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle incoming files"""
-    user = update.effective_user
-    chat = update.effective_chat
-    
-    # Send typing action
-    await update.message.chat.send_action(ChatAction.UPLOAD_DOCUMENT)
-    
-    await ensure_user(user)
-    
-    # Determine file type
-    if update.message.document:
-        file_obj = update.message.document
-        file_type = "document"
-    elif update.message.photo:
-        file_obj = update.message.photo[-1]
-        file_type = "photo"
-    elif update.message.video:
-        file_obj = update.message.video
-        file_type = "video"
-    elif update.message.audio:
-        file_obj = update.message.audio
-        file_type = "audio"
-    elif update.message.voice:
-        file_obj = update.message.voice
-        file_type = "voice"
-    elif update.message.video_note:
-        file_obj = update.message.video_note
-        file_type = "video_note"
-    else:
-        await update.message.reply_text("❌ Unsupported file type.")
-        return
-    
-    # Check file size
-    if file_obj.file_size > Config.MAX_FILE_SIZE:
-        await update.message.reply_text(f"❌ File too large! Max size: {format_size(Config.MAX_FILE_SIZE)}")
-        return
-    
-    # Parse caption
-    caption = update.message.caption or ""
-    tags = parse_tags(caption)
-    
-    # Parse privacy
-    privacy = "public"
-    if "!private" in caption.lower():
-        privacy = "private"
-    
-    try:
-        # Prepare file metadata
-        file_metadata = {
-            "file_id": file_obj.file_id,
-            "file_unique_id": file_obj.file_unique_id,
-            "file_name": getattr(file_obj, 'file_name', f"{file_type}_{file_obj.file_id}"),
-            "file_type": file_type,
-            "size": file_obj.file_size,
-            "user_id": user.id,
-            "username": user.username or user.first_name,
-            "chat_id": chat.id,
-            "upload_date": datetime.now(),
-            "caption": caption,
-            "tags": tags,
-            "privacy": privacy,
-            "views": 0,
-            "downloads": 0,
-        }
-        
-        # Save to database
-        result = db.files.insert_one(file_metadata)
+    if all_completed:
+        # Mark task as completed
+        await tasks_col.update_one(
+            {"_id": task_id},
+            {"$set": {
+                "status": "completed",
+                "completed_at": datetime.now()
+            }}
+        )
         
         # Update user stats
-        db.users.update_one(
-            {"user_id": user.id},
-            {
-                "$inc": {
-                    "storage_used": file_obj.file_size,
-                    "total_uploads": 1
-                },
-                "$set": {"last_seen": datetime.now()}
-            }
+        await users_col.update_one(
+            {"user_id": user_id},
+            {"$inc": {"completed_tasks": 1}},
+            upsert=True
         )
         
-        # Send confirmation
-        message = (
-            f"✅ *File Uploaded Successfully!*\n\n"
-            f"📛 *Name:* `{file_metadata['file_name']}`\n"
-            f"📁 *Type:* {file_metadata['file_type']}\n"
-            f"📏 *Size:* {format_size(file_metadata['size'])}\n"
-            f"🔒 *Privacy:* {privacy}\n"
-            f"🏷️ *Tags:* {', '.join(tags) if tags else 'None'}\n"
-            f"🆔 *ID:* `{result.inserted_id}`\n\n"
-            f"Use /info `{result.inserted_id}` for details."
-        )
-        
-        await update.message.reply_text(message, parse_mode='Markdown')
-        
-    except DuplicateKeyError:
-        await update.message.reply_text("⚠️ This file has already been uploaded.")
-    except Exception as e:
-        logger.error(f"Error saving file: {e}", exc_info=True)
-        await update.message.reply_text("❌ Failed to save file. Please try again.")
-
-# ==================== CALLBACK HANDLER ====================
-async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle button clicks"""
-    query = update.callback_query
-    await query.answer()
-    
-    data = query.data
-    
-    if data.startswith("download:"):
-        file_id = data.split(":")[1]
-        await download_file(update, context, file_id)
-    elif data.startswith("delete:"):
-        file_id = data.split(":")[1]
-        await delete_file(update, context, file_id)
-
-async def download_file(update: Update, context: ContextTypes.DEFAULT_TYPE, file_id: str):
-    """Download file"""
-    query = update.callback_query
-    
-    try:
-        file_data = db.files.find_one({"_id": ObjectId(file_id)})
-    except InvalidId:
-        await query.edit_message_text("❌ Invalid file ID.")
-        return
-    
-    if not file_data:
-        await query.edit_message_text("❌ File not found.")
-        return
-    
-    # Check permissions
-    if file_data.get('privacy') == 'private' and file_data['user_id'] != update.effective_user.id:
-        await query.edit_message_text("⛔ You don't have permission to download this file.")
-        return
-    
-    await query.message.chat.send_action(ChatAction.UPLOAD_DOCUMENT)
-    
-    try:
-        # Send file based on type
-        if file_data['file_type'] == 'document':
-            await context.bot.send_document(
-                chat_id=query.message.chat_id,
-                document=file_data['file_id'],
-                caption=f"📄 {file_data['file_name']}",
-                filename=file_data['file_name']
-            )
-        elif file_data['file_type'] == 'photo':
-            await context.bot.send_photo(
-                chat_id=query.message.chat_id,
-                photo=file_data['file_id'],
-                caption=f"🖼️ {file_data['file_name']}"
-            )
-        elif file_data['file_type'] == 'video':
-            await context.bot.send_video(
-                chat_id=query.message.chat_id,
-                video=file_data['file_id'],
-                caption=f"🎥 {file_data['file_name']}"
-            )
-        elif file_data['file_type'] == 'audio':
-            await context.bot.send_audio(
-                chat_id=query.message.chat_id,
-                audio=file_data['file_id'],
-                caption=f"🎵 {file_data['file_name']}"
-            )
-        
-        # Update download count
-        db.files.update_one(
-            {"_id": ObjectId(file_id)},
-            {"$inc": {"downloads": 1}}
-        )
-        
-    except BadRequest as e:
-        logger.error(f"Error sending file: {e}")
-        await query.edit_message_text("❌ Failed to send file.")
-
-async def delete_file(update: Update, context: ContextTypes.DEFAULT_TYPE, file_id: str):
-    """Delete file"""
-    query = update.callback_query
-    
-    try:
-        file_data = db.files.find_one({"_id": ObjectId(file_id)})
-    except InvalidId:
-        await query.edit_message_text("❌ Invalid file ID.")
-        return
-    
-    if not file_data:
-        await query.edit_message_text("❌ File not found.")
-        return
-    
-    # Check ownership
-    if file_data['user_id'] != update.effective_user.id:
-        await query.edit_message_text("⛔ You can only delete your own files.")
-        return
-    
-    try:
-        # Delete from database
-        result = db.files.delete_one({"_id": ObjectId(file_id)})
-        
-        if result.deleted_count > 0:
-            # Update user storage
-            db.users.update_one(
-                {"user_id": update.effective_user.id},
-                {"$inc": {"storage_used": -file_data['size']}}
-            )
-            
-            await query.edit_message_text(f"✅ File `{file_id}` deleted.")
-        else:
-            await query.edit_message_text("❌ Failed to delete file.")
-            
-    except Exception as e:
-        logger.error(f"Error deleting file: {e}")
-        await query.edit_message_text("❌ Failed to delete file.")
-
-# ==================== ERROR HANDLER ====================
-async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle errors"""
-    logger.error(f"Update {update} caused error: {context.error}", exc_info=True)
-    
-    if update and update.effective_message:
+        # Notify admin
         try:
-            await update.effective_message.reply_text(
-                "❌ An error occurred. Please try again later."
+            admin_message = (
+                f"🎉 **TASK COMPLETED!**\n\n"
+                f"**User:** @{callback_query.from_user.username or user_id}\n"
+                f"**Task ID:** {task_id[:8]}...\n"
+                f"**Posts clicked:** {len(task['posts'])}\n\n"
+                f"Please send reward to @{ADMIN_USERNAME}"
             )
-        except:
-            pass
+            
+            # Send to first channel admin
+            await client.send_message(
+                chat_id=CHANNEL_IDS[0],
+                text=admin_message
+            )
+        except Exception as e:
+            print(f"Failed to notify admin: {e}")
+        
+        await callback_query.edit_message_text(
+            f"✅ **TASK COMPLETED SUCCESSFULLY!**\n\n"
+            f"**User:** @{callback_query.from_user.username or user_id}\n"
+            f"**Posts visited:** {len(task['posts'])}\n"
+            f"**Completed at:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+            f"🏆 **Admin @{ADMIN_USERNAME} has been notified!**\n"
+            f"Wait for your reward.\n\n"
+            "Thank you for participating! 🎊"
+        )
+    else:
+        # Show which posts are pending
+        pending = [i+1 for i, post in enumerate(task["posts"]) if not post.get("completed", False)]
+        await callback_query.answer(
+            f"❌ Still pending: Posts {', '.join(map(str, pending))}",
+            show_alert=True
+        )
 
-# ==================== MAIN FUNCTION ====================
-def main():
-    """Start the bot"""
-    if not Config.BOT_TOKEN:
-        logger.error("❌ BOT_TOKEN environment variable is required!")
-        exit(1)
+@app.on_callback_query(filters.regex(r"^check_progress_"))
+async def check_progress(client: Client, callback_query: CallbackQuery):
+    """Check task progress"""
+    task_id = callback_query.data.split("_")[-1]
+    task = await tasks_col.find_one({"_id": task_id})
     
-    # Create application
-    application = Application.builder().token(Config.BOT_TOKEN).build()
+    if not task:
+        await callback_query.answer("Task not found!", show_alert=True)
+        return
     
-    # Add command handlers
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("help", help_command))
-    application.add_handler(CommandHandler("myfiles", my_files))
-    application.add_handler(CommandHandler("search", search_files))
-    application.add_handler(CommandHandler("stats", stats_command))
-    application.add_handler(CommandHandler("info", file_info))
+    progress_text = "📊 **TASK PROGRESS**\n\n"
+    for i, post in enumerate(task["posts"], 1):
+        status = "✅" if post.get("completed") else "❌"
+        progress_text += f"{status} Post {i}: {'Completed' if post.get('completed') else 'Pending'}\n"
     
-    # Add message handler for files - SIMPLIFIED FILTER
-    application.add_handler(MessageHandler(
-        filters.Document.ALL | filters.PHOTO | filters.VIDEO | 
-        filters.AUDIO | filters.VOICE | filters.VIDEO_NOTE,
-        handle_file
-    ))
+    completed_count = sum(1 for post in task["posts"] if post.get("completed"))
+    progress_text += f"\n**Progress:** {completed_count}/{len(task['posts'])} posts\n"
     
-    # Add callback query handler
-    application.add_handler(CallbackQueryHandler(button_callback))
+    if completed_count == len(task["posts"]):
+        progress_text += "\n🎉 **Ready to submit!**"
     
-    # Add error handler
-    application.add_error_handler(error_handler)
-    
-    # Start the bot
-    logger.info("🤖 Bot is starting...")
-    print("=" * 50)
-    print("     TELEGRAM UPLOAD BOT")
-    print("     Heroku Compatible Version")
-    print("=" * 50)
-    
-    application.run_polling(allowed_updates=Update.ALL_TYPES)
+    await callback_query.answer(progress_text, show_alert=True)
 
-if __name__ == '__main__':
-    main()
+# ==================== CLICK TRACKING (Basic) ====================
+# Note: Direct click tracking requires a custom URL shortener
+# This is a simplified version
+
+@app.on_message(filters.text & filters.private)
+async def handle_private_links(client: Client, message: Message):
+    """Detect when users send links (simulating click tracking)"""
+    import re
+    links = re.findall(r'https?://[^\s]+', message.text)
+    
+    if links and message.from_user:
+        for link in links:
+            await track_click(message.from_user.id, link)
+            
+            # Optional: Auto-check if this completes a task
+            user_tasks = await tasks_col.find({
+                "user_id": message.from_user.id,
+                "status": "assigned"
+            }).to_list(length=5)
+            
+            for task in user_tasks:
+                all_completed = all(
+                    post.get("completed", False) 
+                    for post in task["posts"]
+                )
+                
+                if all_completed:
+                    await message.reply_text(
+                        "🎉 **You've completed all posts!**\n\n"
+                        "Go back to your task message and click "
+                        "'✅ I Visited All Posts' to claim your reward."
+                    )
+
+# ==================== BOT STARTUP ====================
+@app.on_chat_join_request()
+async def handle_join_request(client: Client, join_request: ChatJoinRequest):
+    """Auto-approve join requests if from your channels"""
+    if join_request.chat.id in CHANNEL_IDS:
+        await join_request.approve()
+
+print("=" * 50)
+print("🤖 TASK BOT STARTING...")
+print(f"📊 Database: {DATABASE_NAME}")
+print(f"📢 Monitoring {len(CHANNEL_IDS)} channels")
+print(f"👤 Admin: @{ADMIN_USERNAME}")
+print("=" * 50)
+
+app.run()
