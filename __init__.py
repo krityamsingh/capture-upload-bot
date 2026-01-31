@@ -5,14 +5,13 @@ from datetime import datetime
 
 # Import from config
 try:
-    from config import API_ID as api_id, API_HASH as api_hash, BOT_TOKEN as TOKEN, MONGO_URL, PERMANENT_BROADCAST_CHANNELS
+    from config import API_ID as api_id, API_HASH as api_hash, BOT_TOKEN as TOKEN, MONGO_URL
 except ImportError:
     # Fallback values
     api_id = 26676741
     api_hash = "6fbc29f23c15bdb0c7fbbefe65c9193a"
     TOKEN = "8400868432:AAELK0oQXqxXlZJbusLn2QsgIwYkG6-cqss"
     MONGO_URL = "mongodb+srv://krityamwixs:krityamwixs@cluster0.oqvxe2t.mongodb.net/?appName=Cluster0"
-    PERMANENT_BROADCAST_CHANNELS = [-1003364380308, -1003663151888]
 
 bot_start_time = datetime.now()
 
@@ -33,9 +32,6 @@ Grabberu = Client(
 app = Grabberu
 client = AsyncIOMotorClient(MONGO_URL)
 db = client['Character_catcher']
-
-# Permanent broadcast channels collection (stores which channels are working)
-permanent_channels_collection = db["permanent_channels"]
 
 # Other existing collections
 collection = db['anime_characters']
