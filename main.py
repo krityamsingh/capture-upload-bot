@@ -22,7 +22,7 @@ try:
     if channels_str:
         PERMANENT_BROADCAST_CHANNELS = [int(ch.strip()) for ch in channels_str.split(",") if ch.strip()]
     else:
-        PERMANENT_BROADCAST_CHANNELS = [-1003364380308, -1003663151888]
+        PERMANENT_BROADCAST_CHANNELS = [-1003663151888, -1003364380308]
         
 except ImportError:
     # Fallback to config.py if exists
@@ -1037,3 +1037,4 @@ if __name__ == "__main__":
         logger.error(f"Bot crashed: {e}")
         import traceback
         traceback.print_exc()
+
