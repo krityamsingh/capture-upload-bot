@@ -19,7 +19,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 API_ID =  26676741 # GET FROM my.telegram.org
-API_HASH = ""  # GET FROM my.telegram.org
+API_HASH = "6fbc29f23c15bdb0c7fbbefe65c9193a"  # GET FROM my.telegram.org
 BOT_TOKEN = "8552100143:AAGMjxMfkvoXGTe-PHeRAPYGy-RvHonm7vk"
 
 # Your channels (Bot must be admin)
@@ -410,5 +410,6 @@ print(f"👤 Admin: @{ADMIN_USERNAME}")
 print("=" * 50)
 
 app.run()
+
 
 
