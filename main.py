@@ -19,7 +19,7 @@ CHANNEL_USERNAMES = ["Capture_Talks", "BLACKCLV"]
 CHANNEL_LINKS = ["https://t.me/Capture_Talks", "https://t.me/BLACKCLV"]
 
 # Group Configuration (REQUIRED - get from @RawDataBot)
-GROUP_ID = None  # ⚠️ CHANGE THIS: Example: -1001234567890
+GROUP_ID = -1002313549356  # ⚠️ CHANGE THIS: Example: -1001234567890
 
 # Bot settings
 INSIDE_ADS_BOT = "InsideAds_bot"
@@ -673,3 +673,4 @@ if __name__ == "__main__":
         import time
         time.sleep(10)
         loop.run_until_complete(main())
+
