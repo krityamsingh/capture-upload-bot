@@ -1,4 +1,4 @@
-# web.py - SIMPLE WEB SERVER
+# web.py - Web server for Heroku
 from flask import Flask, jsonify
 import os
 import time
@@ -9,9 +9,9 @@ app = Flask(__name__)
 def home():
     return jsonify({
         "status": "online",
-        "service": "Terabox DM Bot",
-        "timestamp": time.time(),
-        "message": "Bot is running"
+        "service": "Terabox Downloader Bot",
+        "cookies_loaded": True,
+        "timestamp": time.time()
     })
 
 @app.route('/ping')
