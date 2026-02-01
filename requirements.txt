@@ -1,8 +1,7 @@
-# requirements.txt
-pyrogram>=2.0.0
-tgcrypto
-aiohttp>=3.8.0
-aiodns
-cchardet
-asyncio
-python-dotenv
+pyrogram==2.0.106
+tgcrypto==1.2.5
+aiohttp==3.9.0
+flask==2.3.3
+gunicorn==21.2.0
+python-dotenv==1.0.0
+requests==2.31.0
