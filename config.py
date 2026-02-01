@@ -1,3 +1,4 @@
+# config.py
 import os
 from dotenv import load_dotenv
 
@@ -5,29 +6,13 @@ load_dotenv()
 
 class Config:
     # Telegram API
-    API_ID = 26676741
-    API_HASH = "6fbc29f23c15bdb0c7fbbefe65c9193a"
-    BOT_TOKEN = "8552100143:AAGMjxMfkvoXGTe-PHeRAPYGy-RvHonm7vk"
+    API_ID = int(os.getenv("API_ID", 26676741))
+    API_HASH = os.getenv("API_HASH", "6fbc29f23c15bdb0c7fbbefe65c9193a")
+    BOT_TOKEN = os.getenv("BOT_TOKEN", "8382794975:AAFlONsd1xL94PLkhKfwTmyR81vHW53ta6E")
     
-    # MongoDB - CHANGE PASSWORD IMMEDIATELY!
-    MONGO_URI = "mongodb+srv://Capture:capture@cluster0.7jqepnf.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0"
-    DB_NAME = "ad_tracking_bot"
+    # Bot settings
+    DOWNLOAD_PATH = "downloads"
+    MAX_FILE_SIZE = 2 * 1024 * 1024 * 1024  # 2GB
     
-    # Channel and Group IDs
-    CHANNEL_IDS = [-1003430763556, -1002769749639]  # Your channels
-    GROUP_ID = -1002313549356  # ⚠️ SET YOUR GROUP ID HERE (e.g., -1001234567890)
-    
-    # Bot Settings
-    INSIDE_ADS_BOT = "InsideAds_bot"
-    ADMIN_USERNAME = "rajputanaxironman"
-    
-    # Task Settings
-    MIN_POSTS_PER_TASK = 6
-    MAX_POSTS_PER_TASK = 6
-    
-    # Security
-    MAX_ATTEMPTS = 3
-    
-config = Config()
-
-
+    # Terabox settings
+    USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
