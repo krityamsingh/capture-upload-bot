@@ -1,5 +1,5 @@
-# web.py - SIMPLE WEB SERVER
-from flask import Flask
+# web.py - FIXED WEB SERVER
+from flask import Flask, jsonify
 import os
 
 app = Flask(__name__)
@@ -14,8 +14,8 @@ def ping():
 
 @app.route('/health')
 def health():
-    return "healthy"
+    return jsonify({"status": "healthy"})
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
-    app.run(host='0.0.0.0', port=port)
+    app.run(host='0.0.0.0', port=port, debug=False, threaded=True)
