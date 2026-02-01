@@ -1,3 +1,4 @@
+# main.py
 import os
 import re
 import asyncio
@@ -5,14 +6,12 @@ import aiohttp
 import json
 import time
 import logging
-from typing import Dict, Optional, Tuple
+from pathlib import Path
 from urllib.parse import urlparse, parse_qs
 from pyrogram import Client, filters, idle
 from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
 from pyrogram.errors import FloodWait
 import base64
-import hashlib
-from datetime import datetime
 
 # Configure logging
 logging.basicConfig(
@@ -21,7 +20,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Bot Configuration
+# Bot Configuration (from your credentials)
 API_ID = 26676741
 API_HASH = "6fbc29f23c15bdb0c7fbbefe65c9193a"
 BOT_TOKEN = "8382794975:AAFlONsd1xL94PLkhKfwTmyR81vHW53ta6E"
@@ -38,22 +37,19 @@ class TeraboxDownloader:
             'Sec-Fetch-Dest': 'empty',
             'Sec-Fetch-Mode': 'cors',
             'Sec-Fetch-Site': 'same-origin',
-            'Referer': 'https://www.terabox.com/',
-            'Origin': 'https://www.terabox.com',
         }
         
     async def create_session(self):
         """Create aiohttp session"""
-        if not self.session:
+        if not self.session or self.session.closed:
             self.session = aiohttp.ClientSession(headers=self.base_headers)
     
-    async def extract_share_id(self, url: str) -> Optional[str]:
-        """Extract share ID from various Terabox URL formats"""
+    async def extract_share_id(self, url: str) -> str:
+        """Extract share ID from URL"""
         patterns = [
-            r'terabox\.(?:com|app)/(?:s/|sharing/link\?surl=)?([a-zA-Z0-9_-]+)',
-            r'1024tera\.com/(?:s/)?([a-zA-Z0-9_-]+)',
-            r'/([a-zA-Z0-9_-]{9,})(?:\?|$)',
-            r'pwd=([a-zA-Z0-9]+)',
+            r'(?:terabox\.(?:com|app)|1024tera\.com|terafileshare\.com)/s/([a-zA-Z0-9_-]+)',
+            r'/sharing/link\?surl=([a-zA-Z0-9_-]+)',
+            r'id=([a-zA-Z0-9_-]+)',
         ]
         
         for pattern in patterns:
@@ -61,42 +57,53 @@ class TeraboxDownloader:
             if match:
                 return match.group(1)
         
-        # Try to extract from query parameters
-        parsed = urlparse(url)
-        if 'surl' in parsed.query:
-            return parse_qs(parsed.query)['surl'][0]
-        
-        return None
+        # Fallback: extract last part of URL
+        parts = url.rstrip('/').split('/')
+        return parts[-1] if parts else None
     
-    async def get_share_info(self, share_id: str) -> Optional[Dict]:
-        """Get share information from Terabox API"""
+    async def get_share_info(self, share_id: str) -> dict:
+        """Get share information"""
         try:
             await self.create_session()
             
-            # Get share page to extract tokens
-            share_url = f"https://www.terabox.com/s/{share_id}"
+            # Try multiple domains
+            domains = [
+                "https://www.terabox.com",
+                "https://www.1024tera.com",
+                "https://www.terafileshare.com"
+            ]
             
-            async with self.session.get(share_url) as response:
-                html = await response.text()
-                
-                # Extract app_id and shorturl
-                app_id_match = re.search(r'"app_id"\s*:\s*(\d+)', html)
-                shorturl_match = re.search(r'"shorturl"\s*:\s*"([^"]+)"', html)
-                uk_match = re.search(r'"uk"\s*:\s*"([^"]+)"', html)
-                shareid_match = re.search(r'"shareid"\s*:\s*(\d+)', html)
-                
-                if not all([app_id_match, shorturl_match]):
-                    # Try alternative pattern
-                    app_id_match = re.search(r'window\.APP_ID\s*=\s*(\d+)', html)
-                    shorturl_match = re.search(r'window\.SHORT_URL\s*=\s*"([^"]+)"', html)
-                
-                if app_id_match and shorturl_match:
-                    return {
-                        'app_id': app_id_match.group(1),
-                        'shorturl': shorturl_match.group(1),
-                        'uk': uk_match.group(1) if uk_match else None,
-                        'shareid': shareid_match.group(1) if shareid_match else None,
-                    }
+            for domain in domains:
+                try:
+                    share_url = f"{domain}/s/{share_id}"
+                    logger.info(f"Trying domain: {domain}")
+                    
+                    headers = self.base_headers.copy()
+                    headers['Referer'] = f"{domain}/"
+                    
+                    async with self.session.get(share_url, headers=headers, timeout=10) as response:
+                        if response.status == 200:
+                            html = await response.text()
+                            
+                            # Extract app_id
+                            app_id_match = re.search(r'"app_id"\s*:\s*(\d+)', html)
+                            if not app_id_match:
+                                app_id_match = re.search(r'window\.APP_ID\s*=\s*(\d+)', html)
+                            
+                            # Extract shorturl
+                            shorturl_match = re.search(r'"shorturl"\s*:\s*"([^"]+)"', html)
+                            if not shorturl_match:
+                                shorturl_match = re.search(r'window\.SHORT_URL\s*=\s*"([^"]+)"', html)
+                            
+                            if app_id_match and shorturl_match:
+                                return {
+                                    'app_id': app_id_match.group(1),
+                                    'shorturl': shorturl_match.group(1),
+                                    'domain': domain
+                                }
+                except Exception as e:
+                    logger.warning(f"Domain {domain} failed: {e}")
+                    continue
             
             return None
             
@@ -104,16 +111,12 @@ class TeraboxDownloader:
             logger.error(f"Error getting share info: {e}")
             return None
     
-    async def get_file_list(self, share_info: Dict) -> Optional[Dict]:
+    async def get_file_list(self, share_info: dict) -> dict:
         """Get file list from share"""
         try:
-            headers = self.base_headers.copy()
-            headers.update({
-                'Content-Type': 'application/json',
-            })
+            await self.create_session()
             
-            # Build API URL
-            api_url = "https://www.terabox.com/share/list"
+            api_url = f"{share_info['domain']}/share/list"
             
             params = {
                 'app_id': share_info['app_id'],
@@ -121,169 +124,139 @@ class TeraboxDownloader:
                 'root': '1',
             }
             
-            if share_info.get('uk'):
-                params['uk'] = share_info['uk']
+            headers = self.base_headers.copy()
+            headers['Referer'] = f"{share_info['domain']}/"
             
-            async with self.session.get(api_url, params=params, headers=headers) as response:
-                data = await response.json()
-                
-                if data.get('errno') == 0:
-                    return data
-                else:
-                    logger.error(f"API Error: {data}")
-                    return None
-                    
+            async with self.session.get(api_url, params=params, headers=headers, timeout=10) as response:
+                if response.status == 200:
+                    return await response.json()
+            
+            return None
+            
         except Exception as e:
             logger.error(f"Error getting file list: {e}")
             return None
     
-    async def get_download_url(self, file_data: Dict) -> Optional[str]:
-        """Get download URL for a file"""
+    async def get_download_url(self, share_info: dict, fs_id: str) -> str:
+        """Get download URL for file"""
         try:
-            headers = self.base_headers.copy()
-            headers.update({
-                'Content-Type': 'application/json',
-            })
+            await self.create_session()
             
-            api_url = "https://www.terabox.com/api/download"
+            api_url = f"{share_info['domain']}/api/download"
             
             payload = {
                 'method': 'locatedownload',
-                'app_id': file_data.get('app_id', '250528'),
-                'fs_id': file_data['fs_id'],
+                'app_id': share_info['app_id'],
+                'fs_id': fs_id,
                 'timestamp': int(time.time() * 1000),
-                'sign': '1',
-                'uid': file_data.get('uk'),
-                'web': '1',
             }
             
-            async with self.session.post(api_url, json=payload, headers=headers) as response:
-                data = await response.json()
-                
-                if data.get('errno') == 0:
-                    return data.get('url')
-                else:
-                    logger.error(f"Download API Error: {data}")
-                    return None
-                    
+            headers = self.base_headers.copy()
+            headers['Referer'] = f"{share_info['domain']}/"
+            headers['Content-Type'] = 'application/json'
+            
+            async with self.session.post(api_url, json=payload, headers=headers, timeout=10) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    if data.get('errno') == 0:
+                        return data.get('url')
+            
+            return None
+            
         except Exception as e:
             logger.error(f"Error getting download URL: {e}")
             return None
     
-    async def extract_video_info(self, url: str) -> Optional[Dict]:
-        """Extract video information from Terabox URL"""
+    async def extract_video_info(self, url: str) -> dict:
+        """Extract video information"""
         try:
             await self.create_session()
             
             # Extract share ID
             share_id = await self.extract_share_id(url)
             if not share_id:
-                logger.error(f"Could not extract share ID from: {url}")
                 return None
             
-            logger.info(f"Extracted share ID: {share_id}")
+            logger.info(f"Share ID extracted: {share_id}")
             
             # Get share information
             share_info = await self.get_share_info(share_id)
             if not share_info:
-                logger.error("Could not get share information")
                 return None
             
             logger.info(f"Share info: {share_info}")
             
             # Get file list
-            file_list = await self.get_file_list(share_info)
-            if not file_list or 'list' not in file_list:
-                logger.error("Could not get file list")
+            file_data = await self.get_file_list(share_info)
+            if not file_data or file_data.get('errno') != 0:
                 return None
             
-            # Find video files
-            video_files = []
-            for item in file_list['list']:
-                if item.get('isdir') == 0:  # Not a directory
-                    # Check if it's a video file
-                    category = item.get('category', 0)
-                    if category == 6 or item.get('server_filename', '').lower().endswith(
-                        ('.mp4', '.mkv', '.avi', '.mov', '.wmv', '.flv', '.webm', '.m4v')
-                    ):
-                        video_files.append(item)
-            
-            if not video_files:
-                logger.error("No video files found in share")
+            file_list = file_data.get('list', [])
+            if not file_list:
                 return None
             
-            # Get download URL for the first video
-            video_data = video_files[0]
-            video_data['app_id'] = share_info['app_id']
-            video_data['uk'] = share_info.get('uk')
+            # Find first video file
+            video_file = None
+            for file_item in file_list:
+                if file_item.get('isdir') == 0:  # Not a directory
+                    filename = file_item.get('server_filename', '').lower()
+                    if filename.endswith(('.mp4', '.mkv', '.avi', '.mov', '.wmv', '.flv', '.webm')):
+                        video_file = file_item
+                        break
             
-            download_url = await self.get_download_url(video_data)
+            if not video_file:
+                # If no video found, take first file
+                video_file = file_list[0]
+            
+            # Get download URL
+            fs_id = video_file.get('fs_id')
+            download_url = await self.get_download_url(share_info, fs_id)
+            
             if not download_url:
-                logger.error("Could not get download URL")
                 return None
-            
-            # Prepare file info
-            file_info = {
-                'filename': video_data.get('server_filename', f'video_{int(time.time())}.mp4'),
-                'size': video_data.get('size', 0),
-                'fs_id': video_data.get('fs_id'),
-                'md5': video_data.get('md5'),
-            }
             
             return {
                 'download_url': download_url,
-                'file_info': file_info,
+                'filename': video_file.get('server_filename', 'video.mp4'),
+                'size': video_file.get('size', 0),
                 'share_id': share_id,
-                'video_count': len(video_files),
-                'all_files': video_files,
             }
             
         except Exception as e:
-            logger.error(f"Error extracting video info: {str(e)}")
+            logger.error(f"Error extracting video info: {e}")
             return None
     
-    async def download_video(self, url: str, message: Message, progress_callback=None):
-        """Download video with progress tracking"""
+    async def download_video(self, url: str, filename: str, progress_callback=None) -> str:
+        """Download video with progress"""
         try:
             await self.create_session()
             
-            # Get file info
-            async with self.session.head(url, allow_redirects=True) as response:
-                headers = response.headers
-                
-                # Get filename
-                content_disposition = headers.get('Content-Disposition', '')
-                filename_match = re.search(r'filename="([^"]+)"', content_disposition)
-                
-                if filename_match:
-                    filename = filename_match.group(1)
-                else:
-                    filename = url.split('/')[-1].split('?')[0] or f'video_{int(time.time())}.mp4'
-                
-                filename = re.sub(r'[<>:"/\\|?*]', '_', filename)
-                total_size = int(headers.get('Content-Length', 0))
-            
             # Create downloads directory
             os.makedirs('downloads', exist_ok=True)
+            
+            # Clean filename
+            filename = re.sub(r'[<>:"/\\|?*]', '_', filename)
             filepath = os.path.join('downloads', filename)
             
-            # Download with progress
-            chunk_size = 1024 * 1024  # 1MB chunks
+            # Get file size
+            async with self.session.head(url, allow_redirects=True) as response:
+                total_size = int(response.headers.get('Content-Length', 0))
             
+            # Download file
             async with self.session.get(url) as response:
                 response.raise_for_status()
                 
+                downloaded = 0
+                start_time = time.time()
+                
                 with open(filepath, 'wb') as f:
-                    downloaded = 0
-                    start_time = time.time()
-                    
-                    async for chunk in response.content.iter_chunked(chunk_size):
+                    async for chunk in response.content.iter_chunked(1024*1024):  # 1MB chunks
                         if chunk:
                             f.write(chunk)
                             downloaded += len(chunk)
                             
-                            # Call progress callback
-                            if progress_callback and total_size > 0:
+                            # Calculate progress
+                            if total_size > 0 and progress_callback:
                                 progress = (downloaded / total_size) * 100
                                 elapsed = time.time() - start_time
                                 speed = downloaded / elapsed / 1024 / 1024 if elapsed > 0 else 0
@@ -300,20 +273,20 @@ class TeraboxDownloader:
             return filepath
             
         except Exception as e:
-            logger.error(f"Error downloading video: {e}")
+            logger.error(f"Error downloading: {e}")
             raise
     
     async def close(self):
         """Close session"""
-        if self.session:
+        if self.session and not self.session.closed:
             await self.session.close()
 
-# Create downloader instance
+# Create downloader
 downloader = TeraboxDownloader()
 
-# Create Pyrogram Client
+# Create Pyrogram client
 app = Client(
-    "terabox_downloader",
+    "terabox_bot",
     api_id=API_ID,
     api_hash=API_HASH,
     bot_token=BOT_TOKEN
@@ -322,7 +295,7 @@ app = Client(
 # Helper functions
 def format_size(size_bytes):
     """Format file size"""
-    if not size_bytes or size_bytes == 0:
+    if not size_bytes:
         return "Unknown"
     
     for unit in ['B', 'KB', 'MB', 'GB']:
@@ -350,8 +323,7 @@ async def update_progress(message: Message, progress_data: dict):
             f"`{bar}` **{progress:.1f}%**\n\n"
             f"**📊 Progress:** `{format_size(downloaded)} / {format_size(total)}`\n"
             f"**⚡ Speed:** `{speed:.2f} MB/s`\n"
-            f"**⏳ Time Left:** `{remaining:.1f}s`\n\n"
-            f"🔄 Processing..."
+            f"**⏳ Time Left:** `{remaining:.1f}s`"
         )
         
         await message.edit_text(text)
@@ -360,132 +332,79 @@ async def update_progress(message: Message, progress_data: dict):
         logger.error(f"Progress update error: {e}")
 
 # Command handlers
-@app.on_message(filters.command(["start", "help"]))
+@app.on_message(filters.command("start"))
 async def start_command(client: Client, message: Message):
-    """Start command handler"""
+    """Start command"""
     text = """
-    🤖 **Terabox Video Downloader Bot** 🤖
+    🤖 **Terabox Video Downloader Bot**
     
-    **I can download videos from:**
+    **I can download from:**
     • terabox.com
     • 1024tera.com
-    • terabox.app
+    • terafileshare.com
     
     **How to use:**
     1. Send me a Terabox share link
-    2. I'll extract and download the video
-    3. You'll receive the video directly
+    2. I'll download and send you the video
     
-    **Features:**
-    ✅ Fast downloads
-    ✅ Progress tracking
-    ✅ Multiple video support
-    ✅ No size limits (if supported by Telegram)
+    **Supported links:**
+    `https://terabox.com/s/xxxxx`
+    `https://1024tera.com/s/xxxxx`
+    `https://terafileshare.com/s/xxxxx`
     
-    **Examples:**
-    `https://terabox.com/s/1AbcDeFgHiJk`
-    `https://www.terabox.com/sharing/link?surl=xyz123`
-    
-    **Note:** For private links, you may need to use /cookie command
+    **Commands:**
+    /start - Show this message
+    /status - Check bot status
     """
     
     await message.reply_text(text)
 
-@app.on_message(filters.command("cookie"))
-async def cookie_command(client: Client, message: Message):
-    """Handle cookie submission"""
-    if not message.reply_to_message or not message.reply_to_message.document:
-        await message.reply_text(
-            "Please reply to a cookies.txt file with this command.\n\n"
-            "How to get cookies:\n"
-            "1. Login to Terabox in browser\n"
-            "2. Export cookies using an extension\n"
-            "3. Send the cookies.txt file\n\n"
-            "Reply to your cookies.txt file with: `/cookie`"
-        )
-        return
-    
-    try:
-        # Download the cookie file
-        cookie_file = await message.reply_to_message.download()
-        
-        # Read and parse cookies
-        cookies = {}
-        with open(cookie_file, 'r') as f:
-            for line in f:
-                line = line.strip()
-                if line and not line.startswith('#'):
-                    parts = line.split('\t')
-                    if len(parts) >= 7:
-                        name, value = parts[5], parts[6]
-                        cookies[name] = value
-        
-        # Update downloader session
-        if downloader.session:
-            await downloader.close()
-            downloader.session = None
-        
-        # Recreate session with cookies
-        await downloader.create_session()
-        downloader.session.cookie_jar.update_cookies(cookies)
-        
-        await message.reply_text(f"✅ Cookies updated! Loaded {len(cookies)} cookies.")
-        
-        # Clean up
-        os.remove(cookie_file)
-        
-    except Exception as e:
-        await message.reply_text(f"❌ Error updating cookies: {str(e)}")
+@app.on_message(filters.command("status"))
+async def status_command(client: Client, message: Message):
+    """Status command"""
+    status = "✅ Bot is running!"
+    await message.reply_text(status)
 
 @app.on_message(filters.regex(
-    r'https?://(?:www\.)?(?:terabox\.(?:com|app)|1024tera\.com)'
+    r'https?://(?:www\.)?(?:terabox\.(?:com|app)|1024tera\.com|terafileshare\.com)/'
 ))
-async def handle_terabox_link(client: Client, message: Message):
+async def handle_link(client: Client, message: Message):
     """Handle Terabox links"""
     url = message.text.strip()
-    chat_id = message.chat.id
     
     try:
         # Send initial message
-        status_msg = await message.reply_text(
-            "🔍 **Processing URL...**\n\n"
-            "Extracting video information..."
-        )
+        status_msg = await message.reply_text("🔍 Processing link...")
         
         # Extract video info
         video_info = await downloader.extract_video_info(url)
         
         if not video_info:
             await status_msg.edit_text(
-                "❌ **Failed to extract video information.**\n\n"
+                "❌ Failed to extract video information.\n\n"
                 "Possible reasons:\n"
-                "• Link is private/protected\n"
-                "• Link has expired\n"
-                "• Video was removed\n\n"
-                "**Try:**\n"
-                "1. Make sure link is public\n"
-                "2. Use /cookie command with your cookies\n"
-                "3. Check if link is valid"
+                "• Link is invalid or expired\n"
+                "• Video is private or removed\n"
+                "• Server is busy\n\n"
+                "Try again with a different link."
             )
             return
         
         download_url = video_info['download_url']
-        file_info = video_info['file_info']
-        filename = file_info['filename']
-        size = file_info['size']
+        filename = video_info['filename']
+        size = video_info['size']
         
-        # Show video info
+        # Show file info
         info_text = (
             f"✅ **Video Found!**\n\n"
-            f"**📹 Title:** `{filename}`\n"
-            f"**📦 Size:** `{format_size(size)}`\n"
-            f"**🔗 Type:** Public Link\n\n"
-            f"Do you want to download this video?"
+            f"**📹 File:** `{filename}`\n"
+            f"**📦 Size:** `{format_size(size)}`\n\n"
+            "Click Download to start!"
         )
         
         keyboard = InlineKeyboardMarkup([
             [
-                InlineKeyboardButton("✅ Download", callback_data=f"dl_{url}"),
+                InlineKeyboardButton("⬇️ Download", callback_data=f"download_{url}"),
                 InlineKeyboardButton("❌ Cancel", callback_data="cancel")
             ]
         ])
@@ -498,7 +417,7 @@ async def handle_terabox_link(client: Client, message: Message):
 
 @app.on_callback_query()
 async def handle_callback(client, callback_query):
-    """Handle callback queries"""
+    """Handle callbacks"""
     data = callback_query.data
     message = callback_query.message
     
@@ -507,12 +426,22 @@ async def handle_callback(client, callback_query):
         await callback_query.answer()
         return
     
-    if data.startswith("dl_"):
-        url = data.replace("dl_", "")
+    if data.startswith("download_"):
+        url = data.replace("download_", "")
         
         try:
-            # Update status
-            await message.edit_text("⬇️ **Starting download...**\n\nPlease wait...")
+            # Get video info again
+            video_info = await downloader.extract_video_info(url)
+            if not video_info:
+                await message.edit_text("❌ Failed to get video information.")
+                await callback_query.answer()
+                return
+            
+            download_url = video_info['download_url']
+            filename = video_info['filename']
+            
+            # Start download
+            await message.edit_text("⬇️ Starting download...")
             
             # Progress callback
             async def progress_callback(**kwargs):
@@ -521,85 +450,76 @@ async def handle_callback(client, callback_query):
                 except:
                     pass
             
-            # Download video
-            download_path = await downloader.download_video(
-                url,
-                message,
+            # Download file
+            filepath = await downloader.download_video(
+                download_url,
+                filename,
                 progress_callback
             )
             
-            # Get file info
-            file_size = os.path.getsize(download_path)
+            # Get file size
+            file_size = os.path.getsize(filepath)
             
             # Upload to Telegram
-            await message.edit_text("📤 **Uploading to Telegram...**")
+            await message.edit_text("📤 Uploading to Telegram...")
             
             try:
                 # Try to send as video
                 await client.send_video(
                     chat_id=message.chat.id,
-                    video=download_path,
-                    caption=f"✅ **Download Complete!**\n\n**File:** `{os.path.basename(download_path)}`\n**Size:** `{format_size(file_size)}`",
-                    progress=lambda current, total: logger.info(f"Upload progress: {current}/{total}")
+                    video=filepath,
+                    caption=f"✅ **Download Complete!**\n\n**File:** `{filename}`\n**Size:** `{format_size(file_size)}`",
+                    supports_streaming=True
                 )
                 await message.delete()
             except Exception as e:
-                # If video fails, try as document
-                logger.error(f"Video upload failed, trying document: {e}")
+                # If video fails, send as document
+                logger.error(f"Video upload failed: {e}")
                 await client.send_document(
                     chat_id=message.chat.id,
-                    document=download_path,
-                    caption=f"✅ **Download Complete!**\n\n**File:** `{os.path.basename(download_path)}`\n**Size:** `{format_size(file_size)}`"
+                    document=filepath,
+                    caption=f"✅ **Download Complete!**\n\n**File:** `{filename}`\n**Size:** `{format_size(file_size)}`"
                 )
                 await message.delete()
             
             # Clean up
             try:
-                os.remove(download_path)
+                os.remove(filepath)
             except:
                 pass
             
         except Exception as e:
             logger.error(f"Download error: {e}")
-            await message.edit_text(f"❌ **Download failed:** {str(e)}")
+            await message.edit_text(f"❌ Download failed: {str(e)}")
         
         await callback_query.answer()
 
-@app.on_message(filters.command("status"))
-async def status_command(client: Client, message: Message):
-    """Check bot status"""
-    status_text = (
-        "🤖 **Bot Status**\n\n"
-        f"**Status:** ✅ Running\n"
-        f"**Session:** {'✅ Active' if downloader.session else '❌ Inactive'}\n"
-        f"**Uptime:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
-        "Ready to download videos!"
-    )
-    await message.reply_text(status_text)
-
-@app.on_message(filters.command("ping"))
-async def ping_command(client: Client, message: Message):
-    """Ping command"""
-    start_time = time.time()
-    msg = await message.reply_text("🏓 Pong!")
-    end_time = time.time()
-    await msg.edit_text(f"🏓 Pong! `{round((end_time - start_time) * 1000, 2)}ms`")
-
-# Start bot
+# Main function
 async def main():
     """Main function"""
     logger.info("Starting Terabox Downloader Bot...")
-    await app.start()
-    logger.info("Bot started!")
-    await idle()
-    await app.stop()
-    await downloader.close()
-    logger.info("Bot stopped!")
+    
+    # Check if downloads directory exists
+    os.makedirs('downloads', exist_ok=True)
+    
+    try:
+        await app.start()
+        logger.info("Bot started successfully!")
+        
+        # Get bot info
+        me = await app.get_me()
+        logger.info(f"Bot username: @{me.username}")
+        
+        # Keep the bot running
+        await idle()
+        
+    except Exception as e:
+        logger.error(f"Failed to start bot: {e}")
+    finally:
+        await app.stop()
+        await downloader.close()
+        logger.info("Bot stopped.")
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        logger.info("Bot stopped by user")
-    except Exception as e:
-        logger.error(f"Bot error: {e}")
+    # Run the bot
+    asyncio.run(main())
