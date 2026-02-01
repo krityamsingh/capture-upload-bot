@@ -102,7 +102,7 @@ async def handle_messages(client, message):
                 f"2. Add download logic\n"
                 f"3. Process the link with cookies\n\n"
                 f"For now, I'm confirming that the bot works with your cookies!"
-            )
+            (
         else:
             await message.reply_text(
                 "📩 **Send me a Terabox link!**\n\n"
@@ -132,3 +132,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
