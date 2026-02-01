@@ -1,0 +1,26 @@
+{
+  "name": "Terabox Downloader Bot",
+  "description": "Telegram bot to download videos from Terabox, 1024tera, and Terafileshare",
+  "repository": "https://github.com/yourusername/terabox-bot",
+  "logo": "https://raw.githubusercontent.com/heroku/heroku-buildpack-python/main/images/python.png",
+  "keywords": ["python", "telegram", "bot", "terabox", "downloader"],
+  "env": {
+    "API_ID": {
+      "description": "Telegram API ID",
+      "value": "26676741"
+    },
+    "API_HASH": {
+      "description": "Telegram API Hash",
+      "value": "6fbc29f23c15bdb0c7fbbefe65c9193a"
+    },
+    "BOT_TOKEN": {
+      "description": "Telegram Bot Token",
+      "value": "8382794975:AAFlONsd1xL94PLkhKfwTmyR81vHW53ta6E"
+    }
+  },
+  "buildpacks": [
+    {
+      "url": "heroku/python"
+    }
+  ]
+}
