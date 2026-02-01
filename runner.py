@@ -1,47 +1,20 @@
-# runner.py - SIMPLE RUNNER THAT WORKS
+# runner.py - Simple runner
 import os
 import sys
-import subprocess
 import time
-import signal
-import logging
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+print("=" * 50)
+print("Terabox Downloader Bot")
+print("With Cookies Support")
+print("=" * 50)
 
-def run_bot():
-    """Run the bot directly"""
-    logger.info("Starting bot process...")
-    
-    # Run bot in current process
-    try:
-        import bot
-        import asyncio
-        
-        # Run the bot
-        asyncio.run(bot.main())
-    except KeyboardInterrupt:
-        logger.info("Bot stopped by user")
-    except Exception as e:
-        logger.error(f"Bot error: {e}")
-        # Try alternative approach
-        os.execv(sys.executable, [sys.executable, "bot.py"])
+# Check environment
+print(f"API_ID: {os.environ.get('API_ID', 'Not set')}")
+print(f"BOT_TOKEN: {os.environ.get('BOT_TOKEN', 'Not set')[:10]}...")
 
-def run_web():
-    """Run web server"""
-    logger.info("Starting web server...")
-    subprocess.Popen([sys.executable, "web.py"])
+# Create cookies directory
+os.makedirs("cookies", exist_ok=True)
 
-if __name__ == "__main__":
-    print("=" * 50)
-    print("Terabox DM Bot Runner")
-    print("=" * 50)
-    
-    # Start web server
-    run_web()
-    
-    # Wait a bit for web server to start
-    time.sleep(2)
-    
-    # Start bot
-    run_bot()
+# Start the bot
+print("\nStarting bot...")
+os.execv(sys.executable, [sys.executable, "bot.py"])
