@@ -1,5 +1,0 @@
-# app.yaml (for Heroku)
-runtime: python
-env: python-3.10.11
-buildpacks:
-  - heroku/python
