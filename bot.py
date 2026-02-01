@@ -1,4 +1,4 @@
-# bot.py - SIMPLE WORKING VERSION
+# bot.py - FIXED VERSION
 import os
 import sys
 import logging
@@ -84,11 +84,15 @@ async def cookies_command(client, message):
     except Exception as e:
         logger.error(f"Cookies error: {e}")
 
-@app.on_message(filters.private & ~filters.command())
+@app.on_message(filters.private & filters.text)
 async def handle_messages(client, message):
-    """Handle all private messages"""
+    """Handle all private text messages"""
     try:
         text = message.text.strip()
+        
+        # Skip if it's a command (handled by other handlers)
+        if text.startswith('/'):
+            return
         
         # Check if it's a Terabox link
         if any(word in text.lower() for word in ['terabox', '1024tera', 'terafileshare']):
@@ -111,6 +115,13 @@ async def handle_messages(client, message):
             )
     except Exception as e:
         logger.error(f"Message handler error: {e}")
+
+# Handle group messages
+@app.on_message(filters.group)
+async def handle_group(client, message):
+    """Handle group messages"""
+    if message.text and message.text.startswith('/start'):
+        await message.reply_text("⚠️ I work only in private messages!")
 
 # Main function
 def main():
