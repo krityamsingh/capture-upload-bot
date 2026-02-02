@@ -22,7 +22,8 @@ DOWNLOAD_DIR = "downloads"
 MAX_FILE_SIZE = 2000 * 1024 * 1024  # 2GB
 MAX_CONCURRENT_DOWNLOADS = 3
 
-TERA_REGEX = r"(https?://(?:www\.)?(?:terabox\.app|1024tera\.com|terafileshare\.com|terabox\.com)/\S+)"
+# Support multiple Terabox domains
+TERA_REGEX = r"(https?://(?:www\.)?(?:terabox\.app|1024tera\.com|terabox\.com|terafileshare\.com)/\S+)"
 
 logging.basicConfig(
     level=logging.INFO,
@@ -30,10 +31,10 @@ logging.basicConfig(
 )
 log = logging.getLogger("TeraboxBot")
 
-# 确保下载目录存在
+# Ensure download directory exists
 Path(DOWNLOAD_DIR).mkdir(exist_ok=True)
 
-# ================= 会话管理 =================
+# ================= SESSION MANAGEMENT =================
 class SessionManager:
     def __init__(self):
         self.cookie_header = None
@@ -51,7 +52,7 @@ class SessionManager:
                 with open(COOKIE_FILE, "r", encoding="utf-8") as f:
                     for line in f:
                         line = line.strip()
-                        if "=" in line and "terabox" in line.lower():
+                        if "=" in line and ("terabox" in line.lower() or "ndus" in line.lower()):
                             cookies.append(line)
                 if cookies:
                     self.cookie_header = "; ".join(cookies)
@@ -85,7 +86,7 @@ class SessionManager:
             
             log.info(f"🔍 Testing {len(self.proxies)} proxies...")
             
-            # 并行测试代理
+            # Test proxies in parallel
             tasks = [self.test_proxy(proxy) for proxy in self.proxies]
             results = await asyncio.gather(*tasks, return_exceptions=True)
             
@@ -127,19 +128,19 @@ class SessionManager:
         async with self.lock:
             self.active_downloads = max(0, self.active_downloads - 1)
 
-# 全局管理器实例
+# Global session manager instance
 session_manager = SessionManager()
 
-# ================= 下载工具 =================
+# ================= DOWNLOAD UTILITIES =================
 class TeraboxDownloader:
     @staticmethod
     async def extract_download_url(link: str) -> Optional[str]:
         proxy = await session_manager.get_working_proxy()
         if not proxy:
-            raise Exception("没有可用的代理")
+            raise Exception("No working proxy available")
         
         if not session_manager.cookie_header:
-            raise Exception("Cookie 未配置")
+            raise Exception("Cookies not configured")
         
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
@@ -148,7 +149,8 @@ class TeraboxDownloader:
             "Accept-Language": "en-US,en;q=0.5",
             "Accept-Encoding": "gzip, deflate, br",
             "Connection": "keep-alive",
-            "Upgrade-Insecure-Requests": "1"
+            "Upgrade-Insecure-Requests": "1",
+            "Referer": "https://www.terabox.com/"
         }
         
         try:
@@ -160,16 +162,18 @@ class TeraboxDownloader:
                 headers=headers,
                 timeout=timeout
             ) as session:
-                # 第一次请求获取页面
+                # First request to get the page
                 async with session.get(link, allow_redirects=True, ssl=False) as r:
                     html = await r.text()
                 
-                # 尝试多种匹配模式
+                # Try multiple patterns to extract download URL
                 patterns = [
                     r'"downloadUrl"\s*:\s*"([^"]+)"',
                     r'downloadUrl":"([^"]+)"',
                     r'video_url"\s*:\s*"([^"]+)"',
                     r'"url"\s*:\s*"([^"]+)"',
+                    r'"play_url"\s*:\s*"([^"]+)"',
+                    r'playUrl":"([^"]+)"',
                 ]
                 
                 for pattern in patterns:
@@ -179,28 +183,36 @@ class TeraboxDownloader:
                         if url.startswith("http"):
                             return url
                 
-                # 如果没有找到，尝试查找视频标签
+                # If not found, try to find video tags
                 video_match = re.search(r'<video[^>]+src="([^"]+)"', html)
                 if video_match:
                     return video_match.group(1)
                 
-                raise Exception("无法提取下载链接")
+                # Try to find direct file links
+                file_match = re.search(r'"(https://[^"]+?\.(?:mp4|mkv|avi|mov|wmv|flv|webm)[^"]*)"', html)
+                if file_match:
+                    return file_match.group(1)
+                
+                raise Exception("Cannot extract download link")
                 
         except Exception as e:
-            log.error(f"提取链接失败: {e}")
-            raise Exception(f"提取链接失败: {str(e)}")
+            log.error(f"Failed to extract link: {e}")
+            raise Exception(f"Failed to extract link: {str(e)}")
     
     @staticmethod
     async def download_file(url: str, file_path: str, message: Message):
-        """下载文件并显示进度"""
+        """Download file with progress display"""
         proxy = await session_manager.get_working_proxy()
         if not proxy:
-            raise Exception("代理不可用")
+            raise Exception("Proxy not available")
         
         connector = ProxyConnector.from_url(proxy)
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
             "Referer": "https://www.terabox.com/",
+            "Accept": "*/*",
+            "Accept-Encoding": "gzip, deflate, br",
+            "Connection": "keep-alive"
         }
         
         try:
@@ -210,11 +222,11 @@ class TeraboxDownloader:
             ) as session:
                 async with session.get(url, timeout=aiohttp.ClientTimeout(total=3600)) as r:
                     if r.status != 200:
-                        raise Exception(f"下载失败: HTTP {r.status}")
+                        raise Exception(f"Download failed: HTTP {r.status}")
                     
                     total_size = int(r.headers.get('content-length', 0))
                     if total_size > MAX_FILE_SIZE:
-                        raise Exception(f"文件太大 ({total_size//(1024*1024)}MB)，超过限制")
+                        raise Exception(f"File too large ({total_size//(1024*1024)}MB), exceeds limit")
                     
                     downloaded = 0
                     last_update = 0
@@ -225,12 +237,12 @@ class TeraboxDownloader:
                                 await f.write(chunk)
                                 downloaded += len(chunk)
                                 
-                                # 每下载5%更新一次进度
+                                # Update progress every 5%
                                 if total_size > 0:
                                     progress = (downloaded / total_size) * 100
                                     if progress - last_update >= 5:
                                         await message.edit_text(
-                                            f"📥 下载中... {progress:.1f}% "
+                                            f"📥 Downloading... {progress:.1f}% "
                                             f"({downloaded//(1024*1024)}MB/{total_size//(1024*1024)}MB)"
                                         )
                                         last_update = progress
@@ -238,9 +250,9 @@ class TeraboxDownloader:
                     return downloaded
                     
         except asyncio.TimeoutError:
-            raise Exception("下载超时")
+            raise Exception("Download timeout")
         except Exception as e:
-            raise Exception(f"下载失败: {str(e)}")
+            raise Exception(f"Download failed: {str(e)}")
 
 # ================= BOT =================
 app = Client(
@@ -255,39 +267,54 @@ downloader = TeraboxDownloader()
 @app.on_message(filters.command("start"))
 async def start_command(_, message: Message):
     await message.reply_text(
-        "🤖 Terabox 下载机器人\n\n"
-        "发送 Terabox 链接给我，我会帮你下载视频。\n\n"
-        "支持域名:\n"
+        "🤖 Terabox Download Bot\n\n"
+        "Send me a Terabox link and I'll download the video for you.\n\n"
+        "Supported domains:\n"
         "• terabox.app\n"
         "• 1024tera.com\n"
-        "• terabox.com\n\n"
-        "状态:\n"
-        f"• 代理: {'✅ 已配置' if session_manager.proxies else '❌ 未配置'}\n"
-        f"• Cookie: {'✅ 已配置' if session_manager.cookie_header else '❌ 未配置'}\n"
-        f"• 活跃下载: {session_manager.active_downloads}/{MAX_CONCURRENT_DOWNLOADS}"
+        "• terabox.com\n"
+        "• terafileshare.com\n\n"
+        "Status:\n"
+        f"• Proxies: {'✅ Configured' if session_manager.proxies else '❌ Not configured'}\n"
+        f"• Cookies: {'✅ Configured' if session_manager.cookie_header else '❌ Not configured'}\n"
+        f"• Active downloads: {session_manager.active_downloads}/{MAX_CONCURRENT_DOWNLOADS}"
     )
 
 @app.on_message(filters.command("status"))
 async def status_command(_, message: Message):
-    proxy_status = "✅ 工作正常" if session_manager.working_proxy else "❌ 不可用"
+    proxy_status = "✅ Working" if session_manager.working_proxy else "❌ Not available"
     await message.reply_text(
-        f"📊 机器人状态\n\n"
-        f"• 代理状态: {proxy_status}\n"
-        f"• 代理数量: {len(session_manager.proxies)}\n"
-        f"• Cookie: {'✅ 已配置' if session_manager.cookie_header else '❌ 未配置'}\n"
-        f"• 活跃下载: {session_manager.active_downloads}/{MAX_CONCURRENT_DOWNLOADS}\n"
-        f"• 工作代理: {session_manager.working_proxy or '无'}"
+        f"📊 Bot Status\n\n"
+        f"• Proxy status: {proxy_status}\n"
+        f"• Proxy count: {len(session_manager.proxies)}\n"
+        f"• Cookies: {'✅ Configured' if session_manager.cookie_header else '❌ Not configured'}\n"
+        f"• Active downloads: {session_manager.active_downloads}/{MAX_CONCURRENT_DOWNLOADS}\n"
+        f"• Working proxy: {session_manager.working_proxy or 'None'}"
     )
 
 @app.on_message(filters.command("reload"))
 async def reload_command(_, message: Message):
-    if message.from_user.id not in [12345678]:  # 替换为你的用户ID
+    if message.from_user.id not in [12345678]:  # Replace with your user ID
         return
     
     session_manager.load_cookies()
     session_manager.load_proxies()
     await session_manager.get_working_proxy(force_test=True)
-    await message.reply_text("✅ 配置已重新加载")
+    await message.reply_text("✅ Configuration reloaded")
+
+@app.on_message(filters.command("supported"))
+async def supported_command(_, message: Message):
+    await message.reply_text(
+        "🌐 Supported Terabox Link Formats:\n\n"
+        "• https://terabox.app/s/xxxxxxxx\n"
+        "• https://www.terabox.com/s/xxxxxxxx\n"
+        "• https://1024tera.com/s/xxxxxxxx\n"
+        "• https://terafileshare.com/s/xxxxxxxx\n\n"
+        "Examples:\n"
+        "• https://terafileshare.com/s/1tgHSFjB1Jjv1tLdX8sGLiA\n"
+        "• https://terabox.app/s/12abcdefghijklmnopqr\n"
+        "• https://www.terabox.com/sharing/link?surl=xxxx"
+    )
 
 @app.on_message(filters.private & filters.text)
 async def handle_message(_, message: Message):
@@ -298,94 +325,128 @@ async def handle_message(_, message: Message):
     link = match.group(0)
     user_id = message.from_user.id
     
-    # 检查并发限制
+    # Check concurrent download limit
     if not await session_manager.acquire_download_slot():
-        await message.reply_text("⏳ 下载队列已满，请稍后再试")
+        await message.reply_text("⏳ Download queue is full, please try again later")
         return
     
-    status_msg = await message.reply_text("🔍 正在解析链接...")
+    status_msg = await message.reply_text("🔍 Parsing link...")
     
     try:
-        # 获取下载链接
-        await status_msg.edit_text("🔗 正在获取下载地址...")
+        # Get download URL
+        await status_msg.edit_text("🔗 Getting download URL...")
         download_url = await downloader.extract_download_url(link)
         
         if not download_url:
-            await status_msg.edit_text("❌ 无法获取下载链接")
+            await status_msg.edit_text("❌ Cannot get download URL")
             return
         
-        # 生成文件名
-        file_name = f"terabox_{user_id}_{int(time.time())}.mp4"
+        # Generate filename with proper extension
+        file_ext = await get_file_extension(download_url)
+        file_name = f"terabox_{user_id}_{int(time.time())}{file_ext}"
         file_path = os.path.join(DOWNLOAD_DIR, file_name)
         
-        # 开始下载
-        await status_msg.edit_text("⬇️ 开始下载视频...")
+        # Start download
+        await status_msg.edit_text("⬇️ Starting download...")
         
         try:
             await downloader.download_file(download_url, file_path, status_msg)
             
-            # 发送视频
-            await status_msg.edit_text("📤 正在上传到 Telegram...")
+            # Send file to Telegram
+            await status_msg.edit_text("📤 Uploading to Telegram...")
             
-            try:
+            # Determine file type and send accordingly
+            if file_ext.lower() in ['.mp4', '.mkv', '.avi', '.mov', '.wmv', '.flv', '.webm']:
                 await message.reply_video(
                     video=file_path,
-                    caption="✅ Terabox 视频下载完成",
+                    caption="✅ Terabox video downloaded",
                     progress=progress_callback,
                     progress_args=(status_msg,)
                 )
-                await status_msg.delete()
-                
-            except Exception as e:
-                log.error(f"发送视频失败: {e}")
-                await status_msg.edit_text("✅ 下载完成，但发送到 Telegram 失败")
+            elif file_ext.lower() in ['.mp3', '.wav', '.flac', '.m4a', '.aac']:
+                await message.reply_audio(
+                    audio=file_path,
+                    caption="✅ Terabox audio downloaded",
+                    progress=progress_callback,
+                    progress_args=(status_msg,)
+                )
+            elif file_ext.lower() in ['.jpg', '.jpeg', '.png', '.gif', '.bmp']:
+                await message.reply_photo(
+                    photo=file_path,
+                    caption="✅ Terabox image downloaded"
+                )
+            else:
+                await message.reply_document(
+                    document=file_path,
+                    caption="✅ Terabox file downloaded",
+                    progress=progress_callback,
+                    progress_args=(status_msg,)
+                )
+            
+            await status_msg.delete()
                 
         except Exception as e:
-            await status_msg.edit_text(f"❌ 下载失败: {str(e)}")
+            log.error(f"Failed to send file: {e}")
+            await status_msg.edit_text("✅ Download complete but failed to send to Telegram")
             
     except Exception as e:
-        log.exception("处理消息时出错")
-        await status_msg.edit_text(f"❌ 错误: {str(e)}")
+        log.exception("Error processing message")
+        await status_msg.edit_text(f"❌ Error: {str(e)}")
         
     finally:
-        # 清理文件
+        # Clean up downloaded file
         try:
-            if os.path.exists(file_path):
+            if 'file_path' in locals() and os.path.exists(file_path):
                 os.remove(file_path)
         except:
             pass
         
-        # 释放下载槽位
+        # Release download slot
         session_manager.release_download_slot()
+
+async def get_file_extension(url: str) -> str:
+    """Extract file extension from URL"""
+    # Common video extensions
+    video_extensions = ['.mp4', '.mkv', '.avi', '.mov', '.wmv', '.flv', '.webm']
+    audio_extensions = ['.mp3', '.wav', '.flac', '.m4a', '.aac']
+    image_extensions = ['.jpg', '.jpeg', '.png', '.gif', '.bmp']
+    
+    # Check URL for extension
+    for ext in video_extensions + audio_extensions + image_extensions:
+        if ext in url.lower():
+            return ext
+    
+    # Default to mp4
+    return '.mp4'
 
 async def progress_callback(current, total, message):
     try:
         percent = (current / total) * 100
-        await message.edit_text(f"📤 上传中... {percent:.1f}%")
+        await message.edit_text(f"📤 Uploading... {percent:.1f}%")
     except:
         pass
 
 # ================= MAIN =================
 async def main():
-    # 检查必要配置
+    # Check required configuration
     if not API_ID or not API_HASH or not BOT_TOKEN:
-        log.error("❌ 请设置 API_ID, API_HASH 和 BOT_TOKEN 环境变量")
+        log.error("❌ Please set API_ID, API_HASH and BOT_TOKEN environment variables")
         return
     
     if not session_manager.cookie_header:
-        log.error("❌ 请配置 cookies.txt 文件")
-        # 可以继续运行，但无法下载
+        log.error("❌ Please configure cookies.txt file")
+        # Can continue but won't be able to download
     
-    # 测试代理
+    # Test proxies
     proxy = await session_manager.get_working_proxy()
     if proxy:
-        log.info(f"✅ 工作代理: {proxy}")
+        log.info(f"✅ Working proxy: {proxy}")
     else:
-        log.warning("⚠️ 没有可用的代理，将尝试直连")
+        log.warning("⚠️ No working proxy found, will try direct connection")
     
     await app.start()
     bot_info = await app.get_me()
-    log.info(f"🤖 机器人已启动: @{bot_info.username}")
+    log.info(f"🤖 Bot started as @{bot_info.username}")
     
     await idle()
     
@@ -396,4 +457,4 @@ if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        log.info("👋 机器人已停止")
+        log.info("👋 Bot stopped")
