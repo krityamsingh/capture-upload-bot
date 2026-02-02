@@ -6,3 +6,4 @@ aiofiles==23.2.1
 flask==2.3.3
 gunicorn
 dotenv
+aiohttp_socks
