@@ -4,11 +4,12 @@ import os
 import re
 import aiohttp
 import aiofiles
+import time
 from pathlib import Path
 from typing import Optional, List
 
 from pyrogram import Client, filters, idle
-from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
+from pyrogram.types import Message
 from aiohttp_socks import ProxyConnector
 
 # ================= CONFIG =================
@@ -76,7 +77,8 @@ class SessionManager:
             log.error(f"❌ Failed to load proxies: {e}")
     
     async def get_working_proxy(self, force_test: bool = False) -> Optional[str]:
-        async with self.lock:
+        await self.lock.acquire()
+        try:
             if not force_test and self.working_proxy:
                 return self.working_proxy
             
@@ -87,7 +89,11 @@ class SessionManager:
             log.info(f"🔍 Testing {len(self.proxies)} proxies...")
             
             # Test proxies in parallel
-            tasks = [self.test_proxy(proxy) for proxy in self.proxies]
+            tasks = []
+            for proxy in self.proxies:
+                task = asyncio.create_task(self.test_proxy(proxy))
+                tasks.append(task)
+            
             results = await asyncio.gather(*tasks, return_exceptions=True)
             
             for proxy, result in zip(self.proxies, results):
@@ -98,6 +104,8 @@ class SessionManager:
             
             log.error("❌ No working proxy found")
             return None
+        finally:
+            self.lock.release()
     
     async def test_proxy(self, proxy: str) -> bool:
         try:
@@ -118,15 +126,17 @@ class SessionManager:
         return False
     
     async def acquire_download_slot(self) -> bool:
-        async with self.lock:
+        await self.lock.acquire()
+        try:
             if self.active_downloads < MAX_CONCURRENT_DOWNLOADS:
                 self.active_downloads += 1
                 return True
             return False
+        finally:
+            self.lock.release()
     
     def release_download_slot(self):
-        async with self.lock:
-            self.active_downloads = max(0, self.active_downloads - 1)
+        self.active_downloads = max(0, self.active_downloads - 1)
 
 # Global session manager instance
 session_manager = SessionManager()
@@ -232,7 +242,7 @@ class TeraboxDownloader:
                     last_update = 0
                     
                     async with aiofiles.open(file_path, 'wb') as f:
-                        async for chunk in r.content.iter_chunked(1024*1024):  # 1MB chunks
+                        async for chunk in r.content.iter_chunked(1024*1024):
                             if chunk:
                                 await f.write(chunk)
                                 downloaded += len(chunk)
@@ -241,11 +251,14 @@ class TeraboxDownloader:
                                 if total_size > 0:
                                     progress = (downloaded / total_size) * 100
                                     if progress - last_update >= 5:
-                                        await message.edit_text(
-                                            f"📥 Downloading... {progress:.1f}% "
-                                            f"({downloaded//(1024*1024)}MB/{total_size//(1024*1024)}MB)"
-                                        )
-                                        last_update = progress
+                                        try:
+                                            await message.edit_text(
+                                                f"📥 Downloading... {progress:.1f}% "
+                                                f"({downloaded//(1024*1024)}MB/{total_size//(1024*1024)}MB)"
+                                            )
+                                            last_update = progress
+                                        except:
+                                            pass
                     
                     return downloaded
                     
@@ -294,8 +307,9 @@ async def status_command(_, message: Message):
 
 @app.on_message(filters.command("reload"))
 async def reload_command(_, message: Message):
-    if message.from_user.id not in [12345678]:  # Replace with your user ID
-        return
+    # You can remove this check or add your Telegram user ID
+    # if message.from_user.id not in [12345678]:
+    #     return await message.reply_text("❌ This command is for admins only")
     
     session_manager.load_cookies()
     session_manager.load_proxies()
@@ -331,6 +345,7 @@ async def handle_message(_, message: Message):
         return
     
     status_msg = await message.reply_text("🔍 Parsing link...")
+    file_path = None
     
     try:
         # Get download URL
@@ -359,16 +374,12 @@ async def handle_message(_, message: Message):
             if file_ext.lower() in ['.mp4', '.mkv', '.avi', '.mov', '.wmv', '.flv', '.webm']:
                 await message.reply_video(
                     video=file_path,
-                    caption="✅ Terabox video downloaded",
-                    progress=progress_callback,
-                    progress_args=(status_msg,)
+                    caption="✅ Terabox video downloaded"
                 )
             elif file_ext.lower() in ['.mp3', '.wav', '.flac', '.m4a', '.aac']:
                 await message.reply_audio(
                     audio=file_path,
-                    caption="✅ Terabox audio downloaded",
-                    progress=progress_callback,
-                    progress_args=(status_msg,)
+                    caption="✅ Terabox audio downloaded"
                 )
             elif file_ext.lower() in ['.jpg', '.jpeg', '.png', '.gif', '.bmp']:
                 await message.reply_photo(
@@ -378,16 +389,14 @@ async def handle_message(_, message: Message):
             else:
                 await message.reply_document(
                     document=file_path,
-                    caption="✅ Terabox file downloaded",
-                    progress=progress_callback,
-                    progress_args=(status_msg,)
+                    caption="✅ Terabox file downloaded"
                 )
             
             await status_msg.delete()
                 
         except Exception as e:
             log.error(f"Failed to send file: {e}")
-            await status_msg.edit_text("✅ Download complete but failed to send to Telegram")
+            await status_msg.edit_text(f"✅ Download complete but failed to send: {str(e)}")
             
     except Exception as e:
         log.exception("Error processing message")
@@ -395,11 +404,11 @@ async def handle_message(_, message: Message):
         
     finally:
         # Clean up downloaded file
-        try:
-            if 'file_path' in locals() and os.path.exists(file_path):
+        if file_path and os.path.exists(file_path):
+            try:
                 os.remove(file_path)
-        except:
-            pass
+            except:
+                pass
         
         # Release download slot
         session_manager.release_download_slot()
@@ -418,13 +427,6 @@ async def get_file_extension(url: str) -> str:
     
     # Default to mp4
     return '.mp4'
-
-async def progress_callback(current, total, message):
-    try:
-        percent = (current / total) * 100
-        await message.edit_text(f"📤 Uploading... {percent:.1f}%")
-    except:
-        pass
 
 # ================= MAIN =================
 async def main():
@@ -453,7 +455,6 @@ async def main():
     await app.stop()
 
 if __name__ == "__main__":
-    import time
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
