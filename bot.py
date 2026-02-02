@@ -1,28 +1,32 @@
 import os
+import re
+import time
 import random
 import logging
 import aiohttp
-import asyncio
 
 from pyrogram import Client, filters
 from pyrogram.types import Message
 from aiohttp_socks import ProxyConnector
 
-# ---------------- LOGGING ----------------
+# ───────────────── LOGGING ─────────────────
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(message)s"
 )
 log = logging.getLogger("TeraboxBot")
 
-# ---------------- CONFIG ----------------
-API_ID = int(os.getenv("API_ID"))
-API_HASH = os.getenv("API_HASH")
-BOT_TOKEN = os.getenv("BOT_TOKEN")
+# ───────────────── CONFIG ─────────────────
+API_ID = int(os.environ["API_ID"])
+API_HASH = os.environ["API_HASH"]
+BOT_TOKEN = os.environ["BOT_TOKEN"]
 
+DOWNLOAD_DIR = "downloads"
 PROXY_FILE = "proxies.txt"
 
-# ---------------- LOAD PROXIES ----------------
+os.makedirs(DOWNLOAD_DIR, exist_ok=True)
+
+# ───────────────── LOAD PROXIES ─────────────────
 def load_proxies():
     if not os.path.exists(PROXY_FILE):
         return []
@@ -31,70 +35,159 @@ def load_proxies():
 
 PROXIES = load_proxies()
 
-# ---------------- TERABOX ----------------
+# ───────────────── PYROGRAM CLIENT ─────────────────
+app = Client(
+    "terabox_downloader",
+    api_id=API_ID,
+    api_hash=API_HASH,
+    bot_token=BOT_TOKEN
+)
+
+active_users = set()
+
+# ───────────────── TERABOX ENGINE ─────────────────
 class Terabox:
     def __init__(self):
-        self.timeout = aiohttp.ClientTimeout(total=60)
+        self.cookies = {}
+        self.load_cookies()
 
-    async def fetch(self, url: str):
+    def load_cookies(self):
+        if not os.path.exists("cookies.txt"):
+            log.warning("cookies.txt missing")
+            return
+
+        with open("cookies.txt", "r", encoding="utf-8", errors="ignore") as f:
+            for line in f:
+                if line.startswith("#") or not line.strip():
+                    continue
+                parts = line.strip().split("\t")
+                if len(parts) >= 7 and "tera" in parts[0]:
+                    self.cookies[parts[5]] = parts[6]
+
+        log.info(f"Loaded {len(self.cookies)} cookies")
+
+    def normalize_link(self, text: str):
+        m = re.search(r"/s/([A-Za-z0-9_-]+)", text)
+        if not m:
+            return None
+        return f"https://www.1024tera.com/s/{m.group(1)}"
+
+    async def request(self, url: str):
         random.shuffle(PROXIES)
-
-        last_error = None
 
         for proxy in PROXIES:
             try:
                 connector = ProxyConnector.from_url(proxy)
                 async with aiohttp.ClientSession(
                     connector=connector,
-                    timeout=self.timeout,
+                    cookies=self.cookies,
+                    timeout=aiohttp.ClientTimeout(total=600),
                     headers={
                         "User-Agent": "Mozilla/5.0 Chrome/120 Safari/537.36"
                     }
                 ) as session:
-                    async with session.get(url) as resp:
-                        if resp.status == 200:
-                            return await resp.text()
+                    async with session.get(url) as r:
+                        if r.status == 200:
+                            return await r.text(), session, proxy
             except Exception as e:
-                last_error = e
-                log.warning(f"Proxy failed {proxy} → {e}")
+                log.warning(f"Proxy failed {proxy}")
 
-        raise RuntimeError("All proxies failed") from last_error
+        return None, None, None
 
-    async def extract_download_url(self, link: str):
-        html = await self.fetch(link)
+    async def extract_download_url(self, share_link: str):
+        safe = self.normalize_link(share_link)
+        if not safe:
+            return None, None
 
-        # TODO: your real extraction logic here
-        if "terabox" not in html.lower():
-            raise RuntimeError("Invalid Terabox response")
+        html, session, proxy = await self.request(safe)
+        if not html:
+            return None, None
 
-        return "DOWNLOAD_URL_EXTRACTED"
+        m = re.search(r'"dlink":"([^"]+)"', html)
+        if not m:
+            return None, None
 
-# ---------------- BOT ----------------
-app = Client(
-    "terabox-bot",
-    api_id=API_ID,
-    api_hash=API_HASH,
-    bot_token=BOT_TOKEN
-)
+        return m.group(1).replace("\\/", "/"), proxy
+
+    async def download(self, url: str, path: str, proxy: str):
+        connector = ProxyConnector.from_url(proxy)
+        async with aiohttp.ClientSession(
+            connector=connector,
+            cookies=self.cookies,
+            timeout=aiohttp.ClientTimeout(total=0),
+            headers={
+                "User-Agent": "Mozilla/5.0 Chrome/120 Safari/537.36"
+            }
+        ) as session:
+            async with session.get(url) as r:
+                if r.status != 200:
+                    return False
+                with open(path, "wb") as f:
+                    async for chunk in r.content.iter_chunked(1024 * 1024):
+                        f.write(chunk)
+        return True
+
 
 tera = Terabox()
 
-@app.on_message(filters.private & filters.text)
-async def handle_link(_, msg: Message):
-    text = msg.text.strip()
+# ───────────────── HELPERS ─────────────────
+def is_terabox_link(text: str):
+    return any(x in text.lower() for x in (
+        "terabox.com", "1024tera.com", "terafileshare.com"
+    ))
 
-    if "tera" not in text:
+# ───────────────── BOT HANDLER ─────────────────
+@app.on_message(filters.private & filters.text)
+async def handle(_, msg: Message):
+    text = msg.text.strip()
+    user_id = msg.from_user.id
+
+    if not is_terabox_link(text):
         return
 
-    await msg.reply("🔄 Resolving Terabox link via proxy...")
+    if user_id in active_users:
+        await msg.reply_text("⏳ Download already running.")
+        return
+
+    active_users.add(user_id)
+    status = await msg.reply_text("🔍 Resolving Terabox link via proxy...")
 
     try:
-        dlink = await tera.extract_download_url(text)
-        await msg.reply(f"✅ Download link:\n{dlink}")
-    except Exception as e:
-        await msg.reply(f"❌ Cannot resolve Terabox link.\n`{e}`")
+        dlink, proxy = await tera.extract_download_url(text)
+        if not dlink:
+            await status.edit_text("❌ Cannot resolve Terabox link.")
+            return
 
-# ---------------- START ----------------
+        filename = f"{user_id}_{int(time.time())}.mp4"
+        filepath = f"{DOWNLOAD_DIR}/{filename}"
+
+        await status.edit_text("⬇️ Downloading video...")
+        ok = await tera.download(dlink, filepath, proxy)
+        if not ok:
+            await status.edit_text("❌ Download failed.")
+            return
+
+        await status.edit_text("📤 Sending video to your DM...")
+
+        await app.send_video(
+            chat_id=user_id,
+            video=filepath,
+            supports_streaming=True,
+            caption="✅ Terabox download complete"
+        )
+
+        await status.edit_text("✅ Video sent successfully!")
+
+        os.remove(filepath)
+
+    except Exception as e:
+        log.exception("Download error")
+        await status.edit_text(f"❌ Error: {e}")
+
+    finally:
+        active_users.discard(user_id)
+
+# ───────────────── START ─────────────────
 if __name__ == "__main__":
-    log.info("Starting Terabox bot with proxy support")
+    log.info("Starting Terabox bot (proxy + video send enabled)")
     app.run()
