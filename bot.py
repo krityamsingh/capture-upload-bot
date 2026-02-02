@@ -1,11 +1,10 @@
 import os
 import re
 import time
-import asyncio
 import logging
 import aiohttp
 
-from pyrogram import Client, filters, idle
+from pyrogram import Client, filters
 from pyrogram.types import Message
 
 # ───────────────── LOGGING ─────────────────
@@ -23,7 +22,7 @@ BOT_TOKEN = os.environ["BOT_TOKEN"]
 DOWNLOAD_DIR = "downloads"
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
-# ───────────────── BOT CLIENT ─────────────────
+# ───────────────── PYROGRAM CLIENT ─────────────────
 app = Client(
     "terabox_downloader",
     api_id=API_ID,
@@ -34,7 +33,7 @@ app = Client(
 
 active_users = set()
 
-# ───────────────── TERABOX HANDLER ─────────────────
+# ───────────────── TERABOX CORE ─────────────────
 class Terabox:
     def __init__(self):
         self.cookies = {}
@@ -48,7 +47,7 @@ class Terabox:
 
         with open("cookies.txt", "r", encoding="utf-8", errors="ignore") as f:
             for line in f:
-                if line.startswith("#") or not line.strip():
+                if not line.strip() or line.startswith("#"):
                     continue
                 parts = line.strip().split("\t")
                 if len(parts) >= 7:
@@ -80,16 +79,14 @@ class Terabox:
             )
         return self.session
 
-    async def extract_dlink(self, share_url: str) -> str | None:
+    async def extract_download_url(self, link: str):
         session = await self.get_session()
 
-        async with session.get(share_url) as r:
+        async with session.get(link) as r:
             if r.status != 200:
                 return None
-
             html = await r.text()
 
-        # Common Terabox patterns
         patterns = [
             r'"dlink":"([^"]+)"',
             r'"downloadUrl":"([^"]+)"',
@@ -103,7 +100,7 @@ class Terabox:
 
         return None
 
-    async def download(self, url: str, path: str) -> bool:
+    async def download(self, url: str, path: str):
         session = await self.get_session()
 
         async with session.get(url) as r:
@@ -119,21 +116,22 @@ class Terabox:
 
 tera = Terabox()
 
-# ───────────────── UTIL ─────────────────
+# ───────────────── HELPERS ─────────────────
 def is_terabox_link(text: str) -> bool:
-    return any(x in text.lower() for x in [
+    text = text.lower()
+    return any(x in text for x in (
         "terabox.com",
         "1024tera.com",
         "terafileshare.com"
-    ])
+    ))
 
 # ───────────────── COMMANDS ─────────────────
 @app.on_message(filters.command("start") & filters.private)
 async def start(_, msg: Message):
     await msg.reply_text(
         "🤖 **Terabox Downloader Bot**\n\n"
-        "📥 Send me a Terabox link\n"
-        "📤 I will download & send the file\n\n"
+        "📥 Send a Terabox link\n"
+        "📤 I’ll download and send the file\n\n"
         f"🍪 Cookies loaded: **{len(tera.cookies)}**"
     )
 
@@ -142,22 +140,21 @@ async def status(_, msg: Message):
     await msg.reply_text(
         f"✅ Bot Online\n"
         f"🍪 Cookies: {len(tera.cookies)}\n"
-        f"📦 Active users: {len(active_users)}"
+        f"📦 Active downloads: {len(active_users)}"
     )
 
 # ───────────────── MAIN HANDLER ─────────────────
 @app.on_message(filters.private & filters.text)
-async def handle(_, msg: Message):
+async def handle_link(_, msg: Message):
     text = msg.text.strip()
+    user_id = msg.from_user.id
 
     if text.startswith("/"):
         return
 
     if not is_terabox_link(text):
-        await msg.reply_text("📩 Send a valid **Terabox link**.")
+        await msg.reply_text("📩 Send a **valid Terabox link**.")
         return
-
-    user_id = msg.from_user.id
 
     if user_id in active_users:
         await msg.reply_text("⏳ You already have a download running.")
@@ -171,23 +168,21 @@ async def handle(_, msg: Message):
     status = await msg.reply_text("🔍 Extracting download link...")
 
     try:
-        dlink = await tera.extract_dlink(text)
-
+        dlink = await tera.extract_download_url(text)
         if not dlink:
-            await status.edit("❌ Failed to extract download link.")
+            await status.edit_text("❌ Failed to extract download link.")
             return
 
         filename = f"{user_id}_{int(time.time())}.mp4"
         path = os.path.join(DOWNLOAD_DIR, filename)
 
-        await status.edit("⬇️ Downloading file...")
+        await status.edit_text("⬇️ Downloading...")
         ok = await tera.download(dlink, path)
-
         if not ok:
-            await status.edit("❌ Download failed.")
+            await status.edit_text("❌ Download failed.")
             return
 
-        await status.edit("📤 Uploading to Telegram...")
+        await status.edit_text("📤 Uploading to Telegram...")
 
         await app.send_document(
             chat_id=user_id,
@@ -195,24 +190,17 @@ async def handle(_, msg: Message):
             caption="✅ Download complete"
         )
 
-        await status.edit("✅ Done!")
-
+        await status.edit_text("✅ Done!")
         os.remove(path)
 
     except Exception as e:
-        log.exception("Handler error")
-        await status.edit(f"❌ Error: {e}")
+        log.exception("Download error")
+        await status.edit_text(f"❌ Error: {e}")
 
     finally:
         active_users.discard(user_id)
 
-# ───────────────── START BOT ─────────────────
-async def main():
-    await app.start()
-    me = await app.get_me()
-    log.info(f"Bot started as @{me.username}")
-    await idle()
-    await app.stop()
-
+# ───────────────── ENTRYPOINT (IMPORTANT) ─────────────────
 if __name__ == "__main__":
-    asyncio.run(main())
+    log.info("Starting Terabox bot (Heroku safe mode)")
+    app.run()
