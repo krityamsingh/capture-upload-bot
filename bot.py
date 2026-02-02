@@ -8,6 +8,7 @@ import aiohttp
 from pyrogram import Client, filters
 from pyrogram.types import Message
 from aiohttp_socks import ProxyConnector
+from aiohttp import ClientTimeout, ClientConnectorError
 
 # ───────────────── LOGGING ─────────────────
 logging.basicConfig(
@@ -23,6 +24,7 @@ BOT_TOKEN = os.environ["BOT_TOKEN"]
 
 DOWNLOAD_DIR = "downloads"
 PROXY_FILE = "proxies.txt"
+COOKIE_FILE = "cookies.txt"
 
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
@@ -33,7 +35,7 @@ def load_proxies():
     with open(PROXY_FILE, "r") as f:
         return [p.strip() for p in f if p.strip()]
 
-PROXIES = load_proxies()
+ALL_PROXIES = load_proxies()
 
 # ───────────────── PYROGRAM CLIENT ─────────────────
 app = Client(
@@ -49,14 +51,16 @@ active_users = set()
 class Terabox:
     def __init__(self):
         self.cookies = {}
+        self.good_proxy = None   # 🔥 TEMP CACHED WORKING PROXY
         self.load_cookies()
 
+    # -------- Cookies --------
     def load_cookies(self):
-        if not os.path.exists("cookies.txt"):
-            log.warning("cookies.txt missing")
+        if not os.path.exists(COOKIE_FILE):
+            log.warning("cookies.txt not found")
             return
 
-        with open("cookies.txt", "r", encoding="utf-8", errors="ignore") as f:
+        with open(COOKIE_FILE, "r", encoding="utf-8", errors="ignore") as f:
             for line in f:
                 if line.startswith("#") or not line.strip():
                     continue
@@ -66,66 +70,99 @@ class Terabox:
 
         log.info(f"Loaded {len(self.cookies)} cookies")
 
+    # -------- Normalize link --------
     def normalize_link(self, text: str):
         m = re.search(r"/s/([A-Za-z0-9_-]+)", text)
         if not m:
             return None
         return f"https://www.1024tera.com/s/{m.group(1)}"
 
-    async def request(self, url: str):
-        random.shuffle(PROXIES)
-
-        for proxy in PROXIES:
-            try:
-                connector = ProxyConnector.from_url(proxy)
-                async with aiohttp.ClientSession(
-                    connector=connector,
-                    cookies=self.cookies,
-                    timeout=aiohttp.ClientTimeout(total=600),
-                    headers={
-                        "User-Agent": "Mozilla/5.0 Chrome/120 Safari/537.36"
-                    }
-                ) as session:
-                    async with session.get(url) as r:
-                        if r.status == 200:
-                            return await r.text(), session, proxy
-            except Exception as e:
-                log.warning(f"Proxy failed {proxy}")
-
-        return None, None, None
-
-    async def extract_download_url(self, share_link: str):
-        safe = self.normalize_link(share_link)
-        if not safe:
-            return None, None
-
-        html, session, proxy = await self.request(safe)
-        if not html:
-            return None, None
-
-        m = re.search(r'"dlink":"([^"]+)"', html)
-        if not m:
-            return None, None
-
-        return m.group(1).replace("\\/", "/"), proxy
-
-    async def download(self, url: str, path: str, proxy: str):
+    # -------- Create session --------
+    async def make_session(self, proxy: str):
         connector = ProxyConnector.from_url(proxy)
-        async with aiohttp.ClientSession(
+        return aiohttp.ClientSession(
             connector=connector,
             cookies=self.cookies,
-            timeout=aiohttp.ClientTimeout(total=0),
+            timeout=ClientTimeout(total=300),
             headers={
                 "User-Agent": "Mozilla/5.0 Chrome/120 Safari/537.36"
             }
-        ) as session:
+        )
+
+    # -------- Test proxy --------
+    async def test_proxy(self, proxy: str, test_url: str):
+        try:
+            session = await self.make_session(proxy)
+            async with session.get(test_url) as r:
+                ok = r.status == 200
+            await session.close()
+            return ok
+        except Exception:
+            return False
+
+    # -------- Find working proxy --------
+    async def get_working_proxy(self, test_url: str):
+        if self.good_proxy:
+            return self.good_proxy
+
+        random.shuffle(ALL_PROXIES)
+        log.info("Testing proxies...")
+
+        for proxy in ALL_PROXIES:
+            if await self.test_proxy(proxy, test_url):
+                self.good_proxy = proxy
+                log.info(f"Working proxy found: {proxy}")
+                return proxy
+
+        return None
+
+    # -------- Extract download URL --------
+    async def extract_download_url(self, share_link: str):
+        safe_url = self.normalize_link(share_link)
+        if not safe_url:
+            return None
+
+        proxy = await self.get_working_proxy(safe_url)
+        if not proxy:
+            return None
+
+        try:
+            session = await self.make_session(proxy)
+            async with session.get(safe_url) as r:
+                html = await r.text()
+            await session.close()
+
+            m = re.search(r'"dlink":"([^"]+)"', html)
+            if not m:
+                return None
+
+            return m.group(1).replace("\\/", "/")
+
+        except ClientConnectorError:
+            log.warning("Cached proxy failed, resetting")
+            self.good_proxy = None
+            return None
+
+    # -------- Download file --------
+    async def download(self, url: str, path: str):
+        proxy = self.good_proxy
+        if not proxy:
+            return False
+
+        try:
+            session = await self.make_session(proxy)
             async with session.get(url) as r:
                 if r.status != 200:
                     return False
                 with open(path, "wb") as f:
                     async for chunk in r.content.iter_chunked(1024 * 1024):
                         f.write(chunk)
-        return True
+            await session.close()
+            return True
+
+        except Exception:
+            self.good_proxy = None
+            return False
 
 
 tera = Terabox()
@@ -146,29 +183,28 @@ async def handle(_, msg: Message):
         return
 
     if user_id in active_users:
-        await msg.reply_text("⏳ Download already running.")
+        await msg.reply_text("⏳ Download already in progress.")
         return
 
     active_users.add(user_id)
-    status = await msg.reply_text("🔍 Resolving Terabox link via proxy...")
+    status = await msg.reply_text("🔍 Analyzing proxies...")
 
     try:
-        dlink, proxy = await tera.extract_download_url(text)
+        dlink = await tera.extract_download_url(text)
         if not dlink:
-            await status.edit_text("❌ Cannot resolve Terabox link.")
+            await status.edit_text("❌ No working proxy found.")
             return
 
         filename = f"{user_id}_{int(time.time())}.mp4"
         filepath = f"{DOWNLOAD_DIR}/{filename}"
 
         await status.edit_text("⬇️ Downloading video...")
-        ok = await tera.download(dlink, filepath, proxy)
+        ok = await tera.download(dlink, filepath)
         if not ok:
             await status.edit_text("❌ Download failed.")
             return
 
         await status.edit_text("📤 Sending video to your DM...")
-
         await app.send_video(
             chat_id=user_id,
             video=filepath,
@@ -176,18 +212,13 @@ async def handle(_, msg: Message):
             caption="✅ Terabox download complete"
         )
 
-        await status.edit_text("✅ Video sent successfully!")
-
+        await status.edit_text("✅ Done!")
         os.remove(filepath)
-
-    except Exception as e:
-        log.exception("Download error")
-        await status.edit_text(f"❌ Error: {e}")
 
     finally:
         active_users.discard(user_id)
 
 # ───────────────── START ─────────────────
 if __name__ == "__main__":
-    log.info("Starting Terabox bot (proxy + video send enabled)")
+    log.info("Starting Terabox bot (proxy auto-analysis enabled)")
     app.run()
