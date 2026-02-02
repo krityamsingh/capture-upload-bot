@@ -11,7 +11,7 @@ logger = logging.getLogger(__name__)
 
 # Get credentials
 API_ID = int(os.environ.get("API_ID", "26676741"))
-API_HASH = os.environ.get("API_HASH", "6fbc29f23c15bdb0c7fbbefe65c9193a"))
+API_HASH = os.environ.get("API_HASH", "6fbc29f23c15bdb0c7fbbefe65c9193a")
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "8382794975:AAFlONsd1xL94PLkhKfwTmyR81vHW53ta6E")
 
 # Log startup
@@ -113,3 +113,4 @@ if __name__ == "__main__":
     
     # Run the bot
     main()
+
