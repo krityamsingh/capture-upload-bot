@@ -78,8 +78,8 @@ console = Console()
 
 # ===== CONFIGURATION =====
 BOT_TOKEN = "7813598075:AAFUrbGZfBeRiZb1H1MOBULU_ed69OSTwzY"
-API_ID = 27157163
-API_HASH = "e0145db12519b08e1d2f5628e2db18c4"
+API_ID = 26676741
+API_HASH = "6fbc29f23c15bdb0c7fbbefe65c9193a"
 
 # Owners (full access)
 OWNER_IDS = [6118760915, 1366105247]
@@ -428,6 +428,76 @@ class EnhancedProxyManager:
         
         console.print(table)
     
+    async def _load_from_file(self):
+        """Load proxies from local file"""
+        try:
+            if Path(PROXY_FILE).exists():
+                with open(PROXY_FILE, 'r') as f:
+                    for line in f:
+                        proxy = line.strip()
+                        if proxy and ':' in proxy:
+                            self.proxies.append({
+                                "proxy": proxy,
+                                "country": "Unknown",
+                                "banned": False,
+                                "success_count": 0,
+                                "fail_count": 0,
+                                "avg_speed": 1.0,
+                                "last_used": None
+                            })
+        except Exception as e:
+            console.print(f"[yellow]Error loading proxies from file: {e}[/yellow]")
+    
+    async def _load_from_github(self):
+        """Load proxies from GitHub URLs"""
+        async with aiohttp.ClientSession() as session:
+            for url in PROXY_GITHUB_URLS:
+                try:
+                    async with session.get(url, timeout=10) as response:
+                        if response.status == 200:
+                            text = await response.text()
+                            for line in text.split('\n'):
+                                proxy = line.strip()
+                                if proxy and ':' in proxy:
+                                    self.proxies.append({
+                                        "proxy": proxy,
+                                        "country": "Unknown",
+                                        "banned": False,
+                                        "success_count": 0,
+                                        "fail_count": 0,
+                                        "avg_speed": 1.0,
+                                        "last_used": None
+                                    })
+                except Exception as e:
+                    console.print(f"[yellow]Error loading from {url}: {e}[/yellow]")
+    
+    async def _load_from_cache(self):
+        """Load proxy cache"""
+        try:
+            if PROXY_CACHE_FILE.exists():
+                with open(PROXY_CACHE_FILE, 'r') as f:
+                    cache_data = json.load(f)
+                    # Update existing proxies with cache data
+                    for proxy_data in cache_data.get("proxies", []):
+                        for proxy in self.proxies:
+                            if proxy["proxy"] == proxy_data["proxy"]:
+                                proxy.update(proxy_data)
+                                break
+        except Exception as e:
+            console.print(f"[yellow]Error loading proxy cache: {e}[/yellow]")
+    
+    async def save_cache(self):
+        """Save proxy cache"""
+        try:
+            cache_data = {
+                "proxies": self.proxies,
+                "last_updated": datetime.now().isoformat()
+            }
+            with open(PROXY_CACHE_FILE, 'w') as f:
+                json.dump(cache_data, f, indent=2)
+        except Exception as e:
+            console.print(f"[red]Error saving proxy cache: {e}[/red]")
+    
     def _prioritize_proxies(self):
         """Prioritize proxies from fast countries"""
         # Sort proxies: fast countries first, then success rate, then speed
@@ -520,6 +590,42 @@ class EnhancedProxyManager:
         if account_phone in self.proxy_history and self.proxy_history[account_phone]:
             return self.proxy_history[account_phone][-1]["proxy"]
         return None
+    
+    def mark_success(self, proxy_url: str, speed: float):
+        """Mark proxy as successful"""
+        for proxy in self.proxies:
+            if proxy["proxy"] == proxy_url:
+                proxy["success_count"] += 1
+                proxy["avg_speed"] = (proxy["avg_speed"] * (proxy["success_count"] - 1) + speed) / proxy["success_count"]
+                break
+    
+    def mark_failed(self, proxy_url: str):
+        """Mark proxy as failed"""
+        for proxy in self.proxies:
+            if proxy["proxy"] == proxy_url:
+                proxy["fail_count"] += 1
+                if proxy["fail_count"] > 3:
+                    proxy["banned"] = True
+                break
+    
+    def get_stats(self) -> Dict:
+        """Get proxy statistics"""
+        total = len(self.proxies)
+        active = sum(1 for p in self.proxies if not p["banned"])
+        banned = sum(1 for p in self.proxies if p["banned"])
+        
+        country_counts = defaultdict(int)
+        for proxy in self.proxies:
+            if not proxy["banned"]:
+                country_counts[proxy["country"]] += 1
+        
+        return {
+            "total": total,
+            "active": active,
+            "banned": banned,
+            "fast_countries": self.fast_countries,
+            "country_distribution": dict(country_counts)
+        }
 
 # ===== USER MANAGEMENT SYSTEM =====
 
@@ -659,6 +765,124 @@ class UserManager:
             "regular_users": regular_users,
             "total_reports": total_reports
         }
+
+# ===== ACCOUNT MANAGEMENT SYSTEM =====
+
+class AccountManager:
+    """Manage Telegram accounts for reporting"""
+    
+    def __init__(self, proxy_manager: EnhancedProxyManager):
+        self.accounts: Dict[str, TelegramAccount] = {}
+        self.proxy_manager = proxy_manager
+        self.accounts_file = DATA_DIR / "accounts.json"
+        self.reports_per_account = 9  # Limit per account before proxy rotation
+        self._load_accounts()
+    
+    def _load_accounts(self):
+        """Load accounts from file"""
+        try:
+            if self.accounts_file.exists():
+                with open(self.accounts_file, 'r') as f:
+                    data = json.load(f)
+                    for phone, acc_data in data.items():
+                        account = TelegramAccount.from_dict(acc_data)
+                        self.accounts[phone] = account
+                console.print(f"[green]Loaded {len(self.accounts)} accounts[/green]")
+        except Exception as e:
+            console.print(f"[red]Error loading accounts: {e}[/red]")
+    
+    def _save_accounts(self):
+        """Save accounts to file"""
+        try:
+            data = {phone: account.to_dict() for phone, account in self.accounts.items()}
+            with open(self.accounts_file, 'w') as f:
+                json.dump(data, f, indent=2)
+        except Exception as e:
+            console.print(f"[red]Error saving accounts: {e}[/red]")
+    
+    async def add_account(self, phone: str, session_file: Path, proxy: Optional[str] = None) -> bool:
+        """Add a new account"""
+        if phone in self.accounts:
+            return False
+        
+        if not proxy:
+            proxy = await self.proxy_manager.get_fast_proxy(phone)
+        
+        account = TelegramAccount(
+            phone=phone,
+            session_file=session_file,
+            proxy=proxy,
+            status=AccountStatus.INACTIVE
+        )
+        
+        self.accounts[phone] = account
+        self._save_accounts()
+        
+        console.print(f"[green]Added account: {phone}[/green]")
+        return True
+    
+    def get_available_accounts(self, count: int) -> List[TelegramAccount]:
+        """Get available accounts for reporting"""
+        available = []
+        for account in self.accounts.values():
+            if account.status == AccountStatus.ACTIVE and account.report_count < self.reports_per_account:
+                available.append(account)
+                if len(available) >= count:
+                    break
+        
+        # If not enough active accounts, try to activate some
+        if len(available) < count:
+            inactive = [acc for acc in self.accounts.values() 
+                       if acc.status == AccountStatus.INACTIVE]
+            for account in inactive[:count - len(available)]:
+                available.append(account)
+        
+        return available[:count]
+    
+    def get_stats(self) -> Dict:
+        """Get account statistics"""
+        total = len(self.accounts)
+        active = sum(1 for a in self.accounts.values() if a.status == AccountStatus.ACTIVE)
+        inactive = sum(1 for a in self.accounts.values() if a.status == AccountStatus.INACTIVE)
+        banned = sum(1 for a in self.accounts.values() if a.status == AccountStatus.BANNED)
+        flood_wait = sum(1 for a in self.accounts.values() if a.status == AccountStatus.FLOOD_WAIT)
+        
+        total_reports = sum(a.total_reports for a in self.accounts.values())
+        today = datetime.now().date()
+        reports_today = sum(a.report_count for a in self.accounts.values() 
+                           if a.last_report_time and a.last_report_time.date() == today)
+        
+        return {
+            "total_accounts": total,
+            "active_accounts": active,
+            "inactive_accounts": inactive,
+            "banned_accounts": banned,
+            "flood_wait_accounts": flood_wait,
+            "total_reports": total_reports,
+            "reports_today": reports_today
+        }
+    
+    def update_account_status(self, phone: str, status: AccountStatus):
+        """Update account status"""
+        if phone in self.accounts:
+            self.accounts[phone].status = status
+            self._save_accounts()
+    
+    def rotate_proxy_for_account(self, phone: str) -> Optional[str]:
+        """Rotate proxy for an account"""
+        if phone not in self.accounts:
+            return None
+        
+        account = self.accounts[phone]
+        new_proxy = self.proxy_manager.rotate_proxy_for_account(phone)
+        
+        if new_proxy:
+            account.proxy = new_proxy
+            account.last_proxy_rotation = datetime.now()
+            account.report_count = 0  # Reset report count
+            self._save_accounts()
+        
+        return new_proxy
 
 # ===== ENHANCED REPORTING ENGINE WITH TG:// SUPPORT =====
 
@@ -1221,6 +1445,15 @@ class EnhancedReportingEngine:
         job.results = data.get("results", [])
         
         return job
+    
+    def get_stats(self) -> Dict:
+        """Get reporting engine statistics"""
+        return {
+            "total_jobs": len(self.job_history),
+            "active_jobs": len(self.active_jobs),
+            "completed_jobs": sum(1 for j in self.job_history if j.status == ReportStatus.COMPLETED),
+            "failed_jobs": sum(1 for j in self.job_history if j.status == ReportStatus.FAILED)
+        }
 
 # ===== ENHANCED TELEGRAM BOT HANDLER =====
 
@@ -1257,7 +1490,111 @@ class EnhancedTelegramBotHandler:
                     9: {"name": "Darknet Market", "description": "Darknet drug market operations"}
                 }
             },
-            # ... other categories (same as before)
+            "SPAM": {
+                "name": "Spam & Scams",
+                "priority": ReportPriority.HIGH,
+                "subcategories": {
+                    1: {"name": "Mass Spamming", "description": "Mass messaging or posting"},
+                    2: {"name": "Phishing Links", "description": "Malicious links or phishing"},
+                    3: {"name": "Financial Scams", "description": "Financial fraud or scams"},
+                    4: {"name": "Fake Giveaways", "description": "Fake contests or giveaways"},
+                    5: {"name": "Bot Networks", "description": "Bot accounts or networks"},
+                    6: {"name": "Fake News", "description": "Spreading false information"},
+                    7: {"name": "Impersonation", "description": "Impersonating others"},
+                    8: {"name": "Pyramid Schemes", "description": "Pyramid or MLM schemes"},
+                    9: {"name": "Fake Products", "description": "Counterfeit goods sales"}
+                }
+            },
+            "VIOLENCE": {
+                "name": "Violence & Threats",
+                "priority": ReportPriority.CRITICAL,
+                "subcategories": {
+                    1: {"name": "Physical Threats", "description": "Threats of physical harm"},
+                    2: {"name": "Death Threats", "description": "Threats to kill someone"},
+                    3: {"name": "Terrorist Content", "description": "Terrorism-related material"},
+                    4: {"name": "Extremist Content", "description": "Hate speech or extremism"},
+                    5: {"name": "Violent Content", "description": "Graphic violence or gore"},
+                    6: {"name": "Weapons Trade", "description": "Illegal weapons sales"},
+                    7: {"name": "Self-Harm", "description": "Promotion of self-harm"},
+                    8: {"name": "Animal Abuse", "description": "Animal cruelty content"},
+                    9: {"name": "Violent Instructions", "description": "Instructions for violence"}
+                }
+            },
+            "SEXUAL": {
+                "name": "Sexual Content",
+                "priority": ReportPriority.HIGH,
+                "subcategories": {
+                    1: {"name": "Non-Consensual", "description": "Non-consensual intimate media"},
+                    2: {"name": "Child Exploitation", "description": "Child sexual abuse material"},
+                    3: {"name": "Sexual Harassment", "description": "Unwanted sexual advances"},
+                    4: {"name": "Pornography", "description": "Adult pornographic content"},
+                    5: {"name": "Sexual Services", "description": "Prostitution or escort services"},
+                    6: {"name": "Sex Trafficking", "description": "Human trafficking for sex"},
+                    7: {"name": "Sexualized Minors", "description": "Sexualization of minors"},
+                    8: {"name": "Revenge Porn", "description": "Non-consensual intimate sharing"},
+                    9: {"name": "Sexual Violence", "description": "Depictions of sexual violence"}
+                }
+            },
+            "FRAUD": {
+                "name": "Fraud & Deception",
+                "priority": ReportPriority.HIGH,
+                "subcategories": {
+                    1: {"name": "Identity Theft", "description": "Stealing personal information"},
+                    2: {"name": "Fake Accounts", "description": "Impersonation or fake identity"},
+                    3: {"name": "Payment Fraud", "description": "Fraudulent payment requests"},
+                    4: {"name": "Account Hacking", "description": "Hacking or unauthorized access"},
+                    5: {"name": "Credit Card Fraud", "description": "Credit card information theft"},
+                    6: {"name": "Investment Scams", "description": "Fake investment opportunities"},
+                    7: {"name": "Lottery Scams", "description": "Fake lottery or prize scams"},
+                    8: {"name": "Romance Scams", "description": "Dating or romance fraud"},
+                    9: {"name": "Tech Support Scams", "description": "Fake tech support services"}
+                }
+            },
+            "HARASSMENT": {
+                "name": "Harassment & Bullying",
+                "priority": ReportPriority.MEDIUM,
+                "subcategories": {
+                    1: {"name": "Cyberbullying", "description": "Online bullying or harassment"},
+                    2: {"name": "Stalking", "description": "Following or monitoring someone"},
+                    3: {"name": "Hate Speech", "description": "Discriminatory language"},
+                    4: {"name": "Doxxing", "description": "Sharing private information"},
+                    5: {"name": "Blackmail", "description": "Threatening to expose information"},
+                    6: {"name": "Sexual Harassment", "description": "Unwanted sexual attention"},
+                    7: {"name": "Racist Content", "description": "Racist remarks or content"},
+                    8: {"name": "Homophobic Content", "description": "Anti-LGBTQ+ content"},
+                    9: {"name": "Trolling", "description": "Deliberate provocation"}
+                }
+            },
+            "COPYRIGHT": {
+                "name": "Copyright Infringement",
+                "priority": ReportPriority.MEDIUM,
+                "subcategories": {
+                    1: {"name": "Movie Piracy", "description": "Unauthorized movie sharing"},
+                    2: {"name": "Music Piracy", "description": "Unauthorized music sharing"},
+                    3: {"name": "Software Piracy", "description": "Unauthorized software sharing"},
+                    4: {"name": "Book Piracy", "description": "Unauthorized book sharing"},
+                    5: {"name": "Game Piracy", "description": "Unauthorized game sharing"},
+                    6: {"name": "TV Show Piracy", "description": "Unauthorized TV show sharing"},
+                    7: {"name": "Art Theft", "description": "Unauthorized art sharing"},
+                    8: {"name": "Photography Theft", "description": "Unauthorized photo sharing"},
+                    9: {"name": "Content Plagiarism", "description": "Copying without permission"}
+                }
+            },
+            "OTHER": {
+                "name": "Other Violations",
+                "priority": ReportPriority.LOW,
+                "subcategories": {
+                    1: {"name": "Hate Group", "description": "Hate group or organization"},
+                    2: {"name": "Misinformation", "description": "Harmful misinformation"},
+                    3: {"name": "Illegal Services", "description": "Other illegal services"},
+                    4: {"name": "Platform Abuse", "description": "Abusing Telegram features"},
+                    5: {"name": "Bug Exploitation", "description": "Exploiting platform bugs"},
+                    6: {"name": "Data Mining", "description": "Unauthorized data collection"},
+                    7: {"name": "Automated Abuse", "description": "Abusing with automation"},
+                    8: {"name": "Multiple Accounts", "description": "Creating too many accounts"},
+                    9: {"name": "Terms Violation", "description": "Other terms violations"}
+                }
+            }
         }
     
     async def start_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1705,8 +2042,6 @@ class EnhancedTelegramBotHandler:
         
         return self.REPORT_TARGET
     
-    # ... (other handlers similar to previous version, but with permission checks)
-    
     async def stats_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /stats command"""
         user = update.effective_user
@@ -1715,7 +2050,7 @@ class EnhancedTelegramBotHandler:
         user_stats = self.user_manager.get_stats()
         account_stats = self.account_manager.get_stats()
         report_stats = self.reporting_engine.get_stats()
-        proxy_stats = self.reporting_engine.proxy_manager.get_stats()
+        proxy_stats = self.proxy_manager.get_stats()
         
         role = self.user_manager.get_user_role(user.id)
         role_text = "👑 Owner" if self.user_manager.is_owner(user.id) else \
@@ -1759,7 +2094,7 @@ class EnhancedTelegramReportingBot:
     def __init__(self):
         self.user_manager = UserManager()
         self.proxy_manager = EnhancedProxyManager()
-        self.account_manager = AccountManager(self.proxy_manager)  # You'll need to update AccountManager to work with EnhancedProxyManager
+        self.account_manager = AccountManager(self.proxy_manager)
         self.reporting_engine = EnhancedReportingEngine(
             self.account_manager, 
             self.proxy_manager, 
@@ -1787,8 +2122,9 @@ class EnhancedTelegramReportingBot:
         self.application.add_handler(CommandHandler("listsudo", self.bot_handler.listsudo_command))
         self.application.add_handler(CommandHandler("removesudo", self.bot_handler.removesudo_command))
         
-        # Conversation handlers (you'll need to implement these similar to previous version)
-        # Add handlers for /add, /report, /tgreport, etc.
+        # Add other handlers as needed
+        # You'll need to add conversation handlers for /add, /report, /tgreport commands
+        # This is simplified - you should implement the full conversation handlers
         
         # Error handler
         self.application.add_error_handler(self._error_handler)
