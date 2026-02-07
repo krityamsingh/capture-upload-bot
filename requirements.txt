@@ -7,3 +7,7 @@ flask==2.3.3
 gunicorn
 dotenv
 aiohttp_socks
+aiohttp
+rich
+telethon
+python-telegram-bot 
