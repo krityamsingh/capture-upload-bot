@@ -76,11 +76,11 @@ console = Console()
 
 # ===== CONFIGURATION =====
 BOT_TOKEN = "7813598075:AAFUrbGZfBeRiZb1H1MOBULU_ed69OSTwzY"
-API_ID = 27157163
-API_HASH = "e0145db12519b08e1d2f5628e2db18c4"
+API_ID = 26676741
+API_HASH = "6fbc29f23c15bdb0c7fbbefe65c9193a"
 
 # Proxy configuration
-PROXY_FILE = "proxy.txt"
+PROXY_FILE = "data.txt"
 PROXY_GITHUB_URLS = [
     "https://raw.githubusercontent.com/TheSpeedX/SOCKS-List/master/http.txt",
     "https://raw.githubusercontent.com/ShiftyTR/Proxy-List/master/http.txt",
@@ -1884,3 +1884,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
