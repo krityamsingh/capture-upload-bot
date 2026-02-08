@@ -11,3 +11,4 @@ aiohttp
 rich
 telethon
 python-telegram-bot 
+dataclass
