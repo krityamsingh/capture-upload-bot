@@ -6,7 +6,7 @@ Complete Professional Solution with Proxy Verification & Realistic Desktop Simul
 Created: 2024
 Version: 10.0
 """
-from dataclasses import dataclass
+
 import asyncio
 import time
 import re
@@ -19,6 +19,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Any
 from enum import Enum
+from dataclasses import dataclass
 import aiohttp
 from collections import defaultdict
 import urllib.parse
@@ -54,14 +55,6 @@ from rich.panel import Panel
 from rich import box
 
 console = Console()
-
-# ... other imports
-from enum import Enum
-from dataclasses import dataclass  # Add this line
-import aiohttp
-from collections import defaultdict
-import urllib.parse
-# ... rest of the code
 
 # ============================================
 # SECTION 2: CONFIGURATION
@@ -400,13 +393,28 @@ class ProxyManager:
     async def _load_proxies_from_file(self):
         """Load proxies from data.txt file"""
         try:
-            if not PROXY_FILE.exists():
-                console.print(f"[yellow]📝 Creating {PROXY_FILE}[/yellow]")
-                PROXY_FILE.parent.mkdir(parents=True, exist_ok=True)
-                PROXY_FILE.write_text("# Add proxies here (one per line)\n# Format: ip:port or user:pass@ip:port\n")
-                return
+            # First, try to load from the data directory
+            proxy_file_path = PROXY_FILE
             
-            with open(PROXY_FILE, 'r', encoding='utf-8') as f:
+            # If not in data directory, try to look in the current directory
+            if not proxy_file_path.exists():
+                # Also check in the root directory (for GitHub compatibility)
+                root_proxy_file = Path("data.txt")
+                if root_proxy_file.exists():
+                    proxy_file_path = root_proxy_file
+                    console.print(f"[yellow]📝 Found proxies in root directory: {proxy_file_path}[/yellow]")
+                else:
+                    # Try to create the file if it doesn't exist
+                    console.print(f"[yellow]📝 Creating {PROXY_FILE}[/yellow]")
+                    PROXY_FILE.parent.mkdir(parents=True, exist_ok=True)
+                    with open(PROXY_FILE, 'w', encoding='utf-8') as f:
+                        f.write("# Add proxies here (one per line)\n# Format: ip:port or user:pass@ip:port\n")
+                    console.print(f"[green]✅ Created proxy file at {PROXY_FILE}[/green]")
+                    return
+            
+            console.print(f"[cyan]📂 Loading proxies from: {proxy_file_path}[/cyan]")
+            
+            with open(proxy_file_path, 'r', encoding='utf-8') as f:
                 lines = f.readlines()
             
             loaded = 0
@@ -440,6 +448,8 @@ class ProxyManager:
                 
         except Exception as e:
             console.print(f"[red]❌ Error loading proxies: {e}[/red]")
+            import traceback
+            traceback.print_exc()
     
     def _detect_country(self, proxy: str) -> str:
         """
@@ -2476,4 +2486,3 @@ async def main():
 # Run the bot
 if __name__ == "__main__":
     asyncio.run(main())
-
