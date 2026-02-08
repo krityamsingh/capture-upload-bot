@@ -6,7 +6,7 @@ Complete Professional Solution with Proxy Verification & Realistic Desktop Simul
 Created: 2024
 Version: 10.0
 """
-
+from dataclasses import dataclass
 import asyncio
 import time
 import re
@@ -54,6 +54,14 @@ from rich.panel import Panel
 from rich import box
 
 console = Console()
+
+# ... other imports
+from enum import Enum
+from dataclasses import dataclass  # Add this line
+import aiohttp
+from collections import defaultdict
+import urllib.parse
+# ... rest of the code
 
 # ============================================
 # SECTION 2: CONFIGURATION
@@ -2468,3 +2476,4 @@ async def main():
 # Run the bot
 if __name__ == "__main__":
     asyncio.run(main())
+
