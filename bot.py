@@ -84,6 +84,15 @@ PROXY_FILE = DATA_DIR / "data.txt"  # User adds proxies here
 PROXY_CACHE_FILE = DATA_DIR / "proxy_cache.json"
 JOBS_FILE = DATA_DIR / "jobs.json"
 
+# Test URLs for proxy verification
+PROXY_TEST_URLS = [
+    "https://httpbin.org/ip",
+    "https://api.ipify.org?format=json",
+    "https://checkip.amazonaws.com",
+    "https://icanhazip.com",
+    "https://ipinfo.io/ip"
+]
+
 # ============================================
 # SECTION 3: DATA MODELS
 # ============================================
@@ -341,14 +350,14 @@ class ProxyManager:
     
     Logic:
     1. Load proxies from data.txt
-    2. Verify each proxy by connecting to Telegram
+    2. Verify each proxy by connecting to HTTPS endpoints
     3. Measure response time for each proxy
     4. Prioritize proxies from fast countries
     5. Rotate proxies after 9 reports
     6. Track success/failure rates
     
     Features:
-    • Automatic proxy verification
+    • Automatic proxy verification using HTTPS
     • Speed-based prioritization
     • Country-based filtering
     • Failure detection and removal
@@ -360,6 +369,7 @@ class ProxyManager:
         self.proxy_history: Dict[str, List] = defaultdict(list)  # Account proxy history
         self.fast_countries = FAST_COUNTRIES
         self.max_reports_per_proxy = 9  # Rotate after 9 reports
+        self.test_urls = PROXY_TEST_URLS
         
     async def initialize(self) -> bool:
         """
@@ -382,7 +392,7 @@ class ProxyManager:
         await self._load_cache()
         
         # Step 3: Verify all proxies
-        console.print("[yellow]🔍 Verifying proxies...[/yellow]")
+        console.print("[yellow]🔍 Verifying proxies with HTTPS...[/yellow]")
         await self.verify_all_proxies()
         
         # Step 4: Display statistics
@@ -542,10 +552,10 @@ class ProxyManager:
     
     async def verify_all_proxies(self):
         """
-        Verify all proxies by connecting to Telegram
+        Verify all proxies by connecting to HTTPS endpoints
         Tests each proxy and measures response time
         """
-        console.print("[cyan]🔍 Starting proxy verification...[/cyan]")
+        console.print("[cyan]🔍 Starting proxy verification with HTTPS...[/cyan]")
         
         # Create verification tasks
         tasks = []
@@ -581,62 +591,86 @@ class ProxyManager:
     
     async def _verify_single_proxy(self, proxy_entry: ProxyEntry) -> bool:
         """
-        Verify a single proxy by connecting to Telegram
+        Verify a single proxy by connecting to HTTPS endpoints
         Returns: True if proxy works, False otherwise
         """
         try:
-            # Create a test client
-            test_client = TelegramClient(
-                str(SESSION_DIR / f"test_{hash(proxy_entry.proxy) % 1000}.session"),
-                API_ID,
-                API_HASH,
-                timeout=10,
-                connection_retries=1
-            )
-            
-            # Set the proxy
-            test_client.set_proxy(proxy_entry.proxy)
-            
-            # Measure response time
             start_time = time.time()
             
-            # Try to connect
-            await test_client.connect()
+            # Format proxy for aiohttp
+            proxy_url = self._format_proxy_for_aiohttp(proxy_entry.proxy)
             
-            # Test by getting DC info
-            try:
-                await test_client.get_me()
+            # Create aiohttp session with proxy
+            timeout = aiohttp.ClientTimeout(total=15)
+            connector = aiohttp.TCPConnector(ssl=False)
+            
+            async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
+                # Try multiple test URLs for better reliability
+                success_count = 0
+                total_tests = min(3, len(self.test_urls))  # Test up to 3 URLs
+                
+                for i in range(total_tests):
+                    test_url = random.choice(self.test_urls)
+                    
+                    try:
+                        # Measure response time for this test
+                        test_start = time.time()
+                        
+                        async with session.get(test_url, proxy=proxy_url, headers={
+                            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+                        }) as response:
+                            
+                            if response.status == 200:
+                                test_time = time.time() - test_start
+                                content = await response.text()
+                                
+                                # Basic validation - check if we got an IP address
+                                if any(ip_check in content for ip_check in ['.', ':', '{', '}']):
+                                    success_count += 1
+                                    console.print(f"[dim]  ✓ {proxy_entry.proxy[:30]}... passed test {i+1}/{total_tests} ({test_time:.2f}s)[/dim]")
+                                else:
+                                    console.print(f"[yellow]⚠️ {proxy_entry.proxy[:30]}... invalid response[/yellow]")
+                            else:
+                                console.print(f"[yellow]⚠️ {proxy_entry.proxy[:30]}... HTTP {response.status}[/yellow]")
+                                
+                    except aiohttp.ClientError as e:
+                        console.print(f"[dim]  ✗ {proxy_entry.proxy[:30]}... test {i+1} failed: {str(e)[:30]}[/dim]")
+                    except Exception as e:
+                        console.print(f"[dim]  ✗ {proxy_entry.proxy[:30]}... test {i+1} error: {str(e)[:30]}[/dim]")
+                    
+                    # Small delay between tests
+                    if i < total_tests - 1:
+                        await asyncio.sleep(0.5)
+                
+                # Calculate overall response time
                 response_time = time.time() - start_time
                 
-                # Update proxy stats
-                proxy_entry.verified = True
-                proxy_entry.is_active = True
-                proxy_entry.success_count += 1
-                proxy_entry.last_verified = datetime.now()
-                
-                # Calculate average response time
-                if proxy_entry.avg_response_time == 0:
-                    proxy_entry.avg_response_time = response_time
+                # Mark as verified if at least 2/3 tests passed
+                if success_count >= 2:
+                    proxy_entry.verified = True
+                    proxy_entry.is_active = True
+                    proxy_entry.success_count += 1
+                    proxy_entry.last_verified = datetime.now()
+                    
+                    # Calculate average response time
+                    if proxy_entry.avg_response_time == 0:
+                        proxy_entry.avg_response_time = response_time
+                    else:
+                        proxy_entry.avg_response_time = (
+                            proxy_entry.avg_response_time * (proxy_entry.success_count - 1) + response_time
+                        ) / proxy_entry.success_count
+                    
+                    # Adjust priority based on speed and country
+                    base_priority = 2.0 if proxy_entry.country in self.fast_countries else 1.0
+                    speed_factor = max(0.1, 1.0 / (response_time + 0.1))
+                    proxy_entry.priority = base_priority * speed_factor
+                    
+                    console.print(f"[green]✅ {proxy_entry.proxy[:30]}... verified ({response_time:.2f}s)[/green]")
+                    return True
                 else:
-                    proxy_entry.avg_response_time = (
-                        proxy_entry.avg_response_time * (proxy_entry.success_count - 1) + response_time
-                    ) / proxy_entry.success_count
-                
-                # Adjust priority based on speed and country
-                base_priority = 2.0 if proxy_entry.country in self.fast_countries else 1.0
-                speed_factor = max(0.1, 1.0 / (response_time + 0.1))
-                proxy_entry.priority = base_priority * speed_factor
-                
-                console.print(f"[green]✅ {proxy_entry.proxy[:30]}... ({response_time:.2f}s)[/green]")
-                return True
-                
-            except Exception as e:
-                console.print(f"[yellow]⚠️ {proxy_entry.proxy[:30]}... failed: {str(e)[:50]}[/yellow]")
-                proxy_entry.fail_count += 1
-                
-            finally:
-                await test_client.disconnect()
-                
+                    proxy_entry.fail_count += 1
+                    console.print(f"[yellow]⚠️ {proxy_entry.proxy[:30]}... failed verification[/yellow]")
+                    
         except Exception as e:
             console.print(f"[red]❌ {proxy_entry.proxy[:30]}... error: {str(e)[:50]}[/red]")
             proxy_entry.fail_count += 1
@@ -647,6 +681,19 @@ class ProxyManager:
             proxy_entry.verified = False
         
         return False
+    
+    def _format_proxy_for_aiohttp(self, proxy_str: str) -> str:
+        """Format proxy string for aiohttp"""
+        if proxy_str.startswith(('http://', 'https://', 'socks5://', 'socks4://')):
+            return proxy_str
+        
+        # Check if it has authentication
+        if '@' in proxy_str:
+            # Format: user:pass@host:port
+            return f"http://{proxy_str}"
+        else:
+            # Format: host:port
+            return f"http://{proxy_str}"
     
     def _sort_proxies(self):
         """
@@ -1120,7 +1167,7 @@ class AccountManager:
             
             # Set proxy
             if account.proxy:
-                client.set_proxy(account.proxy)
+                client.set_proxy(self._parse_proxy_string(account.proxy))
             
             # Connect and request OTP
             await client.connect()
@@ -1169,6 +1216,29 @@ class AccountManager:
             console.print(f"[red]❌ Error creating session: {e}[/red]")
             await update.message.reply_text(f"❌ Error: {str(e)[:100]}")
             return False
+    
+    def _parse_proxy_string(self, proxy_str: str):
+        """Parse proxy string for Telethon"""
+        if not proxy_str:
+            return None
+            
+        # If it already has scheme, use as is
+        if proxy_str.startswith(('http://', 'https://', 'socks5://', 'socks4://')):
+            return proxy_str
+            
+        # Check if it has authentication
+        if '@' in proxy_str:
+            # Format: user:pass@host:port
+            auth, hostport = proxy_str.split('@', 1)
+            user, password = auth.split(':', 1)
+            host, port = hostport.split(':', 1)
+            port = int(port)
+            return ('http', host, port, user, password)
+        else:
+            # Format: host:port
+            host, port = proxy_str.split(':', 1)
+            port = int(port)
+            return ('http', host, port)
     
     async def verify_otp(self, phone: str, otp: str, update: Update, user_id: int) -> bool:
         """
@@ -1716,7 +1786,7 @@ class ReportingEngine:
             )
             
             if account.proxy:
-                client.set_proxy(account.proxy)
+                client.set_proxy(self._parse_proxy_string(account.proxy))
             
             await client.start()
             account.client = client
@@ -1728,6 +1798,29 @@ class ReportingEngine:
             console.print(f"[red]❌ Client init failed for {account.phone}: {e}[/red]")
             account.status = AccountStatus.INACTIVE
             return False
+    
+    def _parse_proxy_string(self, proxy_str: str):
+        """Parse proxy string for Telethon"""
+        if not proxy_str:
+            return None
+            
+        # If it already has scheme, use as is
+        if proxy_str.startswith(('http://', 'https://', 'socks5://', 'socks4://')):
+            return proxy_str
+            
+        # Check if it has authentication
+        if '@' in proxy_str:
+            # Format: user:pass@host:port
+            auth, hostport = proxy_str.split('@', 1)
+            user, password = auth.split(':', 1)
+            host, port = hostport.split(':', 1)
+            port = int(port)
+            return ('http', host, port, user, password)
+        else:
+            # Format: host:port
+            host, port = proxy_str.split(':', 1)
+            port = int(port)
+            return ('http', host, port)
     
     async def _resolve_target(self, client, target: str, target_type: str):
         """Resolve target entity"""
