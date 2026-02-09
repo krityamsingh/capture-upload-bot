@@ -12,5 +12,5 @@ rich
 telethon
 dataclasses
 python-telegram-bot==22.6
-
+dns
 requests
