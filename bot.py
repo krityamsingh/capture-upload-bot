@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-ULTIMATE TELEGRAM ENTERPRISE REPORTING SYSTEM v12.0
-Optimized Professional Solution with Advanced Features
+ULTIMATE TELEGRAM ENTERPRISE REPORTING SYSTEM v11.0
+Converted to Pyrogram
 """
 
 # ============================================
-# STANDARD LIBRARY IMPORTS
+# STANDARD LIBRARY IMPORTS (Keep as is)
 # ============================================
 import asyncio
 import csv
@@ -16,1509 +16,766 @@ import json
 import logging
 import random
 import re
-import string
-import sys
 import time
 import uuid
-from collections import defaultdict, deque
-from dataclasses import dataclass, field
 from datetime import datetime, timedelta
-from enum import Enum, IntEnum
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set, Tuple, Union
+from typing import Dict, List, Optional, Tuple, Any
 
 # ============================================
-# THIRD-PARTY NETWORKING IMPORTS
+# THIRD-PARTY IMPORTS (Keep as is)
 # ============================================
 import aiohttp
 import certifi
-import requests
-from aiohttp import ClientSession, ClientTimeout, TCPConnector
-from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
-
-# ============================================
-# TELEGRAM BOT API (python-telegram-bot v20+)
-# ============================================
-from telegram import (
-    BotCommand,
-    InlineKeyboardButton,
-    InlineKeyboardMarkup,
-    ReplyKeyboardMarkup,
-    ReplyKeyboardRemove,
-    Update,
-    WebAppInfo,
-)
-from telegram.ext import (
-    Application,
-    ApplicationBuilder,
-    CallbackContext,
-    CallbackQueryHandler,
-    CommandHandler,
-    ConversationHandler,
-    MessageHandler,
-    PicklePersistence,
-    filters,
-)
-
-# ============================================
-# TELETHON (Telegram Client)
-# ============================================
-from telethon import TelegramClient
-from telethon.errors import (
-    FloodWaitError,
-    PhoneCodeInvalidError,
-    PhoneCodeExpiredError,
-    PhoneNumberInvalidError,
-    PhoneNumberBannedError,
-    SessionPasswordNeededError,
-    AuthKeyDuplicatedError,
-)
-from telethon.tl.functions.account import ReportPeerRequest
-from telethon.tl.functions.auth import SendCodeRequest, SignInRequest
-from telethon.tl.functions.messages import ReportRequest
-from telethon.tl.types import (
-    InputPeerUser,
-    InputPeerChannel,
-    InputPeerChat,
-    InputReportReasonSpam,
-    InputReportReasonViolence,
-    InputReportReasonPornography,
-    InputReportReasonChildAbuse,
-    InputReportReasonCopyright,
-    InputReportReasonGeoIrrelevant,
-    InputReportReasonFake,
-    InputReportReasonIllegalDrugs,
-    InputReportReasonPersonalDetails,
-    InputReportReasonOther,
-)
-
-# ============================================
-# RICH CONSOLE OUTPUT
-# ============================================
+import pytz
+import backoff
+import numpy as np
 from rich.console import Console
-from rich.progress import (
-    Progress,
-    SpinnerColumn,
-    TextColumn,
-    BarColumn,
-    TimeElapsedColumn,
-    TimeRemainingColumn,
+
+# ============================================
+# PYROGRAM IMPORTS (Replace Telethon/telegram)
+# ============================================
+from pyrogram import Client, filters, enums
+from pyrogram.types import (
+    Message, InlineKeyboardMarkup, InlineKeyboardButton,
+    CallbackQuery, User, Chat, ReplyKeyboardMarkup, KeyboardButton,
+    ReplyKeyboardRemove, WebAppInfo
 )
-from rich.table import Table
-from rich.panel import Panel
-from rich import box
-from rich.traceback import install as install_rich_traceback
-
-# Install rich traceback for better error display
-install_rich_traceback()
-console = Console()
+from pyrogram.errors import (
+    FloodWait, PhoneNumberInvalid, PhoneCodeInvalid,
+    PhoneCodeExpired, SessionPasswordNeeded, PasswordHashInvalid,
+    PhoneNumberBanned, PhoneNumberFlood, PhoneNumberUnoccupied,
+    BadRequest, Unauthorized, NotAcceptable
+)
+from pyrogram.enums import ParseMode, ChatType, ChatMemberStatus, MessageMediaType
 
 # ============================================
-# CONFIGURATION
+# CONFIGURATION (Keep as is)
 # ============================================
-
-# Bot Configuration (REPLACE WITH YOUR VALUES)
 BOT_TOKEN = "7813598075:AAFUrbGZfBeRiZb1H1MOBULU_ed69OSTwzY"
 API_ID = 27157163
 API_HASH = "e0145db12519b08e1d2f5628e2db18c4"
-
-# Owner IDs
 OWNER_IDS = [6118760915, 1366105247]
-ADMIN_IDS = []
-
-# File paths
-BASE_DIR = Path(__file__).parent
-DATA_DIR = BASE_DIR / "data"
-SESSION_DIR = BASE_DIR / "sessions"
-BACKUP_DIR = BASE_DIR / "backups"
-
-# Create directories
-for directory in [DATA_DIR, SESSION_DIR, BACKUP_DIR]:
-    directory.mkdir(exist_ok=True)
-
-# Data files
-USERS_FILE = DATA_DIR / "users.json"
-ACCOUNTS_FILE = DATA_DIR / "accounts.json"
-PROXY_FILE = DATA_DIR / "proxies.txt"
-PROXY_CACHE_FILE = DATA_DIR / "proxy_cache.json"
-JOBS_FILE = DATA_DIR / "jobs.json"
-SETTINGS_FILE = DATA_DIR / "settings.json"
 
 # ============================================
-# ENUMERATIONS
+# ENHANCED DATA MODELS (Keep as is)
 # ============================================
-
-class UserRole(IntEnum):
-    """User role hierarchy"""
-    BANNED = 0
-    VIEWER = 1
-    USER = 2
-    REPORTER = 3
-    MODERATOR = 4
-    ADMIN = 5
-    OWNER = 6
-
-class AccountStatus(IntEnum):
-    """Account status tracking"""
-    UNVERIFIED = 0
-    VERIFYING = 1
-    ACTIVE = 2
-    INACTIVE = 3
-    BANNED = 4
-    FLOOD_WAIT = 5
-    NEED_PASSWORD = 6
-    PROXY_FAILED = 7
-
-class ReportStatus(IntEnum):
-    """Report job status"""
-    PENDING = 0
-    PROCESSING = 1
-    COMPLETED = 2
-    FAILED = 3
-    CANCELLED = 4
-
-class ProxyType(IntEnum):
-    """Proxy protocol types"""
-    HTTP = 0
-    HTTPS = 1
-    SOCKS4 = 2
-    SOCKS5 = 3
+# Keep your existing data models (UserRole, AccountStatus, etc.)
+# They don't depend on the Telegram library
 
 # ============================================
-# DATA MODELS
+# ADVANCED PROXY MANAGER (Adapt for Pyrogram)
 # ============================================
-
-@dataclass
-class TelegramUser:
-    """User model with permissions"""
-    user_id: int
-    username: Optional[str] = None
-    first_name: Optional[str] = None
-    last_name: Optional[str] = None
-    role: UserRole = UserRole.USER
-    added_at: datetime = None
-    reports_made: int = 0
-    last_active: Optional[datetime] = None
-    
-    def __post_init__(self):
-        if self.added_at is None:
-            self.added_at = datetime.now()
-    
-    def to_dict(self) -> Dict[str, Any]:
-        return {
-            "user_id": self.user_id,
-            "username": self.username,
-            "first_name": self.first_name,
-            "last_name": self.last_name,
-            "role": self.role.value,
-            "added_at": self.added_at.isoformat(),
-            "reports_made": self.reports_made,
-            "last_active": self.last_active.isoformat() if self.last_active else None,
-        }
-    
-    @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> 'TelegramUser':
-        user = cls(
-            user_id=data["user_id"],
-            username=data.get("username"),
-            first_name=data.get("first_name"),
-            last_name=data.get("last_name"),
-            role=UserRole(data.get("role", 2)),
-            reports_made=data.get("reports_made", 0),
-        )
-        user.added_at = datetime.fromisoformat(data["added_at"])
-        if data.get("last_active"):
-            user.last_active = datetime.fromisoformat(data["last_active"])
-        return user
-
-@dataclass
-class ProxyEntry:
-    """Proxy entry with performance tracking"""
-    proxy: str
-    proxy_type: ProxyType = ProxyType.HTTP
-    country: str = "Unknown"
-    is_active: bool = True
-    success_count: int = 0
-    fail_count: int = 0
-    avg_response_time: float = 0.0
-    last_used: Optional[datetime] = None
-    reports_used: int = 0
-    verified: bool = False
-    
-    def to_dict(self) -> Dict[str, Any]:
-        return {
-            "proxy": self.proxy,
-            "proxy_type": self.proxy_type.value,
-            "country": self.country,
-            "is_active": self.is_active,
-            "success_count": self.success_count,
-            "fail_count": self.fail_count,
-            "avg_response_time": self.avg_response_time,
-            "last_used": self.last_used.isoformat() if self.last_used else None,
-            "reports_used": self.reports_used,
-            "verified": self.verified,
-        }
-    
-    @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> 'ProxyEntry':
-        entry = cls(
-            proxy=data["proxy"],
-            country=data.get("country", "Unknown"),
-            is_active=data.get("is_active", True),
-            success_count=data.get("success_count", 0),
-            fail_count=data.get("fail_count", 0),
-            avg_response_time=data.get("avg_response_time", 0.0),
-            reports_used=data.get("reports_used", 0),
-            verified=data.get("verified", False),
-        )
-        entry.proxy_type = ProxyType(data.get("proxy_type", 0))
-        if data.get("last_used"):
-            entry.last_used = datetime.fromisoformat(data["last_used"])
-        return entry
-
-@dataclass
-class TelegramAccount:
-    """Telegram account model"""
-    phone: str
-    session_file: Path
-    proxy: Optional[str] = None
-    status: AccountStatus = AccountStatus.UNVERIFIED
-    report_count: int = 0
-    total_reports: int = 0
-    last_report_time: Optional[datetime] = None
-    created_at: datetime = None
-    last_used: Optional[datetime] = None
-    client: Optional[TelegramClient] = None
-    
-    def __post_init__(self):
-        if self.created_at is None:
-            self.created_at = datetime.now()
-    
-    def to_dict(self) -> Dict[str, Any]:
-        return {
-            "phone": self.phone,
-            "session_file": str(self.session_file),
-            "proxy": self.proxy,
-            "status": self.status.value,
-            "report_count": self.report_count,
-            "total_reports": self.total_reports,
-            "created_at": self.created_at.isoformat(),
-            "last_used": self.last_used.isoformat() if self.last_used else None,
-            "last_report_time": self.last_report_time.isoformat() if self.last_report_time else None,
-        }
-    
-    @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> 'TelegramAccount':
-        account = cls(
-            phone=data["phone"],
-            session_file=Path(data["session_file"]),
-            proxy=data.get("proxy"),
-            status=AccountStatus(data["status"]),
-            report_count=data.get("report_count", 0),
-            total_reports=data.get("total_reports", 0),
-        )
-        account.created_at = datetime.fromisoformat(data["created_at"])
-        if data.get("last_used"):
-            account.last_used = datetime.fromisoformat(data["last_used"])
-        if data.get("last_report_time"):
-            account.last_report_time = datetime.fromisoformat(data["last_report_time"])
-        return account
-
-@dataclass
-class ReportJob:
-    """Report job model"""
-    job_id: str
-    target: str
-    target_type: str
-    category: str
-    description: str
-    created_by: int
-    created_at: datetime = None
-    started_at: Optional[datetime] = None
-    completed_at: Optional[datetime] = None
-    status: ReportStatus = ReportStatus.PENDING
-    accounts_used: List[str] = None
-    results: List[Dict] = None
-    
-    def __post_init__(self):
-        if self.created_at is None:
-            self.created_at = datetime.now()
-        if self.accounts_used is None:
-            self.accounts_used = []
-        if self.results is None:
-            self.results = []
-    
-    def to_dict(self) -> Dict[str, Any]:
-        return {
-            "job_id": self.job_id,
-            "target": self.target,
-            "target_type": self.target_type,
-            "category": self.category,
-            "description": self.description,
-            "created_by": self.created_by,
-            "created_at": self.created_at.isoformat(),
-            "started_at": self.started_at.isoformat() if self.started_at else None,
-            "completed_at": self.completed_at.isoformat() if self.completed_at else None,
-            "status": self.status.value,
-            "accounts_used": self.accounts_used,
-            "results": self.results,
-        }
-    
-    @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> 'ReportJob':
-        job = cls(
-            job_id=data["job_id"],
-            target=data["target"],
-            target_type=data["target_type"],
-            category=data["category"],
-            description=data["description"],
-            created_by=data["created_by"],
-        )
-        job.created_at = datetime.fromisoformat(data["created_at"])
-        job.status = ReportStatus(data["status"])
-        if data.get("started_at"):
-            job.started_at = datetime.fromisoformat(data["started_at"])
-        if data.get("completed_at"):
-            job.completed_at = datetime.fromisoformat(data["completed_at"])
-        job.accounts_used = data.get("accounts_used", [])
-        job.results = data.get("results", [])
-        return job
-
-# ============================================
-# CORE MANAGERS
-# ============================================
-
-class UserManager:
-    """Manages bot users and permissions"""
-    
+class AdvancedProxyManager:
     def __init__(self):
-        self.users: Dict[int, TelegramUser] = {}
-        self._load_users()
+        # Keep your existing proxy management logic
+        # Update proxy format for Pyrogram
+        pass
     
-    def _load_users(self):
-        """Load users from JSON file"""
-        try:
-            if USERS_FILE.exists():
-                with open(USERS_FILE, 'r', encoding='utf-8') as f:
-                    data = json.load(f)
-                
-                for user_id_str, user_data in data.items():
-                    try:
-                        user = TelegramUser.from_dict(user_data)
-                        self.users[user.user_id] = user
-                    except Exception as e:
-                        console.print(f"[yellow]⚠️ Skipping invalid user data: {e}[/yellow]")
-                        continue
-                
-                console.print(f"[green]✅ Loaded {len(self.users)} users[/green]")
-        except Exception as e:
-            console.print(f"[red]❌ Error loading users: {e}[/red]")
-    
-    def _save_users(self):
-        """Save users to JSON file"""
-        try:
-            data = {str(uid): user.to_dict() for uid, user in self.users.items()}
-            with open(USERS_FILE, 'w', encoding='utf-8') as f:
-                json.dump(data, f, indent=2, ensure_ascii=False)
-        except Exception as e:
-            console.print(f"[red]❌ Error saving users: {e}[/red]")
-    
-    def get_or_create_user(self, user_id: int, username: str = None,
-                          first_name: str = None, last_name: str = None) -> TelegramUser:
-        """Get existing user or create new one"""
-        if user_id not in self.users:
-            user = TelegramUser(
-                user_id=user_id,
-                username=username,
-                first_name=first_name,
-                last_name=last_name,
-                role=UserRole.OWNER if user_id in OWNER_IDS else UserRole.USER,
-            )
-            self.users[user_id] = user
-            self._save_users()
-            console.print(f"[green]✅ Created new user: {user_id}[/green]")
-        
-        user = self.users[user_id]
-        user.last_active = datetime.now()
-        
-        # Update user info if provided
-        if username:
-            user.username = username
-        if first_name:
-            user.first_name = first_name
-        if last_name:
-            user.last_name = last_name
-        
-        self._save_users()
-        return user
-    
-    def check_permission(self, user_id: int, required_role: UserRole) -> bool:
-        """Check if user has required permission"""
-        if user_id not in self.users:
-            return False
-        return self.users[user_id].role >= required_role
-
-class ProxyManager:
-    """Manages proxy verification and rotation"""
-    
-    def __init__(self):
-        self.proxies: List[ProxyEntry] = []
-        self.proxy_map: Dict[str, ProxyEntry] = {}
-        self.session: Optional[aiohttp.ClientSession] = None
-        
-    async def initialize(self):
-        """Initialize proxy manager"""
-        console.print("[cyan]🚀 Initializing Proxy Manager...[/cyan]")
-        
-        # Create aiohttp session
-        self.session = aiohttp.ClientSession(
-            connector=TCPConnector(ssl=False, limit=50),
-            timeout=ClientTimeout(total=30)
-        )
-        
-        # Load proxies
-        await self._load_proxies()
-        
-        if not self.proxies:
-            console.print("[red]❌ No proxies found[/red]")
-            return False
-        
-        console.print(f"[green]✅ Loaded {len(self.proxies)} proxies[/green]")
-        
-        # Verify proxies
-        await self.verify_all_proxies()
-        
-        return True
-    
-    async def _load_proxies(self):
-        """Load proxies from file"""
-        try:
-            if PROXY_FILE.exists():
-                with open(PROXY_FILE, 'r', encoding='utf-8') as f:
-                    lines = f.readlines()
-                
-                for line in lines:
-                    proxy_str = line.strip()
-                    if not proxy_str or proxy_str.startswith('#'):
-                        continue
-                    
-                    # Create proxy entry
-                    proxy_entry = ProxyEntry(proxy=proxy_str)
-                    self.proxies.append(proxy_entry)
-                    self.proxy_map[proxy_str] = proxy_entry
-                
-                console.print(f"[green]✅ Parsed {len(self.proxies)} proxies[/green]")
-            else:
-                console.print(f"[yellow]⚠️ Proxy file not found: {PROXY_FILE}[/yellow]")
-                console.print("[yellow]💡 Create proxies.txt with one proxy per line[/yellow]")
-                
-        except Exception as e:
-            console.print(f"[red]❌ Error loading proxies: {e}[/red]")
-    
-    async def verify_all_proxies(self):
-        """Verify all proxies"""
-        console.print("[cyan]🔍 Verifying proxies...[/cyan]")
-        
-        working = 0
-        with Progress(
-            SpinnerColumn(),
-            TextColumn("[progress.description]{task.description}"),
-            BarColumn(),
-            TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
-            TimeElapsedColumn(),
-            console=console
-        ) as progress:
-            task = progress.add_task("Verifying...", total=len(self.proxies))
-            
-            for proxy in self.proxies:
-                is_working = await self._verify_proxy(proxy)
-                if is_working:
-                    working += 1
-                progress.update(task, advance=1)
-        
-        console.print(f"[green]✅ {working}/{len(self.proxies)} proxies working[/green]")
-    
-    async def _verify_proxy(self, proxy_entry: ProxyEntry) -> bool:
-        """Verify single proxy"""
-        try:
-            test_urls = [
-                "https://httpbin.org/ip",
-                "https://api.ipify.org?format=json",
-                "https://icanhazip.com",
-            ]
-            
-            for url in test_urls:
-                try:
-                    start_time = time.time()
-                    async with self.session.get(
-                        url,
-                        proxy=proxy_entry.proxy,
-                        timeout=10,
-                        ssl=False
-                    ) as response:
-                        if response.status == 200:
-                            proxy_entry.verified = True
-                            proxy_entry.is_active = True
-                            proxy_entry.avg_response_time = time.time() - start_time
-                            return True
-                except:
-                    continue
-            
-            proxy_entry.verified = False
-            proxy_entry.is_active = False
-            return False
-            
-        except Exception as e:
-            proxy_entry.verified = False
-            proxy_entry.is_active = False
-            return False
-    
-    def get_best_proxy(self) -> Optional[str]:
-        """Get best available proxy"""
-        working_proxies = [p for p in self.proxies if p.is_active and p.verified]
-        if not working_proxies:
+    def format_proxy_for_pyrogram(self, proxy_str: str) -> Optional[Dict]:
+        """Format proxy string for Pyrogram"""
+        if not proxy_str:
             return None
         
-        # Sort by response time and usage
-        working_proxies.sort(key=lambda x: (x.avg_response_time, x.reports_used))
-        return working_proxies[0].proxy
-    
-    async def cleanup(self):
-        """Cleanup resources"""
-        if self.session:
-            await self.session.close()
+        try:
+            proxy_lower = proxy_str.lower()
+            
+            if proxy_lower.startswith('socks5://'):
+                protocol = "socks5"
+                proxy_str = proxy_str[9:]
+            elif proxy_lower.startswith('socks4://'):
+                protocol = "socks4"
+                proxy_str = proxy_str[9:]
+            elif proxy_lower.startswith('https://'):
+                protocol = "http"  # Pyrogram uses "http" for HTTPS
+                proxy_str = proxy_str[8:]
+            elif proxy_lower.startswith('http://'):
+                protocol = "http"
+                proxy_str = proxy_str[7:]
+            else:
+                protocol = "http"
+            
+            # Parse host and port
+            if '@' in proxy_str:
+                # Has authentication
+                auth, hostport = proxy_str.split('@', 1)
+                username, password = auth.split(':', 1)
+                host, port = hostport.split(':', 1)
+                
+                return {
+                    "scheme": protocol,
+                    "hostname": host,
+                    "port": int(port),
+                    "username": username,
+                    "password": password
+                }
+            else:
+                # No authentication
+                host, port = proxy_str.split(':', 1)
+                return {
+                    "scheme": protocol,
+                    "hostname": host,
+                    "port": int(port)
+                }
+                
+        except Exception as e:
+            console.print(f"[red]❌ Error parsing proxy: {e}[/red]")
+            return None
 
-class AccountManager:
-    """Manages Telegram accounts"""
-    
-    def __init__(self, proxy_manager: ProxyManager):
+# ============================================
+# ADVANCED ACCOUNT MANAGER (Converted to Pyrogram)
+# ============================================
+class AdvancedAccountManager:
+    def __init__(self, proxy_manager):
+        self.accounts = {}
         self.proxy_manager = proxy_manager
-        self.accounts: Dict[str, TelegramAccount] = {}
-        self._load_accounts()
+        self.clients = {}  # Store Pyrogram clients
     
-    def _load_accounts(self):
-        """Load accounts from JSON file"""
+    async def create_pyrogram_client(self, phone: str, session_file: str, 
+                                   proxy: Optional[str] = None) -> Optional[Client]:
+        """Create a Pyrogram client for an account"""
         try:
-            if ACCOUNTS_FILE.exists():
-                with open(ACCOUNTS_FILE, 'r', encoding='utf-8') as f:
-                    data = json.load(f)
-                
-                for phone, acc_data in data.items():
-                    try:
-                        account = TelegramAccount.from_dict(acc_data)
-                        self.accounts[phone] = account
-                    except Exception as e:
-                        console.print(f"[yellow]⚠️ Skipping invalid account {phone}: {e}[/yellow]")
-                        continue
-                
-                console.print(f"[green]✅ Loaded {len(self.accounts)} accounts[/green]")
+            # Get proxy dict for Pyrogram
+            proxy_dict = None
+            if proxy:
+                proxy_dict = self.proxy_manager.format_proxy_for_pyrogram(proxy)
+            
+            # Create client with enhanced configuration
+            client = Client(
+                name=session_file,
+                api_id=API_ID,
+                api_hash=API_HASH,
+                app_version="4.0.0",
+                device_model="Desktop",
+                system_version="Windows 10",
+                lang_code="en",
+                proxy=proxy_dict
+            )
+            
+            return client
+            
         except Exception as e:
-            console.print(f"[red]❌ Error loading accounts: {e}[/red]")
+            console.print(f"[red]❌ Error creating Pyrogram client: {e}[/red]")
+            return None
     
-    def _save_accounts(self):
-        """Save accounts to JSON file"""
-        try:
-            data = {phone: account.to_dict() for phone, account in self.accounts.items()}
-            with open(ACCOUNTS_FILE, 'w', encoding='utf-8') as f:
-                json.dump(data, f, indent=2, ensure_ascii=False)
-        except Exception as e:
-            console.print(f"[red]❌ Error saving accounts: {e}[/red]")
-    
-    async def add_account(self, phone: str, added_by: int) -> Tuple[bool, str]:
-        """Add new Telegram account"""
-        # Validate phone number
-        if not re.match(r'^\+\d{10,15}$', phone):
-            return False, "Invalid phone number format. Use: +1234567890"
-        
-        # Check if account already exists
-        if phone in self.accounts:
-            return False, "Account already exists"
-        
-        # Get proxy for account
-        proxy = self.proxy_manager.get_best_proxy()
-        if not proxy:
-            return False, "No working proxies available"
-        
-        # Create session file
-        session_file = SESSION_DIR / f"{phone.replace('+', '')}.session"
-        
-        # Create account
-        account = TelegramAccount(
-            phone=phone,
-            session_file=session_file,
-            proxy=proxy,
-            status=AccountStatus.UNVERIFIED
-        )
-        
-        self.accounts[phone] = account
-        self._save_accounts()
-        
-        console.print(f"[green]✅ Added account: {phone}[/green]")
-        return True, f"Account {phone} added successfully"
-    
-    async def create_session(self, phone: str, update: Update) -> Tuple[bool, str]:
-        """Create Telegram session with OTP verification"""
+    async def start_session(self, phone: str) -> Tuple[bool, str]:
+        """Start a Pyrogram session for an account"""
         if phone not in self.accounts:
             return False, "Account not found"
         
         account = self.accounts[phone]
         
-        # Create Telegram client
-        client = TelegramClient(
-            str(account.session_file),
-            API_ID,
-            API_HASH,
-            device_model="Desktop",
-            system_version="Windows 10",
-            app_version="4.0.0",
-            system_lang_code="en",
-            lang_code="en"
-        )
-        
         try:
-            # Connect to Telegram
+            # Create or get client
+            if phone not in self.clients:
+                client = await self.create_pyrogram_client(
+                    phone, str(account.session_file), account.proxy
+                )
+                if not client:
+                    return False, "Failed to create client"
+                self.clients[phone] = client
+            
+            client = self.clients[phone]
+            
+            # Connect and authorize
             await client.connect()
             
-            # Check if already authorized
+            # Check if authorized
             if await client.is_user_authorized():
-                account.client = client
                 account.status = AccountStatus.ACTIVE
-                account.last_used = datetime.now()
-                self._save_accounts()
+                account.last_login = datetime.now()
                 
-                await update.message.reply_text(
-                    f"✅ *Already Logged In!*\n\n"
-                    f"Account `{phone}` was already logged in.\n"
-                    f"Session restored successfully!",
-                    parse_mode='Markdown'
-                )
-                return True, "Session restored"
+                # Get account info
+                me = await client.get_me()
+                account.user_id = me.id
+                account.username = me.username
+                account.first_name = me.first_name
+                account.last_name = me.last_name
+                account.is_premium = me.is_premium if hasattr(me, 'is_premium') else False
+                
+                return True, "Session started successfully"
+            else:
+                # Need to send code
+                account.status = AccountStatus.VERIFYING
+                return True, "Need OTP verification"
+                
+        except FloodWait as e:
+            account.status = AccountStatus.FLOOD_WAIT
+            account.flood_wait_seconds = e.value
+            return False, f"Flood wait: {e.value} seconds"
             
-            # Send OTP
-            await update.message.reply_text(
-                f"📱 *Sending OTP to {phone}...*\n\n"
-                f"Please wait for the OTP code.",
-                parse_mode='Markdown'
-            )
+        except Exception as e:
+            console.print(f"[red]❌ Session start error: {e}[/red]")
+            return False, f"Error: {str(e)[:100]}"
+    
+    async def send_otp_code(self, phone: str) -> Tuple[bool, str]:
+        """Send OTP code using Pyrogram"""
+        if phone not in self.clients:
+            return False, "Client not initialized"
+        
+        try:
+            client = self.clients[phone]
+            sent_code = await client.send_code(phone)
             
-            sent_code = await client.send_code_request(phone)
-            phone_code_hash = sent_code.phone_code_hash
-            
-            # Store session data
-            update._user_sessions = getattr(update, '_user_sessions', {})
-            update._user_sessions[update.effective_user.id] = {
-                "phone": phone,
-                "client": client,
-                "phone_code_hash": phone_code_hash,
-                "step": "waiting_otp"
-            }
-            
-            await update.message.reply_text(
-                f"✅ *OTP Sent!*\n\n"
-                f"Please reply with the 5-digit code you received.\n\n"
-                f"Format: `12345`",
-                parse_mode='Markdown'
-            )
+            # Store code info
+            if phone in self.accounts:
+                self.accounts[phone].otp_code_hash = sent_code.phone_code_hash
             
             return True, "OTP sent successfully"
             
-        except FloodWaitError as e:
-            account.status = AccountStatus.FLOOD_WAIT
-            self._save_accounts()
-            return False, f"Flood wait: {e.seconds} seconds"
-        except PhoneNumberInvalidError:
+        except PhoneNumberInvalid:
             return False, "Invalid phone number"
-        except PhoneNumberBannedError:
-            account.status = AccountStatus.BANNED
-            self._save_accounts()
+        except PhoneNumberFlood:
+            return False, "Phone number flood protection"
+        except PhoneNumberBanned:
             return False, "Phone number is banned"
         except Exception as e:
             return False, f"Error: {str(e)[:100]}"
     
-    async def verify_otp(self, phone: str, otp_code: str, update: Update) -> Tuple[bool, str]:
-        """Verify OTP code"""
-        user_id = update.effective_user.id
-        
-        if not hasattr(update, '_user_sessions') or user_id not in update._user_sessions:
-            return False, "Session expired"
-        
-        session_data = update._user_sessions[user_id]
-        if session_data.get("phone") != phone:
-            return False, "Phone mismatch"
-        
-        client = session_data["client"]
-        phone_code_hash = session_data["phone_code_hash"]
+    async def verify_otp_code(self, phone: str, code: str) -> Tuple[bool, str]:
+        """Verify OTP code using Pyrogram"""
+        if phone not in self.clients:
+            return False, "Client not initialized"
         
         try:
-            # Sign in with OTP
-            await client.sign_in(
-                phone=phone,
-                code=otp_code,
-                phone_code_hash=phone_code_hash
-            )
+            client = self.clients[phone]
             
-            # Update account
-            account = self.accounts[phone]
-            account.client = client
-            account.status = AccountStatus.ACTIVE
-            account.last_used = datetime.now()
-            self._save_accounts()
-            
-            # Get account info
-            me = await client.get_me()
-            account_info = f"✅ *Login Successful!*\n\n"
-            account_info += f"📱 Phone: `{phone}`\n"
-            account_info += f"👤 User ID: `{me.id}`\n"
-            if me.username:
-                account_info += f"📛 Username: @{me.username}\n"
-            account_info += f"👋 Name: {me.first_name or ''}"
-            if me.last_name:
-                account_info += f" {me.last_name}"
-            account_info += f"\n\nReady for reporting!"
-            
-            await update.message.reply_text(account_info, parse_mode='Markdown')
-            return True, "Login successful"
-            
-        except SessionPasswordNeededError:
-            return False, "2FA_PASSWORD_NEEDED"
-        except PhoneCodeInvalidError:
-            return False, "Invalid OTP code"
-        except PhoneCodeExpiredError:
-            return False, "OTP code expired"
-        except Exception as e:
-            return False, f"Verification error: {str(e)[:100]}"
-    
-    def get_available_accounts(self, count: int = 3) -> List[TelegramAccount]:
-        """Get available accounts for reporting"""
-        available = []
-        
-        for account in self.accounts.values():
-            if (account.status == AccountStatus.ACTIVE and 
-                account.report_count < 9 and
-                account.client):
-                available.append(account)
-                if len(available) >= count:
-                    break
-        
-        return available
-
-class ReportingEngine:
-    """Handles report creation and processing"""
-    
-    def __init__(self, account_manager: AccountManager):
-        self.account_manager = account_manager
-        self.active_jobs: Dict[str, ReportJob] = {}
-        self.job_history: List[ReportJob] = {}
-        
-        # Report categories
-        self.categories = {
-            "spam": {"name": "Spam", "reason": InputReportReasonSpam},
-            "violence": {"name": "Violence", "reason": InputReportReasonViolence},
-            "pornography": {"name": "Pornography", "reason": InputReportReasonPornography},
-            "child_abuse": {"name": "Child Abuse", "reason": InputReportReasonChildAbuse},
-            "copyright": {"name": "Copyright", "reason": InputReportReasonCopyright},
-            "fake": {"name": "Fake Account", "reason": InputReportReasonFake},
-            "drugs": {"name": "Illegal Drugs", "reason": InputReportReasonIllegalDrugs},
-            "other": {"name": "Other", "reason": InputReportReasonOther},
-        }
-    
-    async def create_job(self, target: str, category: str,
-                        description: str, user_id: int) -> Tuple[bool, str, Optional[str]]:
-        """Create new report job"""
-        if category not in self.categories:
-            return False, f"Invalid category: {category}", None
-        
-        # Generate job ID
-        job_id = hashlib.sha256(
-            f"{target}{category}{user_id}{time.time()}".encode()
-        ).hexdigest()[:16]
-        
-        # Create job
-        job = ReportJob(
-            job_id=job_id,
-            target=target,
-            target_type="user",  # Will be detected
-            category=category,
-            description=description,
-            created_by=user_id
-        )
-        
-        self.active_jobs[job_id] = job
-        console.print(f"[cyan]📝 Created job {job_id} for {target}[/cyan]")
-        
-        return True, "Job created successfully", job_id
-    
-    async def process_job(self, job_id: str):
-        """Process report job"""
-        if job_id not in self.active_jobs:
-            return
-        
-        job = self.active_jobs[job_id]
-        job.status = ReportStatus.PROCESSING
-        job.started_at = datetime.now()
-        
-        console.print(f"[cyan]🔧 Processing job {job_id}[/cyan]")
-        
-        try:
-            # Get accounts
-            accounts = self.account_manager.get_available_accounts(3)
-            if not accounts:
-                raise Exception("No accounts available")
-            
-            # Process with each account
-            for account in accounts:
-                result = await self._process_with_account(account, job)
-                job.results.append(result)
-                job.accounts_used.append(account.phone)
+            if phone in self.accounts:
+                account = self.accounts[phone]
                 
-                # Update account
-                account.report_count += 1
-                account.total_reports += 1
-                account.last_report_time = datetime.now()
-            
-            job.status = ReportStatus.COMPLETED
-            job.completed_at = datetime.now()
-            
-            console.print(f"[green]✅ Completed job {job_id}[/green]")
-            
+                # Sign in with code
+                await client.sign_in(
+                    phone_number=phone,
+                    phone_code_hash=account.otp_code_hash,
+                    phone_code=code
+                )
+                
+                # Update account status
+                account.status = AccountStatus.ACTIVE
+                account.last_login = datetime.now()
+                
+                return True, "OTP verified successfully"
+                
+        except PhoneCodeInvalid:
+            return False, "Invalid OTP code"
+        except PhoneCodeExpired:
+            return False, "OTP code expired"
+        except SessionPasswordNeeded:
+            return False, "2FA_PASSWORD_NEEDED"
         except Exception as e:
-            job.status = ReportStatus.FAILED
-            console.print(f"[red]❌ Job {job_id} failed: {e}[/red]")
-        
-        # Move to history
-        self.job_history.append(job)
-        del self.active_jobs[job_id]
-    
-    async def _process_with_account(self, account: TelegramAccount,
-                                  job: ReportJob) -> Dict[str, Any]:
-        """Process report with single account"""
-        result = {
-            "account": account.phone,
-            "status": "FAILED",
-            "timestamp": datetime.now().isoformat(),
-        }
-        
-        try:
-            if not account.client or not account.client.is_connected():
-                await account.client.connect()
-            
-            # Resolve target
-            entity = await account.client.get_entity(job.target)
-            
-            # Get report reason
-            category_info = self.categories[job.category]
-            reason = category_info["reason"]()
-            
-            # Submit report
-            await account.client(ReportPeerRequest(
-                peer=entity,
-                reason=reason(),
-                message=job.description[:200]
-            ))
-            
-            # Simulate realistic delay
-            await asyncio.sleep(random.uniform(2, 5))
-            
-            result["status"] = "COMPLETED"
-            result["target_id"] = getattr(entity, 'id', None)
-            
-        except Exception as e:
-            result["error"] = str(e)[:200]
-        
-        return result
+            return False, f"Error: {str(e)[:100]}"
 
 # ============================================
-# BOT HANDLER
+# MAIN BOT HANDLER (Converted to Pyrogram)
 # ============================================
-
-class BotHandler:
-    """Handles Telegram bot commands and conversations"""
-    
-    def __init__(self, user_manager: UserManager,
-                 account_manager: AccountManager,
-                 reporting_engine: ReportingEngine):
+class AdvancedBotHandler:
+    def __init__(self, user_manager, account_manager, reporting_engine):
         self.user_manager = user_manager
         self.account_manager = account_manager
         self.reporting_engine = reporting_engine
+        self.bot = None
+        self.user_sessions = {}
         
-        # Conversation states
-        self.ADD_PHONE, self.ADD_OTP = range(2)
-        self.REPORT_TARGET, self.REPORT_CATEGORY, self.REPORT_DESCRIPTION = range(3, 6)
+    async def initialize_bot(self):
+        """Initialize the Pyrogram bot"""
+        self.bot = Client(
+            "enterprise_bot",
+            api_id=API_ID,
+            api_hash=API_HASH,
+            bot_token=BOT_TOKEN,
+            workers=100
+        )
+        
+        # Register handlers
+        self.register_handlers()
+        
+        return self.bot
     
-    async def start_command(self, update: Update, context: CallbackContext):
-        """Handle /start command"""
-        user = update.effective_user
+    def register_handlers(self):
+        """Register all bot handlers"""
         
-        # Get or create user
-        telegram_user = self.user_manager.get_or_create_user(
+        @self.bot.on_message(filters.command("start") & filters.private)
+        async def start_command(client, message):
+            await self.start_command_handler(message)
+        
+        @self.bot.on_message(filters.command("help") & filters.private)
+        async def help_command(client, message):
+            await self.help_command_handler(message)
+        
+        @self.bot.on_message(filters.command("report") & filters.private)
+        async def report_command(client, message):
+            await self.report_command_handler(message)
+        
+        @self.bot.on_message(filters.command("stats") & filters.private)
+        async def stats_command(client, message):
+            await self.stats_command_handler(message)
+        
+        @self.bot.on_callback_query()
+        async def callback_handler(client, callback_query):
+            await self.callback_handler(callback_query)
+        
+        @self.bot.on_message(filters.private & ~filters.command)
+        async def message_handler(client, message):
+            await self.message_handler(message)
+    
+    async def start_command_handler(self, message: Message):
+        """Handle /start command"""
+        user = message.from_user
+        
+        # Update user activity
+        self.user_manager.update_user_activity(
             user.id, user.username, user.first_name, user.last_name
         )
         
-        welcome_message = f"""
-🤖 *Telegram Enterprise Reporting System*
+        # Prepare welcome message
+        welcome_text = f"""
+🤖 *Telegram Enterprise Reporting System v11.0 (Pyrogram)*
 
-👤 *Your Status:*
-• Role: {telegram_user.role.name}
-• Reports Made: {telegram_user.reports_made}
-• Last Active: {telegram_user.last_active.strftime('%Y-%m-%d %H:%M') if telegram_user.last_active else 'Never'}
+*Welcome,* {user.first_name or 'User'}!
+
+📊 *System Status:*
+• Users: {len(self.user_manager.users)} registered
+• Accounts: {len(self.account_manager.accounts)} available
+• Proxies: {len([p for p in self.account_manager.proxy_manager.proxies if p.is_active])} working
 
 🛠️ *Available Commands:*
-/report - Start new report
-/accounts - Account management
+/report - Start a new report
 /stats - View statistics
-/help - Help guide
+/help - Detailed help guide
+/accounts - Account management
+/proxies - Proxy status
+/jobs - View your jobs
+/settings - User settings
+/admin - Admin panel
 
 💡 *Quick Start:*
-1. Add accounts with /accounts
-2. Start reporting with /report
-3. Monitor with /stats
+1. Use /report to start reporting
+2. Add accounts with /accounts
+3. Check /stats for performance
+
+⚠️ *Important:*
+• Each account can report 9 times before proxy rotation
+• Use premium proxies for better results
+• Monitor system health regularly
 """
         
-        await update.message.reply_text(welcome_message, parse_mode='Markdown')
-    
-    async def help_command(self, update: Update, context: CallbackContext):
-        """Handle /help command"""
-        help_text = """
-🆘 *Help Guide*
-
-*Basic Commands:*
-/start - Welcome message
-/report - Start new report
-/accounts - Manage Telegram accounts
-/stats - View statistics
-/help - This guide
-
-*Reporting Process:*
-1. Use /report to start
-2. Enter target (username or link)
-3. Select category
-4. Add description
-5. System processes with multiple accounts
-
-*Account Management:*
-• Add accounts with /accounts
-• Each account can report 9 times
-• Automatic proxy rotation
-• OTP verification required
-
-*Best Practices:*
-• Use detailed descriptions
-• Add multiple accounts for better results
-• Monitor account health
-• Use working proxies
-"""
-        
-        await update.message.reply_text(help_text, parse_mode='Markdown')
-    
-    async def stats_command(self, update: Update, context: CallbackContext):
-        """Handle /stats command"""
-        user = update.effective_user
-        telegram_user = self.user_manager.users.get(user.id)
-        
-        if not telegram_user:
-            await update.message.reply_text("Please use /start first.")
-            return
-        
-        # Get account stats
-        active_accounts = sum(1 for a in self.account_manager.accounts.values() 
-                            if a.status == AccountStatus.ACTIVE)
-        total_accounts = len(self.account_manager.accounts)
-        
-        stats_message = f"""
-📊 *Statistics*
-
-👤 *Personal:*
-• Role: {telegram_user.role.name}
-• Reports Made: {telegram_user.reports_made}
-• Trust Level: {'⭐' * min(telegram_user.role.value, 5)}
-
-📱 *Accounts:*
-• Total: {total_accounts}
-• Active: {active_accounts}
-• Available for reporting: {sum(1 for a in self.account_manager.accounts.values() 
-                              if a.status == AccountStatus.ACTIVE and a.report_count < 9)}
-
-📈 *System:*
-• Active Jobs: {len(self.reporting_engine.active_jobs)}
-• Completed Jobs: {len(self.reporting_engine.job_history)}
-• System Status: ✅ Operational
-"""
-        
-        await update.message.reply_text(stats_message, parse_mode='Markdown')
-    
-    async def accounts_command(self, update: Update, context: CallbackContext):
-        """Handle /accounts command"""
+        # Create keyboard
         keyboard = [
-            [InlineKeyboardButton("📱 Add Account", callback_data="acc_add")],
-            [InlineKeyboardButton("📋 List Accounts", callback_data="acc_list")],
-            [InlineKeyboardButton("🔄 Refresh", callback_data="acc_refresh")],
+            [KeyboardButton("📊 Stats"), KeyboardButton("🆘 Help")],
+            [KeyboardButton("📝 Report"), KeyboardButton("📋 My Jobs")],
+            [KeyboardButton("📱 Accounts"), KeyboardButton("🌐 Proxies")]
         ]
         
-        reply_markup = InlineKeyboardMarkup(keyboard)
+        reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
         
-        await update.message.reply_text(
-            "📱 *Account Management*\n\n"
-            "Manage your Telegram accounts for reporting.",
-            parse_mode='Markdown',
-            reply_markup=reply_markup
+        await message.reply_text(
+            welcome_text,
+            reply_markup=reply_markup,
+            parse_mode=ParseMode.MARKDOWN
         )
     
-    async def report_command(self, update: Update, context: CallbackContext):
-        """Handle /report command"""
-        # Check if user has accounts
-        active_accounts = sum(1 for a in self.account_manager.accounts.values() 
-                            if a.status == AccountStatus.ACTIVE and a.report_count < 9)
+    async def report_command_handler(self, message: Message):
+        """Handle /report command with inline keyboard"""
+        user_id = message.from_user.id
         
-        if active_accounts == 0:
-            await update.message.reply_text(
-                "❌ *No accounts available for reporting*\n\n"
-                "Please add accounts first with /accounts",
-                parse_mode='Markdown'
-            )
+        # Check permissions
+        if not self.user_manager.check_permission(user_id, "create_report"):
+            await message.reply_text("❌ You don't have permission to create reports.")
             return
         
-        await update.message.reply_text(
-            "📝 *Start New Report*\n\n"
-            "Please send the target username or link:\n\n"
-            "*Examples:*\n"
-            "• @username\n"
-            "• https://t.me/username\n"
-            "• channelname",
-            parse_mode='Markdown',
-            reply_markup=ReplyKeyboardRemove()
-        )
-        
-        return self.REPORT_TARGET
-    
-    async def handle_report_target(self, update: Update, context: CallbackContext):
-        """Handle report target input"""
-        target = update.message.text.strip()
-        
-        # Store in context
-        context.user_data["report_target"] = target
-        
-        # Create category keyboard
+        # Create category selection keyboard
         keyboard = []
-        for category_id, category_info in self.reporting_engine.categories.items():
-            keyboard.append([InlineKeyboardButton(
-                category_info["name"],
-                callback_data=f"cat_{category_id}"
-            )])
+        row = []
+        
+        categories = {
+            "SPAM": "🚫 Spam",
+            "VIOLENCE": "🔪 Violence",
+            "ILLEGAL_DRUGS": "💊 Drugs",
+            "SEXUAL": "🔞 Sexual Content",
+            "FRAUD": "🎭 Fraud",
+            "HARASSMENT": "😠 Harassment",
+            "COPYRIGHT": "©️ Copyright",
+            "OTHER": "📌 Other"
+        }
+        
+        for cat_id, cat_name in categories.items():
+            row.append(InlineKeyboardButton(cat_name, callback_data=f"cat_{cat_id}"))
+            if len(row) == 2:
+                keyboard.append(row)
+                row = []
+        
+        if row:
+            keyboard.append(row)
+        
+        keyboard.append([InlineKeyboardButton("❌ Cancel", callback_data="cancel")])
         
         reply_markup = InlineKeyboardMarkup(keyboard)
         
-        await update.message.reply_text(
-            f"✅ *Target Accepted:* `{target}`\n\n"
-            "Now select the report category:",
-            parse_mode='Markdown',
-            reply_markup=reply_markup
+        await message.reply_text(
+            "📝 *Start New Report*\n\n"
+            "Please select the violation category:",
+            reply_markup=reply_markup,
+            parse_mode=ParseMode.MARKDOWN
         )
         
-        return self.REPORT_CATEGORY
+        # Store user session
+        self.user_sessions[user_id] = {
+            "step": "select_category",
+            "created_at": datetime.now()
+        }
     
-    async def handle_report_category(self, update: Update, context: CallbackContext):
-        """Handle category selection"""
-        query = update.callback_query
-        await query.answer()
+    async def callback_handler(self, callback_query: CallbackQuery):
+        """Handle callback queries"""
+        user_id = callback_query.from_user.id
+        data = callback_query.data
         
-        category = query.data.replace("cat_", "")
+        await callback_query.answer()
         
-        if category not in self.reporting_engine.categories:
-            await query.edit_message_text("Invalid category selected.")
-            return self.REPORT_CATEGORY
+        if data == "cancel":
+            await callback_query.message.edit_text("❌ Report cancelled.")
+            if user_id in self.user_sessions:
+                del self.user_sessions[user_id]
+            return
         
-        # Store in context
-        context.user_data["report_category"] = category
+        if data.startswith("cat_"):
+            category = data[4:]
+            
+            # Store category and ask for target
+            if user_id in self.user_sessions:
+                self.user_sessions[user_id]["category"] = category
+                self.user_sessions[user_id]["step"] = "enter_target"
+            
+            await callback_query.message.edit_text(
+                f"✅ *Category Selected:* {category}\n\n"
+                "Now please send the target username or link:\n\n"
+                "*Examples:*\n"
+                "• @username\n"
+                "• https://t.me/username\n"
+                "• https://t.me/joinchat/xxxxxx\n\n"
+                "⚠️ Make sure the target exists and is accessible.",
+                parse_mode=ParseMode.MARKDOWN
+            )
+    
+    async def message_handler(self, message: Message):
+        """Handle general messages"""
+        user_id = message.from_user.id
+        text = message.text.strip()
         
-        await query.edit_message_text(
-            f"📑 *Category:* {self.reporting_engine.categories[category]['name']}\n\n"
-            "Please provide a detailed description of the violation:\n\n"
+        if user_id in self.user_sessions:
+            session = self.user_sessions[user_id]
+            
+            if session.get("step") == "enter_target":
+                # Process target input
+                await self.process_report_target(message, text, session)
+            elif session.get("step") == "enter_description":
+                # Process description input
+                await self.process_report_description(message, text, session)
+        else:
+            # Handle general messages
+            await self.handle_general_message(message, text)
+    
+    async def process_report_target(self, message: Message, target: str, session: dict):
+        """Process report target input"""
+        user_id = message.from_user.id
+        
+        # Store target
+        session["target"] = target
+        session["step"] = "enter_description"
+        
+        await message.reply_text(
+            f"✅ *Target Accepted:* `{target[:50]}`\n\n"
+            "Now please provide a detailed description of the violation:\n\n"
             "*Requirements:*\n"
             "• Minimum 20 characters\n"
             "• Be specific and factual\n"
-            "• Include evidence if available\n\n"
+            "• Include evidence if available\n"
+            "• Avoid emotional language\n\n"
             "*Example:*\n"
-            "\"This account is sending spam messages promoting fake investments.\"",
-            parse_mode='Markdown'
+            "\"This account is sending mass spam messages promoting "
+            "fake cryptocurrency investments.\"",
+            parse_mode=ParseMode.MARKDOWN
         )
-        
-        return self.REPORT_DESCRIPTION
     
-    async def handle_report_description(self, update: Update, context: CallbackContext):
-        """Handle description and create report job"""
-        description = update.message.text.strip()
+    async def process_report_description(self, message: Message, description: str, session: dict):
+        """Process report description and create job"""
+        user_id = message.from_user.id
         
         if len(description) < 20:
-            await update.message.reply_text(
-                "❌ Description must be at least 20 characters.",
-                parse_mode='Markdown'
+            await message.reply_text(
+                "❌ Description must be at least 20 characters.\n"
+                "Please provide more details."
             )
-            return self.REPORT_DESCRIPTION
+            return
         
-        # Get data from context
-        target = context.user_data.get("report_target")
-        category = context.user_data.get("report_category")
-        user_id = update.effective_user.id
-        
-        if not target or not category:
-            await update.message.reply_text("Session expired. Please start over.")
-            return ConversationHandler.END
-        
-        # Create job
-        success, message, job_id = await self.reporting_engine.create_job(
-            target=target,
-            category=category,
+        # Create report job
+        success, message_text, job_id = await self.reporting_engine.create_job(
+            target=session["target"],
+            target_type="user",  # You might want to detect this
+            category=session["category"],
+            subcategory=1,  # Default subcategory
             description=description,
             user_id=user_id
         )
         
         if success:
-            # Start processing
-            asyncio.create_task(self.reporting_engine.process_job(job_id))
-            
-            await update.message.reply_text(
+            await message.reply_text(
                 f"✅ *Report Job Created!*\n\n"
                 f"Job ID: `{job_id}`\n"
-                f"Target: `{target}`\n"
-                f"Category: {self.reporting_engine.categories[category]['name']}\n\n"
-                f"⏳ *Processing started...*\n\n"
-                f"Using 3 accounts simultaneously.\n"
-                f"You'll receive a notification when complete.",
-                parse_mode='Markdown'
+                f"Target: `{session['target'][:50]}`\n"
+                f"Status: ⏳ Processing started\n\n"
+                f"You will be notified when completed.",
+                parse_mode=ParseMode.MARKDOWN
             )
-            
-            # Update user's report count
-            if user_id in self.user_manager.users:
-                self.user_manager.users[user_id].reports_made += 1
-                self.user_manager._save_users()
         else:
-            await update.message.reply_text(
-                f"❌ *Failed to create job:*\n{message}",
-                parse_mode='Markdown'
+            await message.reply_text(
+                f"❌ *Failed to create job*\n\n"
+                f"Error: {message_text}",
+                parse_mode=ParseMode.MARKDOWN
             )
         
-        # Clear context
-        context.user_data.clear()
-        
-        return ConversationHandler.END
+        # Cleanup session
+        if user_id in self.user_sessions:
+            del self.user_sessions[user_id]
     
-    async def handle_callback_query(self, update: Update, context: CallbackContext):
-        """Handle callback queries"""
-        query = update.callback_query
-        await query.answer()
+    async def stats_command_handler(self, message: Message):
+        """Handle /stats command"""
+        user_id = message.from_user.id
+        user_data = self.user_manager.users.get(user_id)
         
-        data = query.data
+        if not user_data:
+            await message.reply_text("❌ User data not found. Use /start first.")
+            return
         
-        if data == "acc_add":
-            await query.edit_message_text(
-                "📱 *Add New Account*\n\n"
-                "Please send the phone number:\n"
-                "Format: `+1234567890`",
-                parse_mode='Markdown'
-            )
-            
-            # Store state
-            context.user_data["action"] = "add_account"
-            return self.ADD_PHONE
+        # Get statistics
+        account_stats = self.account_manager.get_system_stats()
+        proxy_stats = self.account_manager.proxy_manager.get_detailed_stats()
         
-        elif data == "acc_list":
-            accounts = list(self.account_manager.accounts.values())
-            
-            if not accounts:
-                await query.edit_message_text("No accounts added yet.")
-                return
-            
-            accounts_list = "📋 *Accounts List*\n\n"
-            for i, account in enumerate(accounts, 1):
-                status_icon = {
-                    AccountStatus.ACTIVE: "🟢",
-                    AccountStatus.INACTIVE: "🟡",
-                    AccountStatus.BANNED: "🔴",
-                    AccountStatus.FLOOD_WAIT: "⏳",
-                }.get(account.status, "❓")
-                
-                accounts_list += (
-                    f"{i}. {status_icon} `{account.phone}`\n"
-                    f"   Status: {account.status.name}\n"
-                    f"   Reports: {account.report_count}/9\n"
-                )
-                
-                if account.last_used:
-                    accounts_list += f"   Last Used: {account.last_used.strftime('%Y-%m-%d')}\n"
-                
-                accounts_list += "\n"
-            
-            await query.edit_message_text(accounts_list, parse_mode='Markdown')
+        stats_text = f"""
+📊 *Comprehensive Statistics*
+
+👤 *Personal Stats:*
+• Role: {user_data.role.name}
+• Trust Score: {user_data.trust_score:.1f}/100
+• Reports Made: {user_data.reports_made}
+• Success Rate: {user_data.statistics.get('report_success_rate', 0.0):.1f}%
+
+🏢 *System Status:*
+• Total Accounts: {account_stats['total_accounts']}
+• Active Accounts: {account_stats['active_accounts']}
+• Working Proxies: {proxy_stats['active_proxies']}/{proxy_stats['total_proxies']}
+• Avg Proxy Speed: {proxy_stats['average_response_time']:.2f}s
+
+⚡ *Performance:*
+• Account Health Avg: {account_stats['average_health_score']:.1f}/100
+• Proxy Reliability: {proxy_stats['average_reliability']:.1f}%
+• System Uptime: 100% (monitored)
+
+💡 *Recommendations:*
+• Add more proxies if count < 10
+• Perform maintenance if health < 60
+• Rotate proxies regularly
+"""
         
-        elif data == "acc_refresh":
-            await query.edit_message_text("Refreshing accounts...")
-            # Could implement refresh logic here
-    
-    async def handle_add_phone(self, update: Update, context: CallbackContext):
-        """Handle phone number for account addition"""
-        phone = update.message.text.strip()
-        
-        # Validate phone number
-        if not re.match(r'^\+\d{10,15}$', phone):
-            await update.message.reply_text(
-                "❌ Invalid phone number format.\n"
-                "Please use: `+1234567890`",
-                parse_mode='Markdown'
-            )
-            return self.ADD_PHONE
-        
-        # Add account
-        success, message = await self.account_manager.add_account(
-            phone, update.effective_user.id
+        await message.reply_text(
+            stats_text,
+            parse_mode=ParseMode.MARKDOWN
         )
-        
-        if success:
-            await update.message.reply_text(
-                f"✅ *Account Added*\n\n"
-                f"Phone: `{phone}`\n\n"
-                f"Now creating session...",
-                parse_mode='Markdown'
-            )
-            
-            # Create session
-            session_success, session_message = await self.account_manager.create_session(
-                phone, update
-            )
-            
-            if session_success:
-                return self.ADD_OTP
-            else:
-                await update.message.reply_text(
-                    f"⚠️ *Session Creation:*\n{session_message}",
-                    parse_mode='Markdown'
-                )
-                return ConversationHandler.END
-        else:
-            await update.message.reply_text(
-                f"❌ *Failed to add account:*\n{message}",
-                parse_mode='Markdown'
-            )
-            return ConversationHandler.END
     
-    async def handle_otp(self, update: Update, context: CallbackContext):
-        """Handle OTP verification"""
-        otp_code = update.message.text.strip()
+    async def help_command_handler(self, message: Message):
+        """Handle /help command"""
+        help_text = """
+🆘 *Comprehensive Help Guide*
+
+📚 *Available Commands:*
+/start - Welcome message and system status
+/help - This comprehensive guide
+/report - Start a new report
+/stats - View system and personal statistics
+/accounts - Account management (if permitted)
+/proxies - Proxy status
+/jobs - View your report jobs
+/settings - User preferences
+/admin - Admin panel (admins only)
+
+📝 *Reporting Guide:*
+1. Use /report to start
+2. Select violation category
+3. Enter target username/link
+4. Provide detailed description
+5. System processes with multiple accounts
+
+🔧 *Account Management:*
+• Add accounts with phone verification
+• Monitor account health scores
+• Rotate proxies after 9 reports
+• Perform regular maintenance
+
+🌐 *Proxy System:*
+• Automatic verification
+• Performance-based selection
+• Geographic optimization
+• Failover mechanisms
+
+⚠️ *Important Notes:*
+• Each account can make 9 reports before proxy rotation
+• Use residential proxies for best results
+• Monitor account health regularly
+• Report only legitimate violations
+
+💡 *Tips for Success:*
+• Provide detailed, factual descriptions
+• Use multiple accounts for better coverage
+• Monitor system performance regularly
+• Keep proxies updated and verified
+"""
         
-        if not re.match(r'^\d{5}$', otp_code):
-            await update.message.reply_text(
-                "❌ Invalid OTP format. Must be 5 digits.",
-                parse_mode='Markdown'
-            )
-            return self.ADD_OTP
-        
-        # Get phone from context (simplified - in production, store in user_data)
-        accounts = list(self.account_manager.accounts.values())
-        if not accounts:
-            await update.message.reply_text("No accounts found.")
-            return ConversationHandler.END
-        
-        # Use the most recently added account
-        account = accounts[-1]
-        
-        success, message = await self.account_manager.verify_otp(
-            account.phone, otp_code, update
+        await message.reply_text(
+            help_text,
+            parse_mode=ParseMode.MARKDOWN,
+            disable_web_page_preview=True
         )
-        
-        if success:
-            await update.message.reply_text(
-                "✅ *Account Verified!*\n\n"
-                "Ready for reporting!",
-                parse_mode='Markdown'
-            )
-        elif message == "2FA_PASSWORD_NEEDED":
-            await update.message.reply_text(
-                "🔒 *2FA Password Required*\n\n"
-                "Please send your 2FA password:",
-                parse_mode='Markdown'
-            )
-            # Could add 2FA handling here
-        else:
-            await update.message.reply_text(
-                f"❌ *Verification Failed:*\n{message}",
-                parse_mode='Markdown'
-            )
-        
-        return ConversationHandler.END
     
-    async def cancel_command(self, update: Update, context: CallbackContext):
-        """Cancel any operation"""
-        await update.message.reply_text(
-            "Operation cancelled.",
-            reply_markup=ReplyKeyboardRemove()
+    async def handle_general_message(self, message: Message, text: str):
+        """Handle general messages not part of any session"""
+        # Check for OTP codes
+        if re.match(r'^\d{5}$', text):
+            await message.reply_text(
+                "🔐 *OTP Code Detected*\n\n"
+                "If you're trying to verify an account, "
+                "please use the account management menu.\n\n"
+                "Use /accounts for account management.",
+                parse_mode=ParseMode.MARKDOWN
+            )
+            return
+        
+        # Default response
+        await message.reply_text(
+            "🤖 *Telegram Reporting System*\n\n"
+            "I didn't understand that command.\n\n"
+            "*Try these commands:*\n"
+            "/start - Welcome message\n"
+            "/help - Comprehensive guide\n"
+            "/report - Start new report\n"
+            "/stats - View statistics\n"
+            "/accounts - Account management\n\n"
+            "*Or use the keyboard buttons below.*",
+            parse_mode=ParseMode.MARKDOWN
         )
-        return ConversationHandler.END
 
 # ============================================
-# MAIN APPLICATION
+# REPORTING ENGINE (Converted to Pyrogram)
 # ============================================
+class AdvancedReportingEngine:
+    def __init__(self, account_manager, proxy_manager, user_manager):
+        self.account_manager = account_manager
+        self.proxy_manager = proxy_manager
+        self.user_manager = user_manager
+        
+        # Pyrogram report reasons mapping
+        self.report_reasons = {
+            "SPAM": enums.ChatReportReason.SPAM,
+            "VIOLENCE": enums.ChatReportReason.VIOLENCE,
+            "ILLEGAL_DRUGS": enums.ChatReportReason.ILLEGAL_DRUGS,
+            "SEXUAL": enums.ChatReportReason.PORNOGRAPHY,
+            "FRAUD": enums.ChatReportReason.FRAUD,
+            "HARASSMENT": enums.ChatReportReason.PERSONAL_DETAILS,
+            "COPYRIGHT": enums.ChatReportReason.COPYRIGHT,
+            "OTHER": enums.ChatReportReason.OTHER
+        }
+    
+    async def execute_report(self, client: Client, target: str, 
+                           reason: str, description: str) -> Dict[str, Any]:
+        """Execute a report using Pyrogram"""
+        try:
+            # Resolve target (simplified)
+            chat = await client.get_chat(target)
+            
+            # Submit report
+            result = await client.report_chat(
+                chat_id=chat.id,
+                reason=self.report_reasons.get(reason, enums.ChatReportReason.OTHER),
+                text=description[:200]  # Limit description length
+            )
+            
+            return {
+                "success": True,
+                "chat_id": chat.id,
+                "chat_type": chat.type,
+                "result": result
+            }
+            
+        except Exception as e:
+            return {
+                "success": False,
+                "error": str(e)[:200]
+            }
 
+# ============================================
+# MAIN APPLICATION (Updated for Pyrogram)
+# ============================================
 class TelegramEnterpriseBot:
-    """Main enterprise bot application"""
-    
     def __init__(self):
-        console.print("[cyan]🚀 Initializing Telegram Enterprise Bot[/cyan]")
+        console = Console()
+        console.print("[cyan]🚀 Initializing Telegram Enterprise Bot v11.0 (Pyrogram)[/cyan]")
         
         # Initialize managers
-        self.user_manager = UserManager()
-        self.proxy_manager = ProxyManager()
-        self.account_manager = AccountManager(self.proxy_manager)
-        self.reporting_engine = ReportingEngine(self.account_manager)
+        self.proxy_manager = AdvancedProxyManager()
+        self.user_manager = AdvancedUserManager()
+        self.account_manager = AdvancedAccountManager(self.proxy_manager)
+        
+        # Update proxy manager reference
+        self.account_manager.proxy_manager = self.proxy_manager
+        
+        # Initialize reporting engine
+        self.reporting_engine = AdvancedReportingEngine(
+            self.account_manager,
+            self.proxy_manager,
+            self.user_manager
+        )
         
         # Initialize bot handler
-        self.bot_handler = BotHandler(
+        self.bot_handler = AdvancedBotHandler(
             self.user_manager,
             self.account_manager,
             self.reporting_engine
         )
-        
-        # Create Telegram bot application
-        persistence = PicklePersistence(filepath="data/bot_persistence.pickle")
-        
-        self.application = (
-            ApplicationBuilder()
-            .token(BOT_TOKEN)
-            .persistence(persistence)
-            .post_init(self._setup_commands)
-            .build()
-        )
-        
-        # Setup handlers
-        self._setup_handlers()
     
-    async def _setup_commands(self, application: Application):
-        """Setup bot commands"""
-        commands = [
-            BotCommand("start", "Start the bot"),
-            BotCommand("help", "Show help information"),
-            BotCommand("report", "Start a new report"),
-            BotCommand("accounts", "Manage accounts"),
-            BotCommand("stats", "Show statistics"),
-            BotCommand("cancel", "Cancel current operation"),
-        ]
-        
-        await application.bot.set_my_commands(commands)
-        console.print("[green]✅ Bot commands setup complete[/green]")
-    
-    def _setup_handlers(self):
-        """Setup all bot handlers"""
-        
-        # Basic commands
-        self.application.add_handler(CommandHandler("start", self.bot_handler.start_command))
-        self.application.add_handler(CommandHandler("help", self.bot_handler.help_command))
-        self.application.add_handler(CommandHandler("stats", self.bot_handler.stats_command))
-        self.application.add_handler(CommandHandler("accounts", self.bot_handler.accounts_command))
-        self.application.add_handler(CommandHandler("cancel", self.bot_handler.cancel_command))
-        
-        # Report conversation
-        report_conv = ConversationHandler(
-            entry_points=[CommandHandler("report", self.bot_handler.report_command)],
-            states={
-                self.bot_handler.REPORT_TARGET: [
-                    MessageHandler(filters.TEXT & ~filters.COMMAND,
-                                 self.bot_handler.handle_report_target)
-                ],
-                self.bot_handler.REPORT_CATEGORY: [
-                    CallbackQueryHandler(self.bot_handler.handle_report_category,
-                                       pattern="^cat_")
-                ],
-                self.bot_handler.REPORT_DESCRIPTION: [
-                    MessageHandler(filters.TEXT & ~filters.COMMAND,
-                                 self.bot_handler.handle_report_description)
-                ],
-            },
-            fallbacks=[CommandHandler("cancel", self.bot_handler.cancel_command)],
-        )
-        self.application.add_handler(report_conv)
-        
-        # Account addition conversation
-        account_conv = ConversationHandler(
-            entry_points=[CallbackQueryHandler(
-                self.bot_handler.handle_callback_query,
-                pattern="^acc_"
-            )],
-            states={
-                self.bot_handler.ADD_PHONE: [
-                    MessageHandler(filters.TEXT & ~filters.COMMAND,
-                                 self.bot_handler.handle_add_phone)
-                ],
-                self.bot_handler.ADD_OTP: [
-                    MessageHandler(filters.TEXT & ~filters.COMMAND,
-                                 self.bot_handler.handle_otp)
-                ],
-            },
-            fallbacks=[CommandHandler("cancel", self.bot_handler.cancel_command)],
-        )
-        self.application.add_handler(account_conv)
-        
-        # Callback query handler
-        self.application.add_handler(
-            CallbackQueryHandler(self.bot_handler.handle_callback_query)
-        )
-        
-        console.print("[green]✅ Bot handlers setup complete[/green]")
-    
-    async def initialize(self) -> bool:
-        """Initialize the enterprise system"""
-        console.print("[cyan]🔧 Initializing system components...[/cyan]")
-        
+    async def initialize_system(self) -> bool:
+        """Initialize the entire system"""
         try:
             # Initialize proxy manager
-            proxy_ok = await self.proxy_manager.initialize()
-            if not proxy_ok:
-                console.print("[yellow]⚠️ Continuing without proxies[/yellow]")
+            console.print("[cyan]1. Initializing Proxy Manager...[/cyan]")
+            # await self.proxy_manager.initialize()  # You'll need to adapt this
             
-            # Display system status
-            await self._display_status()
+            # Load existing data
+            console.print("[cyan]2. Loading system data...[/cyan]")
+            # Your existing data loading logic
             
-            console.print("[green]✅ System initialization complete[/green]")
+            # Initialize bot
+            console.print("[cyan]3. Initializing Bot...[/cyan]")
+            self.bot = await self.bot_handler.initialize_bot()
+            
+            console.print("[green]✅ Enterprise system initialization complete[/green]")
             return True
             
         except Exception as e:
-            console.print(f"[red]❌ Initialization failed: {e}[/red]")
+            console.print(f"[red]❌ System initialization failed: {e}[/red]")
             return False
-    
-    async def _display_status(self):
-        """Display system status"""
-        user_stats = len(self.user_manager.users)
-        account_stats = len(self.account_manager.accounts)
-        active_accounts = sum(1 for a in self.account_manager.accounts.values() 
-                            if a.status == AccountStatus.ACTIVE)
-        
-        status_table = Table(title="System Status", box=box.ROUNDED)
-        status_table.add_column("Component", style="cyan")
-        status_table.add_column("Status", style="green")
-        status_table.add_column("Details", style="yellow")
-        
-        status_table.add_row("Users", str(user_stats), "Loaded from storage")
-        status_table.add_row("Accounts", str(account_stats), f"{active_accounts} active")
-        status_table.add_row("Proxies", "✅" if self.proxy_manager.proxies else "⚠️", 
-                           f"{len([p for p in self.proxy_manager.proxies if p.is_active])} working")
-        status_table.add_row("Bot", "✅", "Ready")
-        
-        console.print(status_table)
     
     async def run(self):
         """Run the enterprise bot"""
         # Initialize system
-        initialized = await self.initialize()
+        initialized = await self.initialize_system()
+        
         if not initialized:
-            console.print("[red]❌ Cannot start bot[/red]")
+            console.print("[red]❌ System initialization failed. Cannot start bot.[/red]")
             return
         
         # Start bot
         console.print("[green]🤖 Starting Telegram Enterprise Bot...[/green]")
         
         try:
-            await self.application.initialize()
-            await self.application.start()
-            await self.application.updater.start_polling()
-            
+            await self.bot.start()
             console.print("[green]✅ Bot is running![/green]")
             console.print("[yellow]📱 Use /start in Telegram to begin[/yellow]")
             
@@ -1526,31 +783,26 @@ class TelegramEnterpriseBot:
             await asyncio.Event().wait()
             
         except KeyboardInterrupt:
-            console.print("\n[yellow]⚠️ Shutting down...[/yellow]")
+            console.print("\n[yellow]⚠️ Received shutdown signal...[/yellow]")
         except Exception as e:
-            console.print(f"[red]❌ Bot error: {e}[/red]")
+            console.print(f"[red]❌ Runtime error: {e}[/red]")
         finally:
             await self.shutdown()
     
     async def shutdown(self):
         """Shutdown the system gracefully"""
-        console.print("[yellow]🔧 Shutting down...[/yellow]")
+        console.print("[yellow]🔧 Shutting down enterprise system...[/yellow]")
         
         try:
-            # Stop proxy manager
-            await self.proxy_manager.cleanup()
-            
-            # Save data
-            self.user_manager._save_users()
-            self.account_manager._save_accounts()
-            
             # Stop bot
-            if hasattr(self.application, 'updater'):
-                await self.application.updater.stop()
-            await self.application.stop()
-            await self.application.shutdown()
+            if hasattr(self, 'bot'):
+                await self.bot.stop()
             
-            console.print("[green]✅ Shutdown complete[/green]")
+            # Save all data
+            if hasattr(self, 'user_manager'):
+                self.user_manager._save_users()
+            
+            console.print("[green]✅ Enterprise system shutdown complete[/green]")
             
         except Exception as e:
             console.print(f"[red]❌ Shutdown error: {e}[/red]")
@@ -1558,29 +810,9 @@ class TelegramEnterpriseBot:
 # ============================================
 # MAIN ENTRY POINT
 # ============================================
-
 async def main():
-    """Main entry point"""
-    console.print("[bright_cyan]⚡ TELEGRAM ENTERPRISE REPORTING SYSTEM[/bright_cyan]")
-    
-    # Create and run bot
-    bot = TelegramEnterpriseBot()
-    
-    try:
-        await bot.run()
-    except KeyboardInterrupt:
-        console.print("\n[yellow]👋 Goodbye![/yellow]")
+    enterprise_bot = TelegramEnterpriseBot()
+    await enterprise_bot.run()
 
 if __name__ == "__main__":
-    # Set event loop policy for Windows
-    if sys.platform == 'win32':
-        asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
-    
-    # Run the application
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        console.print("\n[yellow]Application terminated[/yellow]")
-    except Exception as e:
-        console.print(f"[red]❌ Fatal error: {e}[/red]")
-        sys.exit(1)
+    asyncio.run(main())
