@@ -1,4 +1,189 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+ULTIMATE TELEGRAM ENTERPRISE REPORTING SYSTEM v11.0
+Working Model with Message Forwarding & Real Session Creator
+"""
 
+import asyncio
+import json
+import re
+import time
+import hashlib
+import random
+from datetime import datetime
+from pathlib import Path
+from typing import Dict, List, Optional, Tuple
+import logging
+
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardRemove
+from telegram.ext import (
+    Application, CommandHandler, MessageHandler, filters,
+    ConversationHandler, CallbackQueryHandler, ContextTypes
+)
+from telethon import TelegramClient
+from telethon.errors import (
+    SessionPasswordNeededError, PhoneCodeInvalidError,
+    PhoneCodeExpiredError, FloodWaitError
+)
+from telethon.tl.types import CodeSettings
+
+# ============================================
+# CONFIGURATION
+# ============================================
+BOT_TOKEN = "7813598075:AAFUrbGZfBeRiZb1H1MOBULU_ed69OSTwzY"
+API_ID = 27157163
+API_HASH = "e0145db12519b08e1d2f5628e2db18c4"
+GROUP_CHAT_ID = -1003662481087  # Target group for forwarding messages
+
+# Directories
+DATA_DIR = Path("data")
+SESSION_DIR = Path("sessions")
+DATA_DIR.mkdir(exist_ok=True)
+SESSION_DIR.mkdir(exist_ok=True)
+
+# Data files
+USERS_FILE = DATA_DIR / "users.json"
+ACCOUNTS_FILE = DATA_DIR / "accounts.json"
+SESSIONS_FILE = DATA_DIR / "otp_sessions.json"
+
+# Conversation states
+PHONE, OTP, PASSWORD = range(3)
+
+# ============================================
+# DATA MODELS
+# ============================================
+
+class UserManager:
+    def __init__(self):
+        self.users = {}
+        self.load_users()
+    
+    def load_users(self):
+        if USERS_FILE.exists():
+            with open(USERS_FILE, 'r') as f:
+                self.users = json.load(f)
+    
+    def save_users(self):
+        with open(USERS_FILE, 'w') as f:
+            json.dump(self.users, f, indent=2)
+    
+    def add_user(self, user_id: int, username: str = None, first_name: str = None):
+        if str(user_id) not in self.users:
+            self.users[str(user_id)] = {
+                "username": username,
+                "first_name": first_name,
+                "joined_at": datetime.now().isoformat(),
+                "last_active": datetime.now().isoformat(),
+                "reports_made": 0
+            }
+            self.save_users()
+
+class AccountManager:
+    def __init__(self):
+        self.accounts = {}
+        self.load_accounts()
+    
+    def load_accounts(self):
+        if ACCOUNTS_FILE.exists():
+            with open(ACCOUNTS_FILE, 'r') as f:
+                self.accounts = json.load(f)
+    
+    def save_accounts(self):
+        with open(ACCOUNTS_FILE, 'w') as f:
+            json.dump(self.accounts, f, indent=2)
+    
+    def add_account(self, phone: str, session_path: str, added_by: int):
+        self.accounts[phone] = {
+            "session_file": session_path,
+            "added_by": added_by,
+            "added_at": datetime.now().isoformat(),
+            "status": "active",
+            "last_used": None,
+            "report_count": 0
+        }
+        self.save_accounts()
+
+class OTPSessionManager:
+    def __init__(self):
+        self.sessions = {}
+        self.load_sessions()
+    
+    def load_sessions(self):
+        if SESSIONS_FILE.exists():
+            with open(SESSIONS_FILE, 'r') as f:
+                data = json.load(f)
+                # Convert string keys back to int for user_id
+                self.sessions = {int(k): v for k, v in data.items()}
+    
+    def save_sessions(self):
+        # Convert int keys to string for JSON serialization
+        data = {str(k): v for k, v in self.sessions.items()}
+        with open(SESSIONS_FILE, 'w') as f:
+            json.dump(data, f, indent=2)
+    
+    def create_session(self, user_id: int, phone: str):
+        session_id = hashlib.sha256(f"{user_id}{phone}{time.time()}".encode()).hexdigest()[:16]
+        self.sessions[user_id] = {
+            "session_id": session_id,
+            "phone": phone,
+            "step": "waiting_otp",
+            "created_at": datetime.now().isoformat(),
+            "otp_attempts": 0,
+            "client_info": None,
+            "phone_code_hash": None
+        }
+        self.save_sessions()
+        return session_id
+    
+    def get_session(self, user_id: int):
+        return self.sessions.get(user_id)
+    
+    def update_session(self, user_id: int, updates: dict):
+        if user_id in self.sessions:
+            self.sessions[user_id].update(updates)
+            self.save_sessions()
+    
+    def delete_session(self, user_id: int):
+        if user_id in self.sessions:
+            del self.sessions[user_id]
+            self.save_sessions()
+
+# ============================================
+# MESSAGE FORWARDING SYSTEM
+# ============================================
+
+async def forward_message_to_group(update: Update, context: ContextTypes.DEFAULT_TYPE, 
+                                 message_text: str = None):
+    """
+    Forward user message to group chat
+    """
+    try:
+        user = update.effective_user
+        message = update.effective_message
+        
+        # Prepare message info
+        user_info = f"👤 User: {user.first_name}"
+        if user.username:
+            user_info += f" (@{user.username})"
+        user_info += f"\n🆔 ID: `{user.id}`"
+        
+        # Get message content
+        if message_text is None:
+            if message.text:
+                message_text = message.text
+            elif message.caption:
+                message_text = message.caption
+            else:
+                message_text = "[Media message]"
+        
+        # Create forward message
+        forward_text = f"""
+📩 *New DM from User*
+
+{user_info}
+
+💬 *Message:*
 ⏰ Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
 """
         
@@ -852,3 +1037,4 @@ async def main():
 if __name__ == "__main__":
     # Run the bot
     asyncio.run(main())
+
