@@ -126,7 +126,7 @@ from telethon.tl.functions.messages import (
     UpdatePinnedMessageRequest, GetAttachedStickersRequest,
     SetGameScoreRequest, GetGameHighScoresRequest,
     GetWebPagePreviewRequest,
-    CheckChatInviteRequest, DeleteChatRequest, GetCommonChatsRequest,
+    DeleteChatRequest, GetCommonChatsRequest,
     GetAllChatsRequest, GetWebPageRequest, ToggleDialogPinRequest,
     ReorderPinnedDialogsRequest, GetPinnedDialogsRequest,
     SetBotShippingResultsRequest, SetBotPrecheckoutResultsRequest,
@@ -145,12 +145,10 @@ from telethon.tl.functions.messages import (
     ToggleNoForwardsRequest, SaveDefaultSendAsRequest,
     SendReactionRequest, GetMessagesReactionsRequest,
     GetMessageReadParticipantsRequest, GetPollResultsRequest,
-    GetPollVotesRequest, SetChatThemeRequest, GetMessageEditDataRequest,
+    GetPollVotesRequest, SetChatThemeRequest,
     GetSearchCountersRequest, RequestUrlAuthRequest,
-    AcceptUrlAuthRequest, HidePeerSettingsBarRequest,
-    GetSuggestedDialogFiltersRequest, UpdateDialogFilterRequest
+    AcceptUrlAuthRequest, HidePeerSettingsBarRequest
 )
-
 # For advanced typing hints
 from telethon.tl.types import (
     InputReportReasonSpam, InputReportReasonViolence,
