@@ -1,3210 +1,1586 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-MULTI-AGENT SECURITY HARDENING SYSTEM
-Production-Grade Security Orchestration for Telegram Enterprise Bot
-Version: 1.0.0
-Security Level: EXTREME
+ULTIMATE TELEGRAM ENTERPRISE REPORTING SYSTEM v12.0
+Optimized Professional Solution with Advanced Features
 """
 
+# ============================================
+# STANDARD LIBRARY IMPORTS
+# ============================================
 import asyncio
+import csv
+import hashlib
+import io
 import json
 import logging
-import time
-from datetime import datetime, timedelta
-from typing import Dict, List, Optional, Set, Tuple, Any, Callable
-from enum import Enum, IntEnum
-from dataclasses import dataclass, field
-from pathlib import Path
-import hashlib
-import secrets
-import hmac
+import random
 import re
-import inspect
-import traceback
-from functools import wraps
-import redis.asyncio as redis
+import string
+import sys
+import time
+import uuid
+from collections import defaultdict, deque
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta
+from enum import Enum, IntEnum
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Set, Tuple, Union
+
+# ============================================
+# THIRD-PARTY NETWORKING IMPORTS
+# ============================================
 import aiohttp
-from pydantic import BaseModel, ValidationError, validator, Field
-from cryptography.fernet import Fernet
-from cryptography.hazmat.primitives import hashes
-from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
-import base64
-import ssl
-import socket
+import certifi
+import requests
+from aiohttp import ClientSession, ClientTimeout, TCPConnector
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 # ============================================
-# SECTION 1: SECURITY CONFIGURATION & CONSTANTS
+# TELEGRAM BOT API (python-telegram-bot v20+)
 # ============================================
-
-class SecurityLevel(IntEnum):
-    """Security levels for defense in depth"""
-    DISABLED = 0
-    MINIMAL = 1
-    STANDARD = 2
-    STRICT = 3
-    PARANOID = 4
-    EXTREME = 5
-
-class ValidationMode(IntEnum):
-    """Input validation modes"""
-    LENIENT = 0
-    STANDARD = 1
-    STRICT = 2
-    PARANOID = 3
-
-class LoggingLevel(IntEnum):
-    """Audit logging verbosity levels"""
-    MINIMAL = 0
-    STANDARD = 1
-    VERBOSE = 2
-    DEBUG = 3
-    PARANOID = 4
-
-# Security Configuration
-SECURITY_CONFIG = {
-    "validation_mode": ValidationMode.STRICT,
-    "security_level": SecurityLevel.STRICT,
-    "logging_level": LoggingLevel.VERBOSE,
-    "max_request_size": 1024 * 1024,  # 1MB
-    "rate_limit_requests": 100,
-    "rate_limit_window": 60,  # seconds
-    "session_timeout": 3600,  # 1 hour
-    "password_min_length": 12,
-    "otp_attempts": 3,
-    "lockout_attempts": 5,
-    "lockout_duration": 300,  # 5 minutes
-    "data_retention_days": 90,
-    "encryption_key_rotation_days": 30,
-}
-
-# Redis Configuration
-REDIS_CONFIG = {
-    "host": "localhost",
-    "port": 6379,
-    "db": 0,
-    "password": None,
-    "ssl": False,
-    "connection_pool_size": 10,
-    "connection_timeout": 5,
-    "socket_timeout": 5,
-    "retry_on_timeout": True,
-    "max_connections": 20,
-}
-
-# File Paths
-SECURITY_DIR = Path("security")
-SECURITY_DIR.mkdir(exist_ok=True)
-
-KEY_FILE = SECURITY_DIR / "encryption.key"
-CONFIG_FILE = SECURITY_DIR / "security_config.json"
-AUDIT_LOG_FILE = SECURITY_DIR / "audit.log"
-INCIDENT_LOG_FILE = SECURITY_DIR / "incidents.log"
-BLACKLIST_FILE = SECURITY_DIR / "blacklist.json"
-WHITELIST_FILE = SECURITY_DIR / "whitelist.json"
+from telegram import (
+    BotCommand,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    ReplyKeyboardMarkup,
+    ReplyKeyboardRemove,
+    Update,
+    WebAppInfo,
+)
+from telegram.ext import (
+    Application,
+    ApplicationBuilder,
+    CallbackContext,
+    CallbackQueryHandler,
+    CommandHandler,
+    ConversationHandler,
+    MessageHandler,
+    PicklePersistence,
+    filters,
+)
 
 # ============================================
-# SECTION 2: SECURITY DATA MODELS
+# TELETHON (Telegram Client)
+# ============================================
+from telethon import TelegramClient
+from telethon.errors import (
+    FloodWaitError,
+    PhoneCodeInvalidError,
+    PhoneCodeExpiredError,
+    PhoneNumberInvalidError,
+    PhoneNumberBannedError,
+    SessionPasswordNeededError,
+    AuthKeyDuplicatedError,
+)
+from telethon.tl.functions.account import ReportPeerRequest
+from telethon.tl.functions.auth import SendCodeRequest, SignInRequest
+from telethon.tl.functions.messages import ReportRequest
+from telethon.tl.types import (
+    InputPeerUser,
+    InputPeerChannel,
+    InputPeerChat,
+    InputReportReasonSpam,
+    InputReportReasonViolence,
+    InputReportReasonPornography,
+    InputReportReasonChildAbuse,
+    InputReportReasonCopyright,
+    InputReportReasonGeoIrrelevant,
+    InputReportReasonFake,
+    InputReportReasonIllegalDrugs,
+    InputReportReasonPersonalDetails,
+    InputReportReasonOther,
+)
+
+# ============================================
+# RICH CONSOLE OUTPUT
+# ============================================
+from rich.console import Console
+from rich.progress import (
+    Progress,
+    SpinnerColumn,
+    TextColumn,
+    BarColumn,
+    TimeElapsedColumn,
+    TimeRemainingColumn,
+)
+from rich.table import Table
+from rich.panel import Panel
+from rich import box
+from rich.traceback import install as install_rich_traceback
+
+# Install rich traceback for better error display
+install_rich_traceback()
+console = Console()
+
+# ============================================
+# CONFIGURATION
 # ============================================
 
-class SecurityEventType(Enum):
-    """Types of security events for audit logging"""
-    AUTH_SUCCESS = "auth_success"
-    AUTH_FAILURE = "auth_failure"
-    INPUT_VALIDATION = "input_validation"
-    EXCEPTION = "exception"
-    RATE_LIMIT = "rate_limit"
-    SESSION_CREATE = "session_create"
-    SESSION_DESTROY = "session_destroy"
-    DATA_ACCESS = "data_access"
-    CONFIG_CHANGE = "config_change"
-    SECURITY_ALERT = "security_alert"
-    SYSTEM_START = "system_start"
-    SYSTEM_SHUTDOWN = "system_shutdown"
-    AGENT_START = "agent_start"
-    AGENT_COMPLETE = "agent_complete"
-    DEPENDENCY_CHECK = "dependency_check"
-    INTEGRATION_TEST = "integration_test"
-    PENETRATION_TEST = "penetration_test"
-    INCIDENT_RESPONSE = "incident_response"
+# Bot Configuration (REPLACE WITH YOUR VALUES)
+BOT_TOKEN = "7813598075:AAFUrbGZfBeRiZb1H1MOBULU_ed69OSTwzY"
+API_ID = 27157163
+API_HASH = "e0145db12519b08e1d2f5628e2db18c4"
 
-class ThreatLevel(IntEnum):
-    """Threat level classification"""
-    INFO = 0
-    LOW = 1
-    MEDIUM = 2
-    HIGH = 3
-    CRITICAL = 4
+# Owner IDs
+OWNER_IDS = [6118760915, 1366105247]
+ADMIN_IDS = []
 
-class AgentStatus(Enum):
-    """Agent execution status"""
-    PENDING = "pending"
-    RUNNING = "running"
-    COMPLETED = "completed"
-    FAILED = "failed"
-    BLOCKED = "blocked"
-    SKIPPED = "skipped"
+# File paths
+BASE_DIR = Path(__file__).parent
+DATA_DIR = BASE_DIR / "data"
+SESSION_DIR = BASE_DIR / "sessions"
+BACKUP_DIR = BASE_DIR / "backups"
+
+# Create directories
+for directory in [DATA_DIR, SESSION_DIR, BACKUP_DIR]:
+    directory.mkdir(exist_ok=True)
+
+# Data files
+USERS_FILE = DATA_DIR / "users.json"
+ACCOUNTS_FILE = DATA_DIR / "accounts.json"
+PROXY_FILE = DATA_DIR / "proxies.txt"
+PROXY_CACHE_FILE = DATA_DIR / "proxy_cache.json"
+JOBS_FILE = DATA_DIR / "jobs.json"
+SETTINGS_FILE = DATA_DIR / "settings.json"
+
+# ============================================
+# ENUMERATIONS
+# ============================================
+
+class UserRole(IntEnum):
+    """User role hierarchy"""
+    BANNED = 0
+    VIEWER = 1
+    USER = 2
+    REPORTER = 3
+    MODERATOR = 4
+    ADMIN = 5
+    OWNER = 6
+
+class AccountStatus(IntEnum):
+    """Account status tracking"""
+    UNVERIFIED = 0
+    VERIFYING = 1
+    ACTIVE = 2
+    INACTIVE = 3
+    BANNED = 4
+    FLOOD_WAIT = 5
+    NEED_PASSWORD = 6
+    PROXY_FAILED = 7
+
+class ReportStatus(IntEnum):
+    """Report job status"""
+    PENDING = 0
+    PROCESSING = 1
+    COMPLETED = 2
+    FAILED = 3
+    CANCELLED = 4
+
+class ProxyType(IntEnum):
+    """Proxy protocol types"""
+    HTTP = 0
+    HTTPS = 1
+    SOCKS4 = 2
+    SOCKS5 = 3
+
+# ============================================
+# DATA MODELS
+# ============================================
 
 @dataclass
-class SecurityContext:
-    """Security context for request validation"""
-    user_id: Optional[int] = None
-    session_id: Optional[str] = None
-    ip_address: Optional[str] = None
-    user_agent: Optional[str] = None
-    request_id: Optional[str] = None
-    permissions: Set[str] = field(default_factory=set)
-    security_level: SecurityLevel = SecurityLevel.STANDARD
-    validation_mode: ValidationMode = ValidationMode.STANDARD
-
-@dataclass
-class ValidationResult:
-    """Result of input validation"""
-    is_valid: bool
-    sanitized_value: Any
-    errors: List[str] = field(default_factory=list)
-    warnings: List[str] = field(default_factory=list)
-    flags: Set[str] = field(default_factory=set)
-
-@dataclass
-class SecurityEvent:
-    """Security event for audit logging"""
-    event_id: str
-    event_type: SecurityEventType
-    timestamp: datetime
-    threat_level: ThreatLevel
-    source: str
-    user_id: Optional[int]
-    session_id: Optional[str]
-    ip_address: Optional[str]
-    description: str
-    details: Dict[str, Any] = field(default_factory=dict)
-    action_taken: Optional[str] = None
-    correlation_id: Optional[str] = None
+class TelegramUser:
+    """User model with permissions"""
+    user_id: int
+    username: Optional[str] = None
+    first_name: Optional[str] = None
+    last_name: Optional[str] = None
+    role: UserRole = UserRole.USER
+    added_at: datetime = None
+    reports_made: int = 0
+    last_active: Optional[datetime] = None
+    
+    def __post_init__(self):
+        if self.added_at is None:
+            self.added_at = datetime.now()
     
     def to_dict(self) -> Dict[str, Any]:
-        """Convert to dictionary for storage"""
         return {
-            "event_id": self.event_id,
-            "event_type": self.event_type.value,
-            "timestamp": self.timestamp.isoformat(),
-            "threat_level": self.threat_level.value,
-            "source": self.source,
             "user_id": self.user_id,
-            "session_id": self.session_id,
-            "ip_address": self.ip_address,
-            "description": self.description,
-            "details": self.details,
-            "action_taken": self.action_taken,
-            "correlation_id": self.correlation_id
+            "username": self.username,
+            "first_name": self.first_name,
+            "last_name": self.last_name,
+            "role": self.role.value,
+            "added_at": self.added_at.isoformat(),
+            "reports_made": self.reports_made,
+            "last_active": self.last_active.isoformat() if self.last_active else None,
         }
     
     @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> 'SecurityEvent':
-        """Create from dictionary"""
-        return cls(
-            event_id=data["event_id"],
-            event_type=SecurityEventType(data["event_type"]),
-            timestamp=datetime.fromisoformat(data["timestamp"]),
-            threat_level=ThreatLevel(data["threat_level"]),
-            source=data["source"],
-            user_id=data.get("user_id"),
-            session_id=data.get("session_id"),
-            ip_address=data.get("ip_address"),
-            description=data["description"],
-            details=data.get("details", {}),
-            action_taken=data.get("action_taken"),
-            correlation_id=data.get("correlation_id")
+    def from_dict(cls, data: Dict[str, Any]) -> 'TelegramUser':
+        user = cls(
+            user_id=data["user_id"],
+            username=data.get("username"),
+            first_name=data.get("first_name"),
+            last_name=data.get("last_name"),
+            role=UserRole(data.get("role", 2)),
+            reports_made=data.get("reports_made", 0),
         )
+        user.added_at = datetime.fromisoformat(data["added_at"])
+        if data.get("last_active"):
+            user.last_active = datetime.fromisoformat(data["last_active"])
+        return user
 
 @dataclass
-class AgentDependency:
-    """Agent dependency specification"""
-    agent_id: str
-    required: bool = True
-    version_constraint: Optional[str] = None
-    timeout_seconds: int = 300
-
-@dataclass
-class AgentResult:
-    """Agent execution result"""
-    agent_id: str
-    status: AgentStatus
-    start_time: datetime
-    end_time: Optional[datetime] = None
-    errors: List[str] = field(default_factory=list)
-    warnings: List[str] = field(default_factory=list)
-    artifacts: Dict[str, Any] = field(default_factory=dict)
-    metrics: Dict[str, Any] = field(default_factory=dict)
-    dependencies: List[str] = field(default_factory=list)
+class ProxyEntry:
+    """Proxy entry with performance tracking"""
+    proxy: str
+    proxy_type: ProxyType = ProxyType.HTTP
+    country: str = "Unknown"
+    is_active: bool = True
+    success_count: int = 0
+    fail_count: int = 0
+    avg_response_time: float = 0.0
+    last_used: Optional[datetime] = None
+    reports_used: int = 0
+    verified: bool = False
     
-    @property
-    def duration(self) -> Optional[float]:
-        """Calculate execution duration"""
-        if self.end_time:
-            return (self.end_time - self.start_time).total_seconds()
-        return None
-
-# ============================================
-# SECTION 3: SECURITY UTILITIES & HELPERS
-# ============================================
-
-class SecurityUtils:
-    """Security utility functions"""
-    
-    @staticmethod
-    def generate_secure_token(length: int = 32) -> str:
-        """Generate cryptographically secure token"""
-        return secrets.token_urlsafe(length)
-    
-    @staticmethod
-    def hash_password(password: str, salt: Optional[bytes] = None) -> Tuple[bytes, bytes]:
-        """Hash password with salt using PBKDF2"""
-        if salt is None:
-            salt = secrets.token_bytes(16)
-        
-        kdf = PBKDF2HMAC(
-            algorithm=hashes.SHA256(),
-            length=32,
-            salt=salt,
-            iterations=100000,
-        )
-        
-        key = base64.urlsafe_b64encode(kdf.derive(password.encode()))
-        return key, salt
-    
-    @staticmethod
-    def verify_password(password: str, hashed: bytes, salt: bytes) -> bool:
-        """Verify password against hash"""
-        try:
-            new_hash, _ = SecurityUtils.hash_password(password, salt)
-            return hmac.compare_digest(new_hash, hashed)
-        except Exception:
-            return False
-    
-    @staticmethod
-    def generate_encryption_key() -> bytes:
-        """Generate new encryption key"""
-        return Fernet.generate_key()
-    
-    @staticmethod
-    def encrypt_data(data: str, key: bytes) -> str:
-        """Encrypt data with Fernet"""
-        f = Fernet(key)
-        encrypted = f.encrypt(data.encode())
-        return base64.urlsafe_b64encode(encrypted).decode()
-    
-    @staticmethod
-    def decrypt_data(encrypted_data: str, key: bytes) -> str:
-        """Decrypt data with Fernet"""
-        f = Fernet(key)
-        decoded = base64.urlsafe_b64decode(encrypted_data.encode())
-        return f.decrypt(decoded).decode()
-    
-    @staticmethod
-    def validate_ip_address(ip: str) -> bool:
-        """Validate IP address format"""
-        try:
-            socket.inet_pton(socket.AF_INET, ip)
-            return True
-        except socket.error:
-            try:
-                socket.inet_pton(socket.AF_INET6, ip)
-                return True
-            except socket.error:
-                return False
-    
-    @staticmethod
-    def sanitize_string(value: str, allowed_chars: str = None) -> str:
-        """Sanitize string by removing dangerous characters"""
-        if allowed_chars is None:
-            allowed_chars = r'a-zA-Z0-9\s\-_\.@'
-        
-        pattern = f'[^{allowed_chars}]'
-        sanitized = re.sub(pattern, '', value)
-        
-        # Remove potentially dangerous sequences
-        dangerous = ['<script', 'javascript:', 'onload=', 'onerror=', 'onclick=']
-        for d in dangerous:
-            sanitized = sanitized.replace(d, '')
-        
-        return sanitized.strip()
-    
-    @staticmethod
-    def is_safe_filename(filename: str) -> bool:
-        """Check if filename is safe from path traversal"""
-        # Prevent directory traversal
-        if '..' in filename or '/' in filename or '\\' in filename:
-            return False
-        
-        # Prevent special device files (Unix)
-        if filename.startswith('/dev/') or filename == '/dev/null':
-            return False
-        
-        # Allow only safe characters
-        safe_pattern = r'^[a-zA-Z0-9_\-\.]+$'
-        return bool(re.match(safe_pattern, filename))
-
-# ============================================
-# SECTION 4: AUDIT LOGGING SYSTEM
-# ============================================
-
-class AuditLogger:
-    """
-    SECURE AUDIT LOGGING SYSTEM
-    Comprehensive logging with redaction, signing, and compliance features
-    """
-    
-    def __init__(self, log_level: LoggingLevel = LoggingLevel.STANDARD):
-        self.log_level = log_level
-        self.events: List[SecurityEvent] = []
-        self.redaction_patterns = [
-            r'password[=:]\s*([^\s&]+)',
-            r'token[=:]\s*([^\s&]+)',
-            r'api[_-]?key[=:]\s*([^\s&]+)',
-            r'secret[=:]\s*([^\s&]+)',
-            r'auth[=:]\s*([^\s&]+)',
-            r'Authorization:\s*Bearer\s+([^\s]+)',
-            r'[0-9]{4}-[0-9]{4}-[0-9]{4}-[0-9]{4}',  # Credit card-like
-            r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b',  # Email
-        ]
-        
-        # Create log directory
-        AUDIT_LOG_FILE.parent.mkdir(exist_ok=True)
-        INCIDENT_LOG_FILE.parent.mkdir(exist_ok=True)
-    
-    def redact_sensitive_data(self, text: str) -> str:
-        """Redact sensitive information from text"""
-        redacted = text
-        for pattern in self.redaction_patterns:
-            redacted = re.sub(pattern, lambda m: f"{m.group(0)[:4]}...[REDACTED]", redacted)
-        return redacted
-    
-    async def log_event(
-        self,
-        event_type: SecurityEventType,
-        threat_level: ThreatLevel,
-        source: str,
-        description: str,
-        user_id: Optional[int] = None,
-        session_id: Optional[str] = None,
-        ip_address: Optional[str] = None,
-        details: Optional[Dict[str, Any]] = None,
-        action_taken: Optional[str] = None,
-        correlation_id: Optional[str] = None
-    ) -> str:
-        """
-        Log security event with comprehensive details
-        """
-        # Redact sensitive information
-        redacted_description = self.redact_sensitive_data(description)
-        redacted_details = {}
-        
-        if details:
-            for key, value in details.items():
-                if isinstance(value, str):
-                    redacted_details[key] = self.redact_sensitive_data(value)
-                else:
-                    redacted_details[key] = value
-        
-        # Generate event ID
-        event_id = hashlib.sha256(
-            f"{source}{event_type.value}{time.time()}".encode()
-        ).hexdigest()[:16]
-        
-        # Create security event
-        event = SecurityEvent(
-            event_id=event_id,
-            event_type=event_type,
-            timestamp=datetime.now(),
-            threat_level=threat_level,
-            source=source,
-            user_id=user_id,
-            session_id=session_id,
-            ip_address=ip_address,
-            description=redacted_description,
-            details=redacted_details,
-            action_taken=action_taken,
-            correlation_id=correlation_id
-        )
-        
-        # Store event
-        self.events.append(event)
-        
-        # Write to file based on threat level
-        log_entry = self._format_log_entry(event)
-        
-        # Always log to audit log
-        await self._write_to_file(AUDIT_LOG_FILE, log_entry)
-        
-        # Log incidents to separate file
-        if threat_level >= ThreatLevel.HIGH:
-            await self._write_to_file(INCIDENT_LOG_FILE, log_entry)
-        
-        # Console output for critical events
-        if threat_level >= ThreatLevel.CRITICAL:
-            print(f"🔴 CRITICAL SECURITY EVENT: {event.description}")
-        
-        return event_id
-    
-    def _format_log_entry(self, event: SecurityEvent) -> str:
-        """Format log entry for file storage"""
-        return json.dumps(event.to_dict(), ensure_ascii=False)
-    
-    async def _write_to_file(self, file_path: Path, content: str):
-        """Write content to file asynchronously"""
-        try:
-            with open(file_path, 'a', encoding='utf-8') as f:
-                f.write(content + '\n')
-        except Exception as e:
-            print(f"❌ Failed to write to log file: {e}")
-    
-    async def get_events(
-        self,
-        start_time: Optional[datetime] = None,
-        end_time: Optional[datetime] = None,
-        event_type: Optional[SecurityEventType] = None,
-        threat_level: Optional[ThreatLevel] = None,
-        source: Optional[str] = None,
-        user_id: Optional[int] = None,
-        limit: int = 1000
-    ) -> List[SecurityEvent]:
-        """Retrieve security events with filtering"""
-        filtered = self.events
-        
-        if start_time:
-            filtered = [e for e in filtered if e.timestamp >= start_time]
-        if end_time:
-            filtered = [e for e in filtered if e.timestamp <= end_time]
-        if event_type:
-            filtered = [e for e in filtered if e.event_type == event_type]
-        if threat_level:
-            filtered = [e for e in filtered if e.threat_level == threat_level]
-        if source:
-            filtered = [e for e in filtered if e.source == source]
-        if user_id:
-            filtered = [e for e in filtered if e.user_id == user_id]
-        
-        return filtered[-limit:] if limit else filtered
-    
-    async def generate_report(
-        self,
-        start_time: datetime,
-        end_time: datetime
-    ) -> Dict[str, Any]:
-        """Generate security report for time period"""
-        events = await self.get_events(start_time, end_time)
-        
-        # Count by event type
-        event_counts = {}
-        for event in events:
-            event_type = event.event_type.value
-            event_counts[event_type] = event_counts.get(event_type, 0) + 1
-        
-        # Count by threat level
-        threat_counts = {}
-        for event in events:
-            threat_level = event.threat_level.name
-            threat_counts[threat_level] = threat_counts.get(threat_level, 0) + 1
-        
-        # Find top sources
-        source_counts = {}
-        for event in events:
-            source = event.source
-            source_counts[source] = source_counts.get(source, 0) + 1
-        
-        # Find critical events
-        critical_events = [
-            event for event in events 
-            if event.threat_level >= ThreatLevel.HIGH
-        ]
-        
-        report = {
-            "period": {
-                "start": start_time.isoformat(),
-                "end": end_time.isoformat()
-            },
-            "total_events": len(events),
-            "event_type_distribution": event_counts,
-            "threat_level_distribution": threat_counts,
-            "top_sources": dict(sorted(source_counts.items(), key=lambda x: x[1], reverse=True)[:10]),
-            "critical_events_count": len(critical_events),
-            "critical_events": [
-                {
-                    "event_id": e.event_id,
-                    "timestamp": e.timestamp.isoformat(),
-                    "source": e.source,
-                    "description": e.description[:100] + "..." if len(e.description) > 100 else e.description
-                }
-                for e in critical_events[:20]
-            ],
-            "generated_at": datetime.now().isoformat()
-        }
-        
-        return report
-
-# ============================================
-# SECTION 5: INPUT VALIDATION & SANITIZATION
-# ============================================
-
-class InputValidator:
-    """
-    COMPREHENSIVE INPUT VALIDATION SYSTEM
-    Strict validation, sanitization, and schema enforcement
-    """
-    
-    def __init__(self, validation_mode: ValidationMode = ValidationMode.STRICT):
-        self.validation_mode = validation_mode
-        self.schemas: Dict[str, Dict] = {}
-        self.custom_validators: Dict[str, Callable] = {}
-        
-        # Load predefined schemas
-        self._load_default_schemas()
-    
-    def _load_default_schemas(self):
-        """Load default validation schemas"""
-        self.schemas = {
-            "phone_number": {
-                "pattern": r'^\+[1-9]\d{1,14}$',  # E.164 format
-                "min_length": 10,
-                "max_length": 15,
-                "description": "International phone number"
-            },
-            "email": {
-                "pattern": r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$',
-                "min_length": 5,
-                "max_length": 254,
-                "description": "Email address"
-            },
-            "username": {
-                "pattern": r'^[a-zA-Z0-9_]{3,32}$',
-                "min_length": 3,
-                "max_length": 32,
-                "description": "Username (alphanumeric and underscore)"
-            },
-            "password": {
-                "min_length": SECURITY_CONFIG["password_min_length"],
-                "require_uppercase": True,
-                "require_lowercase": True,
-                "require_digits": True,
-                "require_special": True,
-                "description": "Secure password"
-            },
-            "url": {
-                "pattern": r'^https?://[^\s/$.?#].[^\s]*$',
-                "max_length": 2048,
-                "description": "HTTP/HTTPS URL"
-            },
-            "ip_address": {
-                "validator": SecurityUtils.validate_ip_address,
-                "description": "IP address (IPv4 or IPv6)"
-            },
-            "filename": {
-                "validator": SecurityUtils.is_safe_filename,
-                "max_length": 255,
-                "description": "Safe filename"
-            },
-            "integer": {
-                "min_value": -2147483648,
-                "max_value": 2147483647,
-                "description": "32-bit integer"
-            },
-            "positive_integer": {
-                "min_value": 0,
-                "max_value": 2147483647,
-                "description": "Positive 32-bit integer"
-            }
-        }
-    
-    def register_validator(self, name: str, validator: Callable, schema: Dict = None):
-        """Register custom validator"""
-        self.custom_validators[name] = validator
-        if schema:
-            self.schemas[name] = schema
-    
-    def validate_input(
-        self,
-        value: Any,
-        expected_type: str,
-        field_name: str = None,
-        required: bool = True,
-        context: SecurityContext = None
-    ) -> ValidationResult:
-        """
-        Validate input against schema with security context
-        """
-        errors = []
-        warnings = []
-        flags = set()
-        sanitized_value = value
-        
-        # Check if value is None/empty
-        if value is None or (isinstance(value, str) and not value.strip()):
-            if required:
-                errors.append(f"Field '{field_name}' is required")
-                return ValidationResult(False, None, errors, warnings, flags)
-            else:
-                return ValidationResult(True, None, errors, warnings, flags)
-        
-        # Get schema
-        schema = self.schemas.get(expected_type)
-        if not schema:
-            errors.append(f"Unknown validation type: {expected_type}")
-            return ValidationResult(False, value, errors, warnings, flags)
-        
-        # Type-specific validation
-        if expected_type == "string":
-            result = self._validate_string(value, schema, field_name)
-        elif expected_type == "integer":
-            result = self._validate_integer(value, schema, field_name)
-        elif expected_type == "float":
-            result = self._validate_float(value, schema, field_name)
-        elif expected_type == "boolean":
-            result = self._validate_boolean(value, schema, field_name)
-        elif expected_type == "phone_number":
-            result = self._validate_phone_number(value, schema, field_name)
-        elif expected_type == "email":
-            result = self._validate_email(value, schema, field_name)
-        elif expected_type == "username":
-            result = self._validate_username(value, schema, field_name)
-        elif expected_type == "password":
-            result = self._validate_password(value, schema, field_name)
-        elif expected_type == "url":
-            result = self._validate_url(value, schema, field_name)
-        elif expected_type == "ip_address":
-            result = self._validate_ip_address(value, schema, field_name)
-        elif expected_type == "filename":
-            result = self._validate_filename(value, schema, field_name)
-        else:
-            # Try custom validator
-            validator = self.custom_validators.get(expected_type)
-            if validator:
-                try:
-                    is_valid = validator(value)
-                    result = ValidationResult(is_valid, value, [], [], set())
-                except Exception as e:
-                    errors.append(f"Custom validator failed: {str(e)}")
-                    return ValidationResult(False, value, errors, warnings, flags)
-            else:
-                errors.append(f"No validator found for type: {expected_type}")
-                return ValidationResult(False, value, errors, warnings, flags)
-        
-        # Apply security context restrictions
-        if context and result.is_valid:
-            result = self._apply_security_context(result, context)
-        
-        return result
-    
-    def _validate_string(self, value: Any, schema: Dict, field_name: str) -> ValidationResult:
-        """Validate string input"""
-        errors = []
-        warnings = []
-        flags = set()
-        
-        # Ensure it's a string
-        if not isinstance(value, str):
-            try:
-                value = str(value)
-            except Exception:
-                errors.append(f"Field '{field_name}' must be a string")
-                return ValidationResult(False, value, errors, warnings, flags)
-        
-        # Length checks
-        min_length = schema.get("min_length", 0)
-        max_length = schema.get("max_length", 65535)
-        
-        if len(value) < min_length:
-            errors.append(f"Field '{field_name}' must be at least {min_length} characters")
-        if len(value) > max_length:
-            errors.append(f"Field '{field_name}' must be at most {max_length} characters")
-        
-        # Pattern matching
-        pattern = schema.get("pattern")
-        if pattern:
-            if not re.match(pattern, value):
-                errors.append(f"Field '{field_name}' does not match expected pattern")
-        
-        # Sanitization based on security level
-        if self.validation_mode >= ValidationMode.STRICT:
-            allowed_chars = schema.get("allowed_chars", r'a-zA-Z0-9\s\-_\.@')
-            sanitized = SecurityUtils.sanitize_string(value, allowed_chars)
-            if sanitized != value:
-                warnings.append(f"Field '{field_name}' was sanitized")
-                flags.add("sanitized")
-            value = sanitized
-        
-        return ValidationResult(len(errors) == 0, value, errors, warnings, flags)
-    
-    def _validate_integer(self, value: Any, schema: Dict, field_name: str) -> ValidationResult:
-        """Validate integer input"""
-        errors = []
-        warnings = []
-        flags = set()
-        
-        try:
-            # Try to convert to integer
-            if isinstance(value, str):
-                # Prevent scientific notation
-                if 'e' in value.lower():
-                    errors.append(f"Field '{field_name}' contains invalid scientific notation")
-                    return ValidationResult(False, value, errors, warnings, flags)
-                
-                # Check for non-numeric characters
-                if not re.match(r'^[-+]?\d+$', value):
-                    errors.append(f"Field '{field_name}' must be a valid integer")
-                    return ValidationResult(False, value, errors, warnings, flags)
-            
-            int_value = int(value)
-            
-            # Range checks
-            min_value = schema.get("min_value", -2147483648)
-            max_value = schema.get("max_value", 2147483647)
-            
-            if int_value < min_value:
-                errors.append(f"Field '{field_name}' must be at least {min_value}")
-            if int_value > max_value:
-                errors.append(f"Field '{field_name}' must be at most {max_value}")
-            
-            return ValidationResult(len(errors) == 0, int_value, errors, warnings, flags)
-            
-        except (ValueError, TypeError):
-            errors.append(f"Field '{field_name}' must be a valid integer")
-            return ValidationResult(False, value, errors, warnings, flags)
-    
-    def _validate_float(self, value: Any, schema: Dict, field_name: str) -> ValidationResult:
-        """Validate float input"""
-        errors = []
-        warnings = []
-        flags = set()
-        
-        try:
-            float_value = float(value)
-            
-            # Range checks
-            min_value = schema.get("min_value", float('-inf'))
-            max_value = schema.get("max_value", float('inf'))
-            
-            if float_value < min_value:
-                errors.append(f"Field '{field_name}' must be at least {min_value}")
-            if float_value > max_value:
-                errors.append(f"Field '{field_name}' must be at most {max_value}")
-            
-            # Precision check
-            precision = schema.get("precision", 2)
-            if precision:
-                float_value = round(float_value, precision)
-            
-            return ValidationResult(len(errors) == 0, float_value, errors, warnings, flags)
-            
-        except (ValueError, TypeError):
-            errors.append(f"Field '{field_name}' must be a valid number")
-            return ValidationResult(False, value, errors, warnings, flags)
-    
-    def _validate_boolean(self, value: Any, schema: Dict, field_name: str) -> ValidationResult:
-        """Validate boolean input"""
-        errors = []
-        warnings = []
-        flags = set()
-        
-        # Accept various boolean representations
-        if isinstance(value, bool):
-            return ValidationResult(True, value, errors, warnings, flags)
-        elif isinstance(value, str):
-            value_lower = value.lower()
-            if value_lower in ['true', '1', 'yes', 'on']:
-                return ValidationResult(True, True, errors, warnings, flags)
-            elif value_lower in ['false', '0', 'no', 'off']:
-                return ValidationResult(True, False, errors, warnings, flags)
-        
-        errors.append(f"Field '{field_name}' must be a boolean value")
-        return ValidationResult(False, value, errors, warnings, flags)
-    
-    def _validate_phone_number(self, value: Any, schema: Dict, field_name: str) -> ValidationResult:
-        """Validate phone number"""
-        result = self._validate_string(value, schema, field_name)
-        if not result.is_valid:
-            return result
-        
-        # Additional phone-specific validation
-        phone = result.sanitized_value
-        
-        # Remove all non-digit characters except leading +
-        digits = re.sub(r'[^\d+]', '', phone)
-        
-        # Must start with +
-        if not digits.startswith('+'):
-            result.errors.append(f"Field '{field_name}' must start with '+'")
-            result.is_valid = False
-        
-        # Check length after +
-        if len(digits[1:]) < 4 or len(digits[1:]) > 14:
-            result.errors.append(f"Field '{field_name}' must be 4-14 digits after '+'")
-            result.is_valid = False
-        
-        return result
-    
-    def _validate_email(self, value: Any, schema: Dict, field_name: str) -> ValidationResult:
-        """Validate email address"""
-        result = self._validate_string(value, schema, field_name)
-        if not result.is_valid:
-            return result
-        
-        email = result.sanitized_value.lower()
-        
-        # Check for suspicious patterns
-        suspicious_patterns = [
-            r'\.\.',  # Double dots
-            r'@.*@',  # Multiple @
-            r'\.@',   # Dot before @
-            r'@\.',   # @ before dot
-            r'\.$',   # Ends with dot
-            r'^\.',   # Starts with dot
-        ]
-        
-        for pattern in suspicious_patterns:
-            if re.search(pattern, email):
-                result.errors.append(f"Field '{field_name}' contains suspicious pattern")
-                result.is_valid = False
-                result.flags.add("suspicious")
-                break
-        
-        return result
-    
-    def _validate_username(self, value: Any, schema: Dict, field_name: str) -> ValidationResult:
-        """Validate username"""
-        result = self._validate_string(value, schema, field_name)
-        if not result.is_valid:
-            return result
-        
-        username = result.sanitized_value
-        
-        # Check for reserved usernames
-        reserved = ['admin', 'root', 'system', 'administrator', 'support']
-        if username.lower() in reserved:
-            result.warnings.append(f"Username '{username}' is a reserved word")
-            result.flags.add("reserved")
-        
-        return result
-    
-    def _validate_password(self, value: Any, schema: Dict, field_name: str) -> ValidationResult:
-        """Validate password strength"""
-        result = self._validate_string(value, schema, field_name)
-        if not result.is_valid:
-            return result
-        
-        password = result.sanitized_value
-        
-        # Password strength checks
-        checks = []
-        
-        if schema.get("require_uppercase", True):
-            if not re.search(r'[A-Z]', password):
-                checks.append("uppercase letter")
-        
-        if schema.get("require_lowercase", True):
-            if not re.search(r'[a-z]', password):
-                checks.append("lowercase letter")
-        
-        if schema.get("require_digits", True):
-            if not re.search(r'\d', password):
-                checks.append("digit")
-        
-        if schema.get("require_special", True):
-            if not re.search(r'[!@#$%^&*(),.?":{}|<>]', password):
-                checks.append("special character")
-        
-        # Check for common patterns
-        common_patterns = [
-            r'password', r'123456', r'qwerty', r'letmein',
-            r'admin', r'welcome', r'monkey', r'dragon'
-        ]
-        
-        for pattern in common_patterns:
-            if pattern in password.lower():
-                result.warnings.append(f"Password contains common pattern: {pattern}")
-                result.flags.add("weak_pattern")
-        
-        if checks:
-            result.errors.append(f"Password must contain at least one: {', '.join(checks)}")
-            result.is_valid = False
-        
-        return result
-    
-    def _validate_url(self, value: Any, schema: Dict, field_name: str) -> ValidationResult:
-        """Validate URL"""
-        result = self._validate_string(value, schema, field_name)
-        if not result.is_valid:
-            return result
-        
-        url = result.sanitized_value
-        
-        # Ensure it starts with http:// or https://
-        if not url.startswith(('http://', 'https://')):
-            result.errors.append(f"Field '{field_name}' must start with http:// or https://")
-            result.is_valid = False
-        
-        # Check for suspicious characters
-        suspicious = ['<', '>', '"', "'", '(', ')', 'javascript:', 'data:']
-        for char in suspicious:
-            if char in url.lower():
-                result.errors.append(f"Field '{field_name}' contains suspicious character: {char}")
-                result.is_valid = False
-                result.flags.add("suspicious")
-                break
-        
-        return result
-    
-    def _validate_ip_address(self, value: Any, schema: Dict, field_name: str) -> ValidationResult:
-        """Validate IP address"""
-        result = self._validate_string(value, schema, field_name)
-        if not result.is_valid:
-            return result
-        
-        ip = result.sanitized_value
-        
-        if not SecurityUtils.validate_ip_address(ip):
-            result.errors.append(f"Field '{field_name}' must be a valid IP address")
-            result.is_valid = False
-        
-        return result
-    
-    def _validate_filename(self, value: Any, schema: Dict, field_name: str) -> ValidationResult:
-        """Validate filename"""
-        result = self._validate_string(value, schema, field_name)
-        if not result.is_valid:
-            return result
-        
-        filename = result.sanitized_value
-        
-        if not SecurityUtils.is_safe_filename(filename):
-            result.errors.append(f"Field '{field_name}' is not a safe filename")
-            result.is_valid = False
-        
-        return result
-    
-    def _apply_security_context(
-        self, 
-        result: ValidationResult, 
-        context: SecurityContext
-    ) -> ValidationResult:
-        """Apply security context restrictions to validation result"""
-        # Apply security level restrictions
-        if context.security_level >= SecurityLevel.STRICT:
-            # Additional sanitization for strict mode
-            if isinstance(result.sanitized_value, str):
-                # Remove any HTML/XML tags
-                cleaned = re.sub(r'<[^>]*>', '', result.sanitized_value)
-                if cleaned != result.sanitized_value:
-                    result.warnings.append("HTML/XML tags were removed")
-                    result.flags.add("sanitized_html")
-                    result.sanitized_value = cleaned
-        
-        if context.security_level >= SecurityLevel.PARANOID:
-            # Additional checks for paranoid mode
-            if isinstance(result.sanitized_value, str):
-                # Check for potential SQL injection patterns
-                sql_patterns = [
-                    r'(\'|\"|`).*(\'|\"|`).*(SELECT|INSERT|UPDATE|DELETE|DROP|UNION)',
-                    r';.*--',
-                    r'/\*.*\*/'
-                ]
-                
-                for pattern in sql_patterns:
-                    if re.search(pattern, result.sanitized_value, re.IGNORECASE):
-                        result.errors.append("Potential SQL injection pattern detected")
-                        result.is_valid = False
-                        result.flags.add("sql_injection")
-                        break
-        
-        return result
-
-# ============================================
-# SECTION 6: REDIS SAFEGUARDS & STATE MANAGEMENT
-# ============================================
-
-class RedisSafeguards:
-    """
-    REDIS STATE MANAGEMENT WITH SAFEGUARDS
-    OTP safety, state consistency, TTL enforcement, race-condition protection
-    """
-    
-    def __init__(self, redis_config: Dict = None, audit_logger: AuditLogger = None):
-        self.config = redis_config or REDIS_CONFIG
-        self.audit_logger = audit_logger
-        self.redis_client: Optional[redis.Redis] = None
-        self.key_prefix = "sec:"
-        
-        # Safeguard configurations
-        self.safeguards = {
-            "max_otp_attempts": 3,
-            "otp_ttl": 300,  # 5 minutes
-            "session_ttl": 3600,  # 1 hour
-            "lock_ttl": 30,  # Lock timeout
-            "max_concurrent_locks": 5,
-            "data_encryption": True,
-            "compression": True,
-            "backup_enabled": True,
-            "backup_interval": 3600,  # 1 hour
-        }
-        
-        # Metrics
-        self.metrics = {
-            "total_operations": 0,
-            "failed_operations": 0,
-            "race_conditions_prevented": 0,
-            "otp_verifications": 0,
-            "otp_failures": 0,
-            "locks_acquired": 0,
-            "locks_failed": 0,
-        }
-    
-    async def initialize(self) -> bool:
-        """Initialize Redis connection and setup safeguards"""
-        try:
-            # Create Redis connection pool
-            connection_pool = redis.ConnectionPool.from_url(
-                f"redis://{self.config['host']}:{self.config['port']}/{self.config['db']}",
-                password=self.config.get('password'),
-                ssl=self.config.get('ssl', False),
-                max_connections=self.config.get('max_connections', 20),
-                socket_timeout=self.config.get('socket_timeout', 5),
-                retry_on_timeout=self.config.get('retry_on_timeout', True),
-            )
-            
-            self.redis_client = redis.Redis(
-                connection_pool=connection_pool,
-                decode_responses=True
-            )
-            
-            # Test connection
-            await self.redis_client.ping()
-            
-            # Load existing safeguards
-            await self._load_safeguards()
-            
-            # Start background tasks
-            asyncio.create_task(self._background_maintenance())
-            
-            if self.audit_logger:
-                await self.audit_logger.log_event(
-                    event_type=SecurityEventType.SYSTEM_START,
-                    threat_level=ThreatLevel.INFO,
-                    source="RedisSafeguards",
-                    description="Redis safeguards initialized successfully"
-                )
-            
-            print("✅ Redis safeguards initialized")
-            return True
-            
-        except Exception as e:
-            print(f"❌ Redis initialization failed: {e}")
-            return False
-    
-    async def _load_safeguards(self):
-        """Load safeguard configurations from Redis"""
-        try:
-            safeguard_key = f"{self.key_prefix}safeguards:config"
-            config = await self.redis_client.get(safeguard_key)
-            if config:
-                loaded = json.loads(config)
-                self.safeguards.update(loaded)
-        except Exception:
-            pass  # Use defaults if loading fails
-    
-    async def _background_maintenance(self):
-        """Background maintenance tasks"""
-        while True:
-            try:
-                # Cleanup expired locks
-                await self._cleanup_expired_locks()
-                
-                # Backup safeguards config
-                if self.safeguards["backup_enabled"]:
-                    await self._backup_safeguards()
-                
-                # Update metrics
-                await self._update_metrics()
-                
-            except Exception as e:
-                print(f"⚠️ Redis maintenance error: {e}")
-            
-            await asyncio.sleep(self.safeguards["backup_interval"])
-    
-    async def _cleanup_expired_locks(self):
-        """Cleanup expired distributed locks"""
-        try:
-            lock_pattern = f"{self.key_prefix}lock:*"
-            cursor = 0
-            deleted = 0
-            
-            while True:
-                cursor, keys = await self.redis_client.scan(
-                    cursor=cursor,
-                    match=lock_pattern,
-                    count=100
-                )
-                
-                for key in keys:
-                    ttl = await self.redis_client.ttl(key)
-                    if ttl < 0:  # Expired
-                        await self.redis_client.delete(key)
-                        deleted += 1
-                
-                if cursor == 0:
-                    break
-            
-            if deleted > 0:
-                print(f"🧹 Cleaned up {deleted} expired locks")
-                
-        except Exception as e:
-            print(f"⚠️ Lock cleanup error: {e}")
-    
-    async def _backup_safeguards(self):
-        """Backup safeguard configurations"""
-        try:
-            backup_key = f"{self.key_prefix}safeguards:backup:{int(time.time())}"
-            backup_data = {
-                "config": self.safeguards,
-                "metrics": self.metrics,
-                "timestamp": datetime.now().isoformat()
-            }
-            
-            await self.redis_client.setex(
-                backup_key,
-                86400 * 7,  # Keep for 7 days
-                json.dumps(backup_data)
-            )
-            
-        except Exception as e:
-            print(f"⚠️ Safeguard backup error: {e}")
-    
-    async def _update_metrics(self):
-        """Update Redis metrics"""
-        try:
-            metrics_key = f"{self.key_prefix}metrics"
-            await self.redis_client.setex(
-                metrics_key,
-                300,  # 5 minutes TTL
-                json.dumps({
-                    **self.metrics,
-                    "updated_at": datetime.now().isoformat()
-                })
-            )
-        except Exception as e:
-            print(f"⚠️ Metrics update error: {e}")
-    
-    async def store_otp(self, identifier: str, otp: str, metadata: Dict = None) -> bool:
-        """
-        Store OTP with safeguards against brute force
-        """
-        try:
-            otp_key = f"{self.key_prefix}otp:{identifier}"
-            
-            # Check existing attempts
-            attempts_key = f"{self.key_prefix}otp_attempts:{identifier}"
-            attempts = await self.redis_client.get(attempts_key) or 0
-            attempts = int(attempts)
-            
-            if attempts >= self.safeguards["max_otp_attempts"]:
-                if self.audit_logger:
-                    await self.audit_logger.log_event(
-                        event_type=SecurityEventType.RATE_LIMIT,
-                        threat_level=ThreatLevel.MEDIUM,
-                        source="RedisSafeguards",
-                        description=f"OTP attempt limit exceeded for {identifier}",
-                        details={"attempts": attempts, "max_attempts": self.safeguards["max_otp_attempts"]}
-                    )
-                return False
-            
-            # Store OTP with metadata
-            otp_data = {
-                "otp": otp,
-                "created_at": datetime.now().isoformat(),
-                "expires_at": (datetime.now() + timedelta(seconds=self.safeguards["otp_ttl"])).isoformat(),
-                "attempts": 0,
-                "metadata": metadata or {}
-            }
-            
-            # Use transaction for atomic operations
-            async with self.redis_client.pipeline(transaction=True) as pipe:
-                pipe.setex(otp_key, self.safeguards["otp_ttl"], json.dumps(otp_data))
-                pipe.setex(attempts_key, self.safeguards["otp_ttl"], 0)
-                await pipe.execute()
-            
-            self.metrics["otp_verifications"] += 1
-            
-            if self.audit_logger:
-                await self.audit_logger.log_event(
-                    event_type=SecurityEventType.AUTH_SUCCESS,
-                    threat_level=ThreatLevel.INFO,
-                    source="RedisSafeguards",
-                    description=f"OTP stored for {identifier}",
-                    details={"identifier": identifier, "ttl": self.safeguards["otp_ttl"]}
-                )
-            
-            return True
-            
-        except Exception as e:
-            print(f"❌ OTP storage failed: {e}")
-            self.metrics["failed_operations"] += 1
-            return False
-    
-    async def verify_otp(self, identifier: str, otp: str) -> Tuple[bool, Dict]:
-        """
-        Verify OTP with rate limiting and attempt tracking
-        """
-        try:
-            otp_key = f"{self.key_prefix}otp:{identifier}"
-            attempts_key = f"{self.key_prefix}otp_attempts:{identifier}"
-            
-            # Get OTP data
-            otp_data_str = await self.redis_client.get(otp_key)
-            if not otp_data_str:
-                return False, {"error": "OTP not found or expired"}
-            
-            otp_data = json.loads(otp_data_str)
-            
-            # Check attempts
-            attempts = await self.redis_client.get(attempts_key) or 0
-            attempts = int(attempts)
-            
-            if attempts >= self.safeguards["max_otp_attempts"]:
-                # Delete OTP after max attempts
-                await self.redis_client.delete(otp_key)
-                
-                if self.audit_logger:
-                    await self.audit_logger.log_event(
-                        event_type=SecurityEventType.AUTH_FAILURE,
-                        threat_level=ThreatLevel.HIGH,
-                        source="RedisSafeguards",
-                        description=f"OTP max attempts reached for {identifier}",
-                        details={"attempts": attempts, "max_attempts": self.safeguards["max_otp_attempts"]}
-                    )
-                
-                return False, {"error": "Maximum attempts exceeded"}
-            
-            # Increment attempts
-            await self.redis_client.incr(attempts_key)
-            await self.redis_client.expire(attempts_key, self.safeguards["otp_ttl"])
-            
-            # Verify OTP
-            is_valid = hmac.compare_digest(otp_data["otp"], otp)
-            
-            if is_valid:
-                # Clear OTP and attempts on success
-                await self.redis_client.delete(otp_key)
-                await self.redis_client.delete(attempts_key)
-                
-                # Update metadata
-                otp_data["verified_at"] = datetime.now().isoformat()
-                otp_data["attempts"] = attempts + 1
-                
-                self.metrics["otp_verifications"] += 1
-                
-                if self.audit_logger:
-                    await self.audit_logger.log_event(
-                        event_type=SecurityEventType.AUTH_SUCCESS,
-                        threat_level=ThreatLevel.INFO,
-                        source="RedisSafeguards",
-                        description=f"OTP verified successfully for {identifier}",
-                        details={"identifier": identifier, "attempts": attempts + 1}
-                    )
-                
-                return True, {"metadata": otp_data.get("metadata", {}), "attempts": attempts + 1}
-            else:
-                self.metrics["otp_failures"] += 1
-                
-                if attempts + 1 >= self.safeguards["max_otp_attempts"]:
-                    await self.redis_client.delete(otp_key)
-                    
-                    if self.audit_logger:
-                        await self.audit_logger.log_event(
-                            event_type=SecurityEventType.AUTH_FAILURE,
-                            threat_level=ThreatLevel.HIGH,
-                            source="RedisSafeguards",
-                            description=f"OTP verification failed with max attempts for {identifier}",
-                            details={"attempts": attempts + 1, "max_attempts": self.safeguards["max_otp_attempts"]}
-                        )
-                
-                return False, {
-                    "error": "Invalid OTP",
-                    "attempts_remaining": self.safeguards["max_otp_attempts"] - (attempts + 1),
-                    "attempts": attempts + 1
-                }
-                
-        except Exception as e:
-            print(f"❌ OTP verification failed: {e}")
-            self.metrics["failed_operations"] += 1
-            return False, {"error": str(e)}
-    
-    async def acquire_lock(self, lock_name: str, timeout: int = None) -> Optional[str]:
-        """
-        Acquire distributed lock with race condition protection
-        """
-        try:
-            lock_key = f"{self.key_prefix}lock:{lock_name}"
-            lock_id = SecurityUtils.generate_secure_token()
-            timeout = timeout or self.safeguards["lock_ttl"]
-            
-            # Try to acquire lock
-            acquired = await self.redis_client.set(
-                lock_key,
-                lock_id,
-                ex=timeout,
-                nx=True  # Only set if not exists
-            )
-            
-            if acquired:
-                self.metrics["locks_acquired"] += 1
-                self.metrics["race_conditions_prevented"] += 1
-                
-                if self.audit_logger:
-                    await self.audit_logger.log_event(
-                        event_type=SecurityEventType.SESSION_CREATE,
-                        threat_level=ThreatLevel.INFO,
-                        source="RedisSafeguards",
-                        description=f"Lock acquired: {lock_name}",
-                        details={"lock_id": lock_id, "timeout": timeout}
-                    )
-                
-                return lock_id
-            else:
-                self.metrics["locks_failed"] += 1
-                return None
-                
-        except Exception as e:
-            print(f"❌ Lock acquisition failed: {e}")
-            self.metrics["failed_operations"] += 1
-            return None
-    
-    async def release_lock(self, lock_name: str, lock_id: str) -> bool:
-        """
-        Release distributed lock safely
-        """
-        try:
-            lock_key = f"{self.key_prefix}lock:{lock_name}"
-            
-            # Use Lua script for atomic check-and-delete
-            lua_script = """
-            if redis.call("get", KEYS[1]) == ARGV[1] then
-                return redis.call("del", KEYS[1])
-            else
-                return 0
-            end
-            """
-            
-            released = await self.redis_client.eval(
-                lua_script,
-                1,  # Number of keys
-                lock_key,
-                lock_id
-            )
-            
-            if released:
-                if self.audit_logger:
-                    await self.audit_logger.log_event(
-                        event_type=SecurityEventType.SESSION_DESTROY,
-                        threat_level=ThreatLevel.INFO,
-                        source="RedisSafeguards",
-                        description=f"Lock released: {lock_name}",
-                        details={"lock_id": lock_id}
-                    )
-                
-                return True
-            else:
-                print(f"⚠️ Lock release failed: Invalid lock ID or already released")
-                return False
-                
-        except Exception as e:
-            print(f"❌ Lock release failed: {e}")
-            self.metrics["failed_operations"] += 1
-            return False
-    
-    async def store_state(
-        self, 
-        state_id: str, 
-        data: Dict, 
-        ttl: int = None,
-        encrypt: bool = True
-    ) -> bool:
-        """
-        Store state data with TTL enforcement and optional encryption
-        """
-        try:
-            state_key = f"{self.key_prefix}state:{state_id}"
-            ttl = ttl or self.safeguards["session_ttl"]
-            
-            # Prepare data
-            state_data = {
-                "data": data,
-                "created_at": datetime.now().isoformat(),
-                "expires_at": (datetime.now() + timedelta(seconds=ttl)).isoformat(),
-                "version": "1.0"
-            }
-            
-            # Optional encryption
-            if encrypt and self.safeguards["data_encryption"]:
-                # In production, use proper encryption key management
-                state_data["encrypted"] = True
-                # For demo, we'll just mark it
-                pass
-            
-            # Store with TTL
-            await self.redis_client.setex(
-                state_key,
-                ttl,
-                json.dumps(state_data)
-            )
-            
-            self.metrics["total_operations"] += 1
-            
-            if self.audit_logger:
-                await self.audit_logger.log_event(
-                    event_type=SecurityEventType.DATA_ACCESS,
-                    threat_level=ThreatLevel.INFO,
-                    source="RedisSafeguards",
-                    description=f"State stored: {state_id}",
-                    details={"state_id": state_id, "ttl": ttl, "encrypted": encrypt}
-                )
-            
-            return True
-            
-        except Exception as e:
-            print(f"❌ State storage failed: {e}")
-            self.metrics["failed_operations"] += 1
-            return False
-    
-    async def get_state(self, state_id: str) -> Optional[Dict]:
-        """
-        Retrieve state data with consistency checks
-        """
-        try:
-            state_key = f"{self.key_prefix}state:{state_id}"
-            
-            # Get state data
-            state_data_str = await self.redis_client.get(state_key)
-            if not state_data_str:
-                return None
-            
-            state_data = json.loads(state_data_str)
-            
-            # Check expiration
-            expires_at = datetime.fromisoformat(state_data["expires_at"])
-            if datetime.now() > expires_at:
-                # Auto-cleanup expired state
-                await self.redis_client.delete(state_key)
-                return None
-            
-            # Refresh TTL on access (sliding expiration)
-            await self.redis_client.expire(
-                state_key,
-                self.safeguards["session_ttl"]
-            )
-            
-            self.metrics["total_operations"] += 1
-            
-            return state_data.get("data", {})
-            
-        except Exception as e:
-            print(f"❌ State retrieval failed: {e}")
-            self.metrics["failed_operations"] += 1
-            return None
-    
-    async def delete_state(self, state_id: str) -> bool:
-        """
-        Delete state data securely
-        """
-        try:
-            state_key = f"{self.key_prefix}state:{state_id}"
-            
-            deleted = await self.redis_client.delete(state_key)
-            
-            if deleted:
-                if self.audit_logger:
-                    await self.audit_logger.log_event(
-                        event_type=SecurityEventType.DATA_ACCESS,
-                        threat_level=ThreatLevel.INFO,
-                        source="RedisSafeguards",
-                        description=f"State deleted: {state_id}",
-                        details={"state_id": state_id}
-                    )
-            
-            return deleted > 0
-            
-        except Exception as e:
-            print(f"❌ State deletion failed: {e}")
-            self.metrics["failed_operations"] += 1
-            return False
-    
-    async def get_metrics(self) -> Dict[str, Any]:
-        """Get Redis safeguards metrics"""
+    def to_dict(self) -> Dict[str, Any]:
         return {
-            **self.metrics,
-            "safeguards": self.safeguards,
-            "timestamp": datetime.now().isoformat()
+            "proxy": self.proxy,
+            "proxy_type": self.proxy_type.value,
+            "country": self.country,
+            "is_active": self.is_active,
+            "success_count": self.success_count,
+            "fail_count": self.fail_count,
+            "avg_response_time": self.avg_response_time,
+            "last_used": self.last_used.isoformat() if self.last_used else None,
+            "reports_used": self.reports_used,
+            "verified": self.verified,
         }
     
-    async def cleanup(self):
-        """Cleanup Redis resources"""
-        try:
-            if self.redis_client:
-                await self.redis_client.close()
-        except Exception as e:
-            print(f"⚠️ Redis cleanup error: {e}")
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> 'ProxyEntry':
+        entry = cls(
+            proxy=data["proxy"],
+            country=data.get("country", "Unknown"),
+            is_active=data.get("is_active", True),
+            success_count=data.get("success_count", 0),
+            fail_count=data.get("fail_count", 0),
+            avg_response_time=data.get("avg_response_time", 0.0),
+            reports_used=data.get("reports_used", 0),
+            verified=data.get("verified", False),
+        )
+        entry.proxy_type = ProxyType(data.get("proxy_type", 0))
+        if data.get("last_used"):
+            entry.last_used = datetime.fromisoformat(data["last_used"])
+        return entry
 
-# ============================================
-# SECTION 7: APPLICATION SECURITY AGENT
-# ============================================
-
-class ApplicationSecurityAgent:
-    """
-    APPLICATION SECURITY AGENT (Phase 1)
-    Strict input validation, exception sanitization, handler hardening
-    """
+@dataclass
+class TelegramAccount:
+    """Telegram account model"""
+    phone: str
+    session_file: Path
+    proxy: Optional[str] = None
+    status: AccountStatus = AccountStatus.UNVERIFIED
+    report_count: int = 0
+    total_reports: int = 0
+    last_report_time: Optional[datetime] = None
+    created_at: datetime = None
+    last_used: Optional[datetime] = None
+    client: Optional[TelegramClient] = None
     
-    def __init__(self, audit_logger: AuditLogger = None):
-        self.agent_id = "appsec_agent"
-        self.status = AgentStatus.PENDING
-        self.audit_logger = audit_logger
-        self.validator = InputValidator(ValidationMode.STRICT)
-        self.security_patches = []
-        self.hardened_handlers = []
-        self.metrics = {
-            "validations_performed": 0,
-            "exceptions_sanitized": 0,
-            "handlers_hardened": 0,
-            "security_patches_applied": 0,
-            "failed_validations": 0,
-        }
-        
-        # Security middleware registry
-        self.middleware = {
-            "input_validation": [],
-            "exception_handling": [],
-            "rate_limiting": [],
-            "headers_security": [],
-        }
+    def __post_init__(self):
+        if self.created_at is None:
+            self.created_at = datetime.now()
     
-    async def execute(self, dependencies: List[str] = None) -> AgentResult:
-        """
-        Execute application security hardening
-        """
-        start_time = datetime.now()
-        self.status = AgentStatus.RUNNING
-        
-        result = AgentResult(
-            agent_id=self.agent_id,
-            status=AgentStatus.RUNNING,
-            start_time=start_time,
-            dependencies=dependencies or []
-        )
-        
-        try:
-            if self.audit_logger:
-                await self.audit_logger.log_event(
-                    event_type=SecurityEventType.AGENT_START,
-                    threat_level=ThreatLevel.INFO,
-                    source=self.agent_id,
-                    description="Application Security Agent started execution"
-                )
-            
-            print("🔐 Starting Application Security Agent...")
-            
-            # Step 1: Initialize input validation schemas
-            await self._initialize_validation_schemas()
-            
-            # Step 2: Harden exception handling
-            await self._harden_exception_handling()
-            
-            # Step 3: Apply security patches
-            await self._apply_security_patches()
-            
-            # Step 4: Create security middleware
-            await self._create_security_middleware()
-            
-            # Step 5: Validate all critical inputs
-            await self._validate_critical_inputs()
-            
-            # Step 6: Generate security report
-            artifacts = await self._generate_security_report()
-            
-            result.status = AgentStatus.COMPLETED
-            result.end_time = datetime.now()
-            result.artifacts = artifacts
-            result.metrics = self.metrics
-            
-            if self.audit_logger:
-                await self.audit_logger.log_event(
-                    event_type=SecurityEventType.AGENT_COMPLETE,
-                    threat_level=ThreatLevel.INFO,
-                    source=self.agent_id,
-                    description="Application Security Agent completed successfully",
-                    details={"metrics": self.metrics}
-                )
-            
-            print("✅ Application Security Agent completed")
-            
-        except Exception as e:
-            result.status = AgentStatus.FAILED
-            result.end_time = datetime.now()
-            result.errors.append(f"Execution failed: {str(e)}")
-            
-            if self.audit_logger:
-                await self.audit_logger.log_event(
-                    event_type=SecurityEventType.SECURITY_ALERT,
-                    threat_level=ThreatLevel.HIGH,
-                    source=self.agent_id,
-                    description="Application Security Agent failed",
-                    details={"error": str(e), "traceback": traceback.format_exc()}
-                )
-            
-            print(f"❌ Application Security Agent failed: {e}")
-        
-        return result
-    
-    async def _initialize_validation_schemas(self):
-        """Initialize comprehensive validation schemas"""
-        print("  📋 Initializing validation schemas...")
-        
-        # Register custom validators
-        self.validator.register_validator(
-            "telegram_phone",
-            lambda x: bool(re.match(r'^\+[1-9]\d{9,14}$', x)),
-            {"description": "Telegram phone number format"}
-        )
-        
-        self.validator.register_validator(
-            "telegram_username",
-            lambda x: bool(re.match(r'^@[a-zA-Z0-9_]{5,32}$', x)),
-            {"description": "Telegram username format"}
-        )
-        
-        self.validator.register_validator(
-            "session_id",
-            lambda x: bool(re.match(r'^[a-f0-9]{32}$', x)),
-            {"description": "Session ID (32 hex chars)"}
-        )
-        
-        self.validator.register_validator(
-            "job_id",
-            lambda x: bool(re.match(r'^[a-f0-9]{16}$', x)),
-            {"description": "Job ID (16 hex chars)"}
-        )
-        
-        # Add schema for proxy validation
-        self.validator.schemas["proxy_url"] = {
-            "pattern": r'^(http|https|socks5)://[^\s]+$',
-            "max_length": 500,
-            "description": "Proxy URL"
-        }
-        
-        self.metrics["security_patches_applied"] += 1
-        print("  ✅ Validation schemas initialized")
-    
-    async def _harden_exception_handling(self):
-        """Harden exception handling across the application"""
-        print("  🛡️ Hardening exception handling...")
-        
-        # Create exception sanitizer decorator
-        def sanitize_exceptions(func):
-            @wraps(func)
-            async def wrapper(*args, **kwargs):
-                try:
-                    return await func(*args, **kwargs)
-                except Exception as e:
-                    # Sanitize exception information
-                    sanitized_error = self._sanitize_exception(e)
-                    
-                    # Log the sanitized error
-                    if self.audit_logger:
-                        await self.audit_logger.log_event(
-                            event_type=SecurityEventType.EXCEPTION,
-                            threat_level=ThreatLevel.MEDIUM,
-                            source=self.agent_id,
-                            description="Exception sanitized",
-                            details={
-                                "function": func.__name__,
-                                "error_type": type(e).__name__,
-                                "sanitized_error": str(sanitized_error)
-                            }
-                        )
-                    
-                    # Re-raise sanitized exception
-                    raise sanitized_error
-            
-            return wrapper
-        
-        self.security_patches.append({
-            "patch": "exception_sanitizer",
-            "description": "Sanitizes exceptions to prevent information leakage",
-            "decorator": sanitize_exceptions
-        })
-        
-        self.metrics["exceptions_sanitized"] += 1
-        print("  ✅ Exception handling hardened")
-    
-    def _sanitize_exception(self, exception: Exception) -> Exception:
-        """Sanitize exception to prevent information leakage"""
-        # Create a generic exception
-        error_message = str(exception)
-        
-        # Remove sensitive information
-        patterns_to_remove = [
-            r'password[=:]\s*[^\s&]+',
-            r'token[=:]\s*[^\s&]+',
-            r'api[_-]?key[=:]\s*[^\s&]+',
-            r'secret[=:]\s*[^\s&]+',
-            r'Authorization:\s*Bearer\s+[^\s]+',
-            r'[0-9]{4}-[0-9]{4}-[0-9]{4}-[0-9]{4}',
-            r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b',
-        ]
-        
-        for pattern in patterns_to_remove:
-            error_message = re.sub(pattern, '[REDACTED]', error_message)
-        
-        # Remove file paths and system information
-        error_message = re.sub(r'File "[^"]+"', 'File "[REDACTED]"', error_message)
-        error_message = re.sub(r'line \d+', 'line [REDACTED]', error_message)
-        
-        # Create new exception with sanitized message
-        return type(exception)(f"Sanitized error: {error_message[:200]}")
-    
-    async def _apply_security_patches(self):
-        """Apply security patches to critical areas"""
-        print("  🔧 Applying security patches...")
-        
-        patches = [
-            {
-                "name": "input_size_limiter",
-                "description": "Limit input size to prevent DoS",
-                "function": self._create_input_size_limiter()
-            },
-            {
-                "name": "content_type_validator",
-                "description": "Validate content types to prevent MIME confusion",
-                "function": self._create_content_type_validator()
-            },
-            {
-                "name": "header_security",
-                "description": "Add security headers to responses",
-                "function": self._create_header_security_middleware()
-            },
-            {
-                "name": "cors_protection",
-                "description": "Implement CORS protection",
-                "function": self._create_cors_protection()
-            },
-        ]
-        
-        self.security_patches.extend(patches)
-        self.metrics["security_patches_applied"] += len(patches)
-        print(f"  ✅ {len(patches)} security patches applied")
-    
-    def _create_input_size_limiter(self):
-        """Create middleware to limit input size"""
-        def input_size_limiter(max_size: int = SECURITY_CONFIG["max_request_size"]):
-            async def middleware(request, handler):
-                # Check content length if available
-                content_length = request.headers.get('Content-Length')
-                if content_length:
-                    size = int(content_length)
-                    if size > max_size:
-                        raise ValueError(f"Request too large: {size} > {max_size}")
-                
-                # For streaming requests, we'd need to check as we read
-                return await handler(request)
-            
-            return middleware
-        
-        return input_size_limiter
-    
-    def _create_content_type_validator(self):
-        """Create middleware to validate content types"""
-        def content_type_validator(allowed_types: List[str] = None):
-            if allowed_types is None:
-                allowed_types = [
-                    'application/json',
-                    'application/x-www-form-urlencoded',
-                    'multipart/form-data'
-                ]
-            
-            async def middleware(request, handler):
-                content_type = request.headers.get('Content-Type', '')
-                
-                # Check if content type is allowed
-                if content_type and not any(
-                    allowed in content_type for allowed in allowed_types
-                ):
-                    raise ValueError(f"Unsupported content type: {content_type}")
-                
-                return await handler(request)
-            
-            return middleware
-        
-        return content_type_validator
-    
-    def _create_header_security_middleware(self):
-        """Create middleware to add security headers"""
-        def header_security():
-            async def middleware(request, handler):
-                response = await handler(request)
-                
-                # Add security headers
-                response.headers.update({
-                    'X-Content-Type-Options': 'nosniff',
-                    'X-Frame-Options': 'DENY',
-                    'X-XSS-Protection': '1; mode=block',
-                    'Strict-Transport-Security': 'max-age=31536000; includeSubDomains',
-                    'Content-Security-Policy': "default-src 'self'",
-                    'Referrer-Policy': 'strict-origin-when-cross-origin',
-                    'Permissions-Policy': 'geolocation=(), microphone=(), camera=()'
-                })
-                
-                return response
-            
-            return middleware
-        
-        return header_security
-    
-    def _create_cors_protection(self):
-        """Create CORS protection middleware"""
-        def cors_protection(allowed_origins: List[str] = None):
-            if allowed_origins is None:
-                allowed_origins = []  # Same-origin by default
-            
-            async def middleware(request, handler):
-                origin = request.headers.get('Origin')
-                
-                if origin and origin not in allowed_origins:
-                    raise ValueError(f"CORS policy violation: {origin}")
-                
-                response = await handler(request)
-                
-                # Add CORS headers if origin is allowed
-                if origin in allowed_origins:
-                    response.headers.update({
-                        'Access-Control-Allow-Origin': origin,
-                        'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
-                        'Access-Control-Allow-Headers': 'Content-Type, Authorization',
-                        'Access-Control-Allow-Credentials': 'true',
-                        'Access-Control-Max-Age': '86400',
-                    })
-                
-                return response
-            
-            return middleware
-        
-        return cors_protection
-    
-    async def _create_security_middleware(self):
-        """Create comprehensive security middleware"""
-        print("  🛡️ Creating security middleware...")
-        
-        middleware_registry = {
-            "rate_limiter": self._create_rate_limiter_middleware(),
-            "request_validator": self._create_request_validator_middleware(),
-            "sql_injection_protector": self._create_sql_injection_protector(),
-            "xss_protector": self._create_xss_protector(),
-        }
-        
-        self.middleware.update(middleware_registry)
-        self.metrics["handlers_hardened"] += len(middleware_registry)
-        print(f"  ✅ {len(middleware_registry)} security middleware created")
-    
-    def _create_rate_limiter_middleware(self):
-        """Create rate limiting middleware"""
-        def rate_limiter(requests_per_window: int = None, window_seconds: int = None):
-            requests_per_window = requests_per_window or SECURITY_CONFIG["rate_limit_requests"]
-            window_seconds = window_seconds or SECURITY_CONFIG["rate_limit_window"]
-            
-            async def middleware(request, handler):
-                # Get client identifier (IP + user agent)
-                client_ip = request.remote
-                user_agent = request.headers.get('User-Agent', '')
-                client_id = f"{client_ip}:{hashlib.md5(user_agent.encode()).hexdigest()[:8]}"
-                
-                # Check rate limit (implementation depends on storage)
-                # For now, this is a placeholder
-                
-                return await handler(request)
-            
-            return middleware
-        
-        return rate_limiter
-    
-    def _create_request_validator_middleware(self):
-        """Create request validation middleware"""
-        def request_validator():
-            async def middleware(request, handler):
-                # Validate request method
-                valid_methods = ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS']
-                if request.method not in valid_methods:
-                    raise ValueError(f"Invalid HTTP method: {request.method}")
-                
-                # Validate path (no path traversal)
-                path = request.path
-                if '..' in path or '//' in path:
-                    raise ValueError(f"Path traversal attempt: {path}")
-                
-                # Validate headers
-                headers = dict(request.headers)
-                for header_name, header_value in headers.items():
-                    # Check for suspicious headers
-                    suspicious_headers = ['x-forwarded-for', 'x-real-ip', 'x-forwarded-host']
-                    if header_name.lower() in suspicious_headers:
-                        # Log suspicious header but don't block
-                        if self.audit_logger:
-                            await self.audit_logger.log_event(
-                                event_type=SecurityEventType.INPUT_VALIDATION,
-                                threat_level=ThreatLevel.LOW,
-                                source=self.agent_id,
-                                description=f"Suspicious header detected: {header_name}",
-                                details={"header_name": header_name, "header_value": header_value[:100]}
-                            )
-                
-                return await handler(request)
-            
-            return middleware
-        
-        return request_validator
-    
-    def _create_sql_injection_protector(self):
-        """Create SQL injection protection middleware"""
-        def sql_injection_protector():
-            async def middleware(request, handler):
-                # Check request parameters for SQL injection patterns
-                sql_patterns = [
-                    r'(\'|\"|`).*(\'|\"|`).*(SELECT|INSERT|UPDATE|DELETE|DROP|UNION)',
-                    r';.*--',
-                    r'/\*.*\*/',
-                    r'exec(\s|\()+',
-                    r'xp_cmdshell',
-                    r'waitfor\s+delay',
-                ]
-                
-                # Check query parameters
-                query_params = dict(request.query)
-                for param_name, param_value in query_params.items():
-                    if isinstance(param_value, str):
-                        for pattern in sql_patterns:
-                            if re.search(pattern, param_value, re.IGNORECASE):
-                                raise ValueError(f"Potential SQL injection in parameter: {param_name}")
-                
-                # Check JSON body if present
-                try:
-                    if request.can_read_body:
-                        body = await request.json()
-                        if isinstance(body, dict):
-                            for key, value in body.items():
-                                if isinstance(value, str):
-                                    for pattern in sql_patterns:
-                                        if re.search(pattern, value, re.IGNORECASE):
-                                            raise ValueError(f"Potential SQL injection in body field: {key}")
-                except:
-                    pass  # Not JSON or can't parse
-                
-                return await handler(request)
-            
-            return middleware
-        
-        return sql_injection_protector
-    
-    def _create_xss_protector(self):
-        """Create XSS protection middleware"""
-        def xss_protector():
-            async def middleware(request, handler):
-                # Check for XSS patterns in input
-                xss_patterns = [
-                    r'<script[^>]*>',
-                    r'javascript:',
-                    r'onload\s*=',
-                    r'onerror\s*=',
-                    r'onclick\s*=',
-                    r'vbscript:',
-                    r'expression\s*\(',
-                ]
-                
-                # Check query parameters
-                query_params = dict(request.query)
-                for param_name, param_value in query_params.items():
-                    if isinstance(param_value, str):
-                        for pattern in xss_patterns:
-                            if re.search(pattern, param_value, re.IGNORECASE):
-                                raise ValueError(f"Potential XSS in parameter: {param_name}")
-                
-                return await handler(request)
-            
-            return middleware
-        
-        return xss_protector
-    
-    async def _validate_critical_inputs(self):
-        """Validate critical input paths in the system"""
-        print("  🔍 Validating critical inputs...")
-        
-        # Define critical input validation points
-        validation_points = [
-            {
-                "name": "user_input",
-                "fields": {
-                    "username": ("username", True),
-                    "email": ("email", False),
-                    "phone": ("telegram_phone", True),
-                }
-            },
-            {
-                "name": "session_input",
-                "fields": {
-                    "session_id": ("session_id", True),
-                    "user_id": ("positive_integer", True),
-                }
-            },
-            {
-                "name": "report_input",
-                "fields": {
-                    "target": ("string", True),
-                    "category": ("string", True),
-                    "description": ("string", True),
-                }
-            },
-            {
-                "name": "proxy_input",
-                "fields": {
-                    "proxy_url": ("proxy_url", True),
-                    "proxy_type": ("string", True),
-                }
-            },
-        ]
-        
-        validation_count = 0
-        for point in validation_points:
-            for field_name, (field_type, required) in point["fields"].items():
-                # Create test validation context
-                context = SecurityContext(
-                    security_level=SecurityLevel.STRICT,
-                    validation_mode=ValidationMode.STRICT
-                )
-                
-                # Test validation
-                test_value = "test_value" if required else None
-                result = self.validator.validate_input(
-                    value=test_value,
-                    expected_type=field_type,
-                    field_name=field_name,
-                    required=required,
-                    context=context
-                )
-                
-                validation_count += 1
-                
-                if not result.is_valid and required:
-                    print(f"  ⚠️ Validation failed for {field_name}: {result.errors}")
-        
-        self.metrics["validations_performed"] += validation_count
-        print(f"  ✅ {validation_count} input validations performed")
-    
-    async def _generate_security_report(self) -> Dict[str, Any]:
-        """Generate security hardening report"""
-        report = {
-            "agent": self.agent_id,
-            "timestamp": datetime.now().isoformat(),
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "phone": self.phone,
+            "session_file": str(self.session_file),
+            "proxy": self.proxy,
             "status": self.status.value,
-            "metrics": self.metrics,
-            "security_patches": [
-                {
-                    "name": patch.get("name", "unknown"),
-                    "description": patch.get("description", ""),
-                    "applied": True
-                }
-                for patch in self.security_patches
-            ],
-            "middleware_created": list(self.middleware.keys()),
-            "validation_schemas": list(self.validator.schemas.keys()),
-            "custom_validators": list(self.validator.custom_validators.keys()),
-            "recommendations": [
-                "Enable all security middleware in production",
-                "Regularly update validation schemas",
-                "Monitor exception logs for patterns",
-                "Conduct regular security reviews"
-            ]
+            "report_count": self.report_count,
+            "total_reports": self.total_reports,
+            "created_at": self.created_at.isoformat(),
+            "last_used": self.last_used.isoformat() if self.last_used else None,
+            "last_report_time": self.last_report_time.isoformat() if self.last_report_time else None,
         }
-        
-        return report
     
-    def get_middleware(self, middleware_name: str):
-        """Get security middleware by name"""
-        return self.middleware.get(middleware_name)
-    
-    def get_validator(self):
-        """Get the input validator instance"""
-        return self.validator
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> 'TelegramAccount':
+        account = cls(
+            phone=data["phone"],
+            session_file=Path(data["session_file"]),
+            proxy=data.get("proxy"),
+            status=AccountStatus(data["status"]),
+            report_count=data.get("report_count", 0),
+            total_reports=data.get("total_reports", 0),
+        )
+        account.created_at = datetime.fromisoformat(data["created_at"])
+        if data.get("last_used"):
+            account.last_used = datetime.fromisoformat(data["last_used"])
+        if data.get("last_report_time"):
+            account.last_report_time = datetime.fromisoformat(data["last_report_time"])
+        return account
 
-# ============================================
-# SECTION 8: PROXY DEFENSES AGENT
-# ============================================
-
-class ProxyDefensesAgent:
-    """
-    PROXY DEFENSES AGENT (Phase 2)
-    Proxy health scoring, quarantine, rotation, and network hardening
-    Requires: Application Security + Redis Safeguards
-    """
+@dataclass
+class ReportJob:
+    """Report job model"""
+    job_id: str
+    target: str
+    target_type: str
+    category: str
+    description: str
+    created_by: int
+    created_at: datetime = None
+    started_at: Optional[datetime] = None
+    completed_at: Optional[datetime] = None
+    status: ReportStatus = ReportStatus.PENDING
+    accounts_used: List[str] = None
+    results: List[Dict] = None
     
-    def __init__(self, audit_logger: AuditLogger = None, redis_safeguards: RedisSafeguards = None):
-        self.agent_id = "proxy_defenses_agent"
-        self.status = AgentStatus.PENDING
-        self.audit_logger = audit_logger
-        self.redis_safeguards = redis_safeguards
-        self.health_scoring = {}
-        self.quarantine_list = set()
-        self.rotation_policies = {}
-        self.metrics = {
-            "proxies_monitored": 0,
-            "health_checks_performed": 0,
-            "proxies_quarantined": 0,
-            "proxies_rotated": 0,
-            "connection_errors": 0,
-            "ssl_verifications": 0,
-        }
-        
-        # Proxy test configurations
-        self.test_endpoints = [
-            {"url": "https://httpbin.org/ip", "timeout": 5},
-            {"url": "https://api.ipify.org", "timeout": 5},
-            {"url": "https://google.com", "timeout": 3},
-        ]
+    def __post_init__(self):
+        if self.created_at is None:
+            self.created_at = datetime.now()
+        if self.accounts_used is None:
+            self.accounts_used = []
+        if self.results is None:
+            self.results = []
     
-    async def execute(self, dependencies: List[str] = None) -> AgentResult:
-        """
-        Execute proxy defenses hardening
-        """
-        start_time = datetime.now()
-        self.status = AgentStatus.RUNNING
-        
-        result = AgentResult(
-            agent_id=self.agent_id,
-            status=AgentStatus.RUNNING,
-            start_time=start_time,
-            dependencies=dependencies or []
-        )
-        
-        try:
-            # Check dependencies
-            if "appsec_agent" not in (dependencies or []):
-                raise ValueError("Requires Application Security Agent")
-            
-            if not self.redis_safeguards:
-                raise ValueError("Requires Redis Safeguards")
-            
-            if self.audit_logger:
-                await self.audit_logger.log_event(
-                    event_type=SecurityEventType.AGENT_START,
-                    threat_level=ThreatLevel.INFO,
-                    source=self.agent_id,
-                    description="Proxy Defenses Agent started execution"
-                )
-            
-            print("🌐 Starting Proxy Defenses Agent...")
-            
-            # Step 1: Initialize health scoring system
-            await self._initialize_health_scoring()
-            
-            # Step 2: Implement proxy quarantine system
-            await self._implement_quarantine_system()
-            
-            # Step 3: Create intelligent rotation policies
-            await self._create_rotation_policies()
-            
-            # Step 4: Implement SSL/TLS verification
-            await self._implement_ssl_verification()
-            
-            # Step 5: Set up geo-fencing
-            await self._setup_geo_fencing()
-            
-            # Step 6: Generate proxy defenses report
-            artifacts = await self._generate_defenses_report()
-            
-            result.status = AgentStatus.COMPLETED
-            result.end_time = datetime.now()
-            result.artifacts = artifacts
-            result.metrics = self.metrics
-            
-            if self.audit_logger:
-                await self.audit_logger.log_event(
-                    event_type=SecurityEventType.AGENT_COMPLETE,
-                    threat_level=ThreatLevel.INFO,
-                    source=self.agent_id,
-                    description="Proxy Defenses Agent completed successfully",
-                    details={"metrics": self.metrics}
-                )
-            
-            print("✅ Proxy Defenses Agent completed")
-            
-        except Exception as e:
-            result.status = AgentStatus.FAILED
-            result.end_time = datetime.now()
-            result.errors.append(f"Execution failed: {str(e)}")
-            
-            if self.audit_logger:
-                await self.audit_logger.log_event(
-                    event_type=SecurityEventType.SECURITY_ALERT,
-                    threat_level=ThreatLevel.HIGH,
-                    source=self.agent_id,
-                    description="Proxy Defenses Agent failed",
-                    details={"error": str(e), "traceback": traceback.format_exc()}
-                )
-            
-            print(f"❌ Proxy Defenses Agent failed: {e}")
-        
-        return result
-    
-    async def _initialize_health_scoring(self):
-        """Initialize proxy health scoring system"""
-        print("  📊 Initializing health scoring system...")
-        
-        self.health_scoring = {
-            "factors": {
-                "response_time": {"weight": 0.3, "threshold": 5.0},
-                "success_rate": {"weight": 0.4, "threshold": 0.8},
-                "uptime": {"weight": 0.2, "threshold": 0.95},
-                "bandwidth": {"weight": 0.1, "threshold": 1024},  # KB/s
-            },
-            "scoring_ranges": {
-                "excellent": (90, 100),
-                "good": (75, 90),
-                "fair": (60, 75),
-                "poor": (40, 60),
-                "critical": (0, 40),
-            },
-            "check_interval": 300,  # 5 minutes
-            "history_size": 100,  # Keep last 100 measurements
-        }
-        
-        # Store scoring configuration in Redis
-        await self.redis_safeguards.store_state(
-            "proxy_health_scoring",
-            self.health_scoring,
-            ttl=86400  # 24 hours
-        )
-        
-        print("  ✅ Health scoring system initialized")
-    
-    async def _implement_quarantine_system(self):
-        """Implement proxy quarantine system"""
-        print("  🚧 Implementing quarantine system...")
-        
-        quarantine_config = {
-            "conditions": [
-                {
-                    "name": "high_failure_rate",
-                    "threshold": 0.7,  # 70% failure rate
-                    "duration": 3600,  # 1 hour quarantine
-                },
-                {
-                    "name": "slow_response",
-                    "threshold": 10.0,  # 10 seconds
-                    "duration": 1800,  # 30 minutes
-                },
-                {
-                    "name": "ssl_error",
-                    "immediate": True,
-                    "duration": 7200,  # 2 hours
-                },
-                {
-                    "name": "geo_violation",
-                    "immediate": True,
-                    "duration": 86400,  # 24 hours
-                },
-            ],
-            "auto_release": True,
-            "notifications": True,
-            "max_quarantine_duration": 86400,  # Max 24 hours
-        }
-        
-        # Initialize quarantine list
-        quarantine_key = "proxy_quarantine_list"
-        existing = await self.redis_safeguards.get_state(quarantine_key)
-        if existing:
-            self.quarantine_list = set(existing.get("proxies", []))
-        
-        # Store quarantine config
-        await self.redis_safeguards.store_state(
-            "proxy_quarantine_config",
-            quarantine_config,
-            ttl=86400
-        )
-        
-        print("  ✅ Quarantine system implemented")
-    
-    async def _create_rotation_policies(self):
-        """Create intelligent proxy rotation policies"""
-        print("  🔄 Creating rotation policies...")
-        
-        self.rotation_policies = {
-            "time_based": {
-                "reports_per_proxy": 9,
-                "time_interval": 3600,  # Rotate after 1 hour of use
-                "max_connections": 100,
-            },
-            "performance_based": {
-                "health_threshold": 60,  # Rotate if health < 60%
-                "failure_threshold": 3,  # Rotate after 3 consecutive failures
-                "response_time_threshold": 8.0,  # Rotate if avg response > 8s
-            },
-            "load_based": {
-                "concurrent_requests": 10,
-                "bandwidth_threshold": 10240,  # 10MB
-                "connection_pool_exhaustion": True,
-            },
-            "security_based": {
-                "auto_rotate_on_quarantine": True,
-                "geo_rotation": True,  # Rotate geographic locations
-                "provider_rotation": True,  # Rotate between providers
-            },
-        }
-        
-        # Store rotation policies
-        await self.redis_safeguards.store_state(
-            "proxy_rotation_policies",
-            self.rotation_policies,
-            ttl=86400
-        )
-        
-        print("  ✅ Rotation policies created")
-    
-    async def _implement_ssl_verification(self):
-        """Implement SSL/TLS verification for proxies"""
-        print("  🔒 Implementing SSL verification...")
-        
-        ssl_config = {
-            "verify_certificates": True,
-            "check_revocation": True,
-            "min_tls_version": "TLSv1.2",
-            "allowed_ciphers": [
-                "ECDHE-RSA-AES128-GCM-SHA256",
-                "ECDHE-RSA-AES256-GCM-SHA384",
-                "ECDHE-RSA-CHACHA20-POLY1305",
-            ],
-            "certificate_pinning": False,  # Enable for critical endpoints
-            "ssl_context_options": {
-                "ssl_version": ssl.PROTOCOL_TLS,
-                "cert_reqs": ssl.CERT_REQUIRED,
-                "check_hostname": True,
-            },
-        }
-        
-        # Create SSL context for verification
-        ssl_context = ssl.create_default_context()
-        ssl_context.minimum_version = ssl.TLSVersion.TLSv1_2
-        ssl_context.check_hostname = True
-        ssl_context.verify_mode = ssl.CERT_REQUIRED
-        
-        # Store SSL configuration
-        await self.redis_safeguards.store_state(
-            "proxy_ssl_config",
-            ssl_config,
-            ttl=86400
-        )
-        
-        self.metrics["ssl_verifications"] += 1
-        print("  ✅ SSL verification implemented")
-    
-    async def _setup_geo_fencing(self):
-        """Set up geographic fencing for proxies"""
-        print("  🗺️ Setting up geo-fencing...")
-        
-        geo_fencing = {
-            "allowed_countries": [
-                "Germany", "Netherlands", "Singapore", "Finland", "Ireland",
-                "Japan", "United States", "United Kingdom", "Switzerland", "Sweden"
-            ],
-            "blocked_countries": [
-                "Russia", "China", "North Korea", "Iran", "Syria"
-            ],
-            "region_restrictions": {
-                "premium": ["Germany", "Netherlands", "Singapore"],
-                "standard": ["United States", "United Kingdom", "Japan"],
-                "fallback": ["Finland", "Ireland", "Sweden"]
-            },
-            "ip_validation": {
-                "check_asn": True,
-                "check_isp": True,
-                "vpn_detection": True,
-                "datacenter_detection": True,
-            }
-        }
-        
-        # Store geo-fencing configuration
-        await self.redis_safeguards.store_state(
-            "proxy_geo_fencing",
-            geo_fencing,
-            ttl=86400
-        )
-        
-        print("  ✅ Geo-fencing setup complete")
-    
-    async def check_proxy_health(self, proxy_url: str) -> Dict[str, Any]:
-        """
-        Check proxy health with comprehensive testing
-        """
-        health_data = {
-            "proxy_url": proxy_url,
-            "timestamp": datetime.now().isoformat(),
-            "tests_passed": 0,
-            "tests_failed": 0,
-            "response_times": [],
-            "errors": [],
-            "score": 0,
-        }
-        
-        try:
-            # Test each endpoint
-            for endpoint in self.test_endpoints:
-                test_result = await self._test_proxy_endpoint(proxy_url, endpoint)
-                
-                if test_result["success"]:
-                    health_data["tests_passed"] += 1
-                    health_data["response_times"].append(test_result["response_time"])
-                else:
-                    health_data["tests_failed"] += 1
-                    health_data["errors"].append(test_result["error"])
-            
-            # Calculate health score
-            if health_data["tests_passed"] > 0:
-                avg_response = sum(health_data["response_times"]) / len(health_data["response_times"])
-                success_rate = health_data["tests_passed"] / (health_data["tests_passed"] + health_data["tests_failed"])
-                
-                # Simple scoring formula
-                response_score = max(0, 100 - (avg_response * 10))
-                success_score = success_rate * 100
-                health_data["score"] = (response_score * 0.4) + (success_score * 0.6)
-            
-            # Update metrics
-            self.metrics["health_checks_performed"] += 1
-            
-            # Check if proxy should be quarantined
-            if health_data["score"] < 40:
-                await self.quarantine_proxy(proxy_url, "low_health_score", 3600)
-            
-            return health_data
-            
-        except Exception as e:
-            health_data["errors"].append(str(e))
-            self.metrics["connection_errors"] += 1
-            return health_data
-    
-    async def _test_proxy_endpoint(self, proxy_url: str, endpoint: Dict) -> Dict[str, Any]:
-        """Test proxy against a specific endpoint"""
-        result = {
-            "success": False,
-            "response_time": 0,
-            "error": None,
-        }
-        
-        try:
-            start_time = time.time()
-            
-            # Create connector with proxy
-            connector = aiohttp.TCPConnector(ssl=False)
-            
-            async with aiohttp.ClientSession(connector=connector) as session:
-                async with session.get(
-                    endpoint["url"],
-                    proxy=proxy_url,
-                    timeout=aiohttp.ClientTimeout(total=endpoint["timeout"])
-                ) as response:
-                    if response.status == 200:
-                        result["success"] = True
-                    else:
-                        result["error"] = f"HTTP {response.status}"
-            
-            result["response_time"] = time.time() - start_time
-            
-        except asyncio.TimeoutError:
-            result["error"] = f"Timeout after {endpoint['timeout']}s"
-        except Exception as e:
-            result["error"] = str(e)
-        
-        return result
-    
-    async def quarantine_proxy(self, proxy_url: str, reason: str, duration: int):
-        """
-        Quarantine a problematic proxy
-        """
-        # Add to quarantine list
-        self.quarantine_list.add(proxy_url)
-        
-        # Store in Redis
-        quarantine_key = "proxy_quarantine_list"
-        await self.redis_safeguards.store_state(
-            quarantine_key,
-            {"proxies": list(self.quarantine_list)},
-            ttl=duration
-        )
-        
-        # Create quarantine record
-        record_key = f"proxy_quarantine:{hashlib.md5(proxy_url.encode()).hexdigest()[:8]}"
-        record = {
-            "proxy_url": proxy_url,
-            "reason": reason,
-            "quarantined_at": datetime.now().isoformat(),
-            "expires_at": (datetime.now() + timedelta(seconds=duration)).isoformat(),
-            "duration": duration,
-        }
-        
-        await self.redis_safeguards.store_state(
-            record_key,
-            record,
-            ttl=duration
-        )
-        
-        self.metrics["proxies_quarantined"] += 1
-        
-        if self.audit_logger:
-            await self.audit_logger.log_event(
-                event_type=SecurityEventType.SECURITY_ALERT,
-                threat_level=ThreatLevel.MEDIUM,
-                source=self.agent_id,
-                description=f"Proxy quarantined: {reason}",
-                details={"proxy_url": proxy_url, "reason": reason, "duration": duration}
-            )
-        
-        print(f"  🚫 Proxy quarantined: {proxy_url} ({reason})")
-    
-    async def rotate_proxy(self, current_proxy: str = None, reason: str = None) -> Optional[str]:
-        """
-        Rotate to a new proxy based on policies
-        """
-        # Get available proxies (in production, this would come from a database)
-        available_proxies = await self._get_available_proxies()
-        
-        if not available_proxies:
-            return None
-        
-        # Filter out quarantined proxies
-        available_proxies = [p for p in available_proxies if p not in self.quarantine_list]
-        
-        if not available_proxies:
-            return None
-        
-        # Select best proxy based on health scores
-        best_proxy = None
-        best_score = -1
-        
-        for proxy in available_proxies:
-            # Get health score (in production, this would be cached)
-            health_data = await self.check_proxy_health(proxy)
-            score = health_data.get("score", 0)
-            
-            if score > best_score:
-                best_score = score
-                best_proxy = proxy
-        
-        if best_proxy and best_proxy != current_proxy:
-            self.metrics["proxies_rotated"] += 1
-            
-            if self.audit_logger and reason:
-                await self.audit_logger.log_event(
-                    event_type=SecurityEventType.SECURITY_ALERT,
-                    threat_level=ThreatLevel.INFO,
-                    source=self.agent_id,
-                    description=f"Proxy rotated: {reason}",
-                    details={
-                        "old_proxy": current_proxy,
-                        "new_proxy": best_proxy,
-                        "reason": reason,
-                        "health_score": best_score
-                    }
-                )
-        
-        return best_proxy
-    
-    async def _get_available_proxies(self) -> List[str]:
-        """Get list of available proxies"""
-        # In production, this would fetch from database or configuration
-        # For demo, return empty list
-        return []
-    
-    async def _generate_defenses_report(self) -> Dict[str, Any]:
-        """Generate proxy defenses report"""
-        report = {
-            "agent": self.agent_id,
-            "timestamp": datetime.now().isoformat(),
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "job_id": self.job_id,
+            "target": self.target,
+            "target_type": self.target_type,
+            "category": self.category,
+            "description": self.description,
+            "created_by": self.created_by,
+            "created_at": self.created_at.isoformat(),
+            "started_at": self.started_at.isoformat() if self.started_at else None,
+            "completed_at": self.completed_at.isoformat() if self.completed_at else None,
             "status": self.status.value,
-            "metrics": self.metrics,
-            "health_scoring_factors": self.health_scoring["factors"],
-            "quarantine_list_size": len(self.quarantine_list),
-            "rotation_policies": list(self.rotation_policies.keys()),
-            "test_endpoints": [e["url"] for e in self.test_endpoints],
-            "recommendations": [
-                "Implement certificate pinning for critical endpoints",
-                "Add machine learning for anomaly detection",
-                "Integrate with threat intelligence feeds",
-                "Implement proxy chain obfuscation"
-            ]
+            "accounts_used": self.accounts_used,
+            "results": self.results,
         }
-        
-        return report
+    
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> 'ReportJob':
+        job = cls(
+            job_id=data["job_id"],
+            target=data["target"],
+            target_type=data["target_type"],
+            category=data["category"],
+            description=data["description"],
+            created_by=data["created_by"],
+        )
+        job.created_at = datetime.fromisoformat(data["created_at"])
+        job.status = ReportStatus(data["status"])
+        if data.get("started_at"):
+            job.started_at = datetime.fromisoformat(data["started_at"])
+        if data.get("completed_at"):
+            job.completed_at = datetime.fromisoformat(data["completed_at"])
+        job.accounts_used = data.get("accounts_used", [])
+        job.results = data.get("results", [])
+        return job
 
 # ============================================
-# SECTION 9: PROGRAM MANAGER & COORDINATION
+# CORE MANAGERS
 # ============================================
 
-class SecurityProgramManager:
-    """
-    PROGRAM MANAGER FOR MULTI-AGENT SECURITY HARDENING
-    Coordinates agents, manages dependencies, enforces sequencing
-    """
+class UserManager:
+    """Manages bot users and permissions"""
     
     def __init__(self):
-        self.agents = {}
-        self.dependencies = {}
-        self.execution_history = []
-        self.program_status = AgentStatus.PENDING
-        self.audit_logger = AuditLogger(LoggingLevel.VERBOSE)
-        self.redis_safeguards = None
-        
-        # Phase definitions
-        self.phases = {
-            "phase_1": {
-                "name": "Critical Security Path",
-                "description": "Foundational security work",
-                "agents": ["appsec_agent", "redis_safeguards_agent", "audit_logging_agent"],
-                "parallel_allowed": [["appsec_agent", "redis_safeguards_agent"]],
-                "dependencies": {},
-                "timeout": 86400,  # 24 hours
-            },
-            "phase_2": {
-                "name": "Infrastructure Hardening",
-                "description": "Proxy and container security",
-                "agents": ["proxy_defenses_agent", "container_hardening_agent"],
-                "dependencies": {
-                    "proxy_defenses_agent": ["appsec_agent", "redis_safeguards_agent"],
-                    "container_hardening_agent": ["appsec_agent"],
-                },
-                "timeout": 172800,  # 48 hours
-            },
-            "phase_3": {
-                "name": "System Validation",
-                "description": "Integration testing and operational readiness",
-                "agents": ["integration_testing_agent", "incident_response_agent"],
-                "dependencies": {
-                    "integration_testing_agent": ["appsec_agent", "redis_safeguards_agent", 
-                                                  "proxy_defenses_agent", "container_hardening_agent"],
-                    "incident_response_agent": ["audit_logging_agent"],
-                },
-                "timeout": 259200,  # 72 hours
-            }
-        }
-        
-        # Initialize agents
-        self._initialize_agents()
+        self.users: Dict[int, TelegramUser] = {}
+        self._load_users()
     
-    def _initialize_agents(self):
-        """Initialize all security agents"""
-        # Phase 1 Agents
-        self.agents["appsec_agent"] = ApplicationSecurityAgent(self.audit_logger)
-        self.agents["redis_safeguards_agent"] = RedisSafeguards(audit_logger=self.audit_logger)
-        self.agents["audit_logging_agent"] = self.audit_logger
-        
-        # Phase 2 Agents
-        self.agents["proxy_defenses_agent"] = ProxyDefensesAgent(
-            audit_logger=self.audit_logger,
-            redis_safeguards=self.redis_safeguards
-        )
-        
-        # Placeholder for other agents
-        self.agents["container_hardening_agent"] = None  # Would be implemented
-        self.agents["integration_testing_agent"] = None  # Would be implemented
-        self.agents["incident_response_agent"] = None  # Would be implemented
-        
-        # Build dependency graph
-        self._build_dependency_graph()
+    def _load_users(self):
+        """Load users from JSON file"""
+        try:
+            if USERS_FILE.exists():
+                with open(USERS_FILE, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                
+                for user_id_str, user_data in data.items():
+                    try:
+                        user = TelegramUser.from_dict(user_data)
+                        self.users[user.user_id] = user
+                    except Exception as e:
+                        console.print(f"[yellow]⚠️ Skipping invalid user data: {e}[/yellow]")
+                        continue
+                
+                console.print(f"[green]✅ Loaded {len(self.users)} users[/green]")
+        except Exception as e:
+            console.print(f"[red]❌ Error loading users: {e}[/red]")
     
-    def _build_dependency_graph(self):
-        """Build dependency graph for all agents"""
-        self.dependencies = {}
-        
-        for phase_id, phase_info in self.phases.items():
-            for agent_id in phase_info["agents"]:
-                if agent_id in phase_info.get("dependencies", {}):
-                    self.dependencies[agent_id] = phase_info["dependencies"][agent_id]
-                else:
-                    self.dependencies[agent_id] = []
+    def _save_users(self):
+        """Save users to JSON file"""
+        try:
+            data = {str(uid): user.to_dict() for uid, user in self.users.items()}
+            with open(USERS_FILE, 'w', encoding='utf-8') as f:
+                json.dump(data, f, indent=2, ensure_ascii=False)
+        except Exception as e:
+            console.print(f"[red]❌ Error saving users: {e}[/red]")
     
-    async def execute_phase(self, phase_id: str) -> Dict[str, AgentResult]:
-        """
-        Execute a specific phase with proper sequencing
-        """
-        if phase_id not in self.phases:
-            raise ValueError(f"Unknown phase: {phase_id}")
-        
-        phase = self.phases[phase_id]
-        results = {}
-        
-        print(f"🚀 Starting {phase['name']}...")
-        
-        # Check phase dependencies
-        if not await self._check_phase_dependencies(phase_id):
-            print(f"❌ Phase {phase_id} dependencies not met")
-            return results
-        
-        # Get agents for this phase
-        phase_agents = [
-            agent_id for agent_id in phase["agents"] 
-            if self.agents.get(agent_id) is not None
-        ]
-        
-        # Check for parallel execution opportunities
-        parallel_groups = phase.get("parallel_allowed", [])
-        
-        if parallel_groups:
-            # Execute parallel groups
-            for group in parallel_groups:
-                group_agents = [a for a in group if a in phase_agents]
-                if group_agents:
-                    await self._execute_agents_parallel(group_agents, results)
-        else:
-            # Execute sequentially
-            for agent_id in phase_agents:
-                if agent_id not in results:  # Skip if already executed in parallel group
-                    await self._execute_agent(agent_id, results)
-        
-        # Check phase completion
-        phase_success = all(
-            result.status == AgentStatus.COMPLETED 
-            for result in results.values()
-        )
-        
-        if phase_success:
-            print(f"✅ {phase['name']} completed successfully")
-            
-            await self.audit_logger.log_event(
-                event_type=SecurityEventType.AGENT_COMPLETE,
-                threat_level=ThreatLevel.INFO,
-                source="ProgramManager",
-                description=f"Phase completed: {phase['name']}",
-                details={
-                    "phase_id": phase_id,
-                    "agents_executed": len(results),
-                    "success_rate": f"{len([r for r in results.values() if r.status == AgentStatus.COMPLETED])}/{len(results)}"
-                }
+    def get_or_create_user(self, user_id: int, username: str = None,
+                          first_name: str = None, last_name: str = None) -> TelegramUser:
+        """Get existing user or create new one"""
+        if user_id not in self.users:
+            user = TelegramUser(
+                user_id=user_id,
+                username=username,
+                first_name=first_name,
+                last_name=last_name,
+                role=UserRole.OWNER if user_id in OWNER_IDS else UserRole.USER,
             )
-        else:
-            print(f"⚠️ {phase['name']} completed with issues")
+            self.users[user_id] = user
+            self._save_users()
+            console.print(f"[green]✅ Created new user: {user_id}[/green]")
         
-        return results
+        user = self.users[user_id]
+        user.last_active = datetime.now()
+        
+        # Update user info if provided
+        if username:
+            user.username = username
+        if first_name:
+            user.first_name = first_name
+        if last_name:
+            user.last_name = last_name
+        
+        self._save_users()
+        return user
     
-    async def _check_phase_dependencies(self, phase_id: str) -> bool:
-        """Check if all dependencies for a phase are met"""
-        phase = self.phases[phase_id]
+    def check_permission(self, user_id: int, required_role: UserRole) -> bool:
+        """Check if user has required permission"""
+        if user_id not in self.users:
+            return False
+        return self.users[user_id].role >= required_role
+
+class ProxyManager:
+    """Manages proxy verification and rotation"""
+    
+    def __init__(self):
+        self.proxies: List[ProxyEntry] = []
+        self.proxy_map: Dict[str, ProxyEntry] = {}
+        self.session: Optional[aiohttp.ClientSession] = None
         
-        # Check if previous phases are complete
-        phase_order = list(self.phases.keys())
-        current_index = phase_order.index(phase_id)
+    async def initialize(self):
+        """Initialize proxy manager"""
+        console.print("[cyan]🚀 Initializing Proxy Manager...[/cyan]")
         
-        if current_index > 0:
-            previous_phase = phase_order[current_index - 1]
-            previous_results = [
-                entry for entry in self.execution_history
-                if entry["phase"] == previous_phase
+        # Create aiohttp session
+        self.session = aiohttp.ClientSession(
+            connector=TCPConnector(ssl=False, limit=50),
+            timeout=ClientTimeout(total=30)
+        )
+        
+        # Load proxies
+        await self._load_proxies()
+        
+        if not self.proxies:
+            console.print("[red]❌ No proxies found[/red]")
+            return False
+        
+        console.print(f"[green]✅ Loaded {len(self.proxies)} proxies[/green]")
+        
+        # Verify proxies
+        await self.verify_all_proxies()
+        
+        return True
+    
+    async def _load_proxies(self):
+        """Load proxies from file"""
+        try:
+            if PROXY_FILE.exists():
+                with open(PROXY_FILE, 'r', encoding='utf-8') as f:
+                    lines = f.readlines()
+                
+                for line in lines:
+                    proxy_str = line.strip()
+                    if not proxy_str or proxy_str.startswith('#'):
+                        continue
+                    
+                    # Create proxy entry
+                    proxy_entry = ProxyEntry(proxy=proxy_str)
+                    self.proxies.append(proxy_entry)
+                    self.proxy_map[proxy_str] = proxy_entry
+                
+                console.print(f"[green]✅ Parsed {len(self.proxies)} proxies[/green]")
+            else:
+                console.print(f"[yellow]⚠️ Proxy file not found: {PROXY_FILE}[/yellow]")
+                console.print("[yellow]💡 Create proxies.txt with one proxy per line[/yellow]")
+                
+        except Exception as e:
+            console.print(f"[red]❌ Error loading proxies: {e}[/red]")
+    
+    async def verify_all_proxies(self):
+        """Verify all proxies"""
+        console.print("[cyan]🔍 Verifying proxies...[/cyan]")
+        
+        working = 0
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            BarColumn(),
+            TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
+            TimeElapsedColumn(),
+            console=console
+        ) as progress:
+            task = progress.add_task("Verifying...", total=len(self.proxies))
+            
+            for proxy in self.proxies:
+                is_working = await self._verify_proxy(proxy)
+                if is_working:
+                    working += 1
+                progress.update(task, advance=1)
+        
+        console.print(f"[green]✅ {working}/{len(self.proxies)} proxies working[/green]")
+    
+    async def _verify_proxy(self, proxy_entry: ProxyEntry) -> bool:
+        """Verify single proxy"""
+        try:
+            test_urls = [
+                "https://httpbin.org/ip",
+                "https://api.ipify.org?format=json",
+                "https://icanhazip.com",
             ]
             
-            if not previous_results:
-                print(f"⚠️ Previous phase {previous_phase} not executed")
-                return False
+            for url in test_urls:
+                try:
+                    start_time = time.time()
+                    async with self.session.get(
+                        url,
+                        proxy=proxy_entry.proxy,
+                        timeout=10,
+                        ssl=False
+                    ) as response:
+                        if response.status == 200:
+                            proxy_entry.verified = True
+                            proxy_entry.is_active = True
+                            proxy_entry.avg_response_time = time.time() - start_time
+                            return True
+                except:
+                    continue
             
-            # Check if previous phase was successful
-            last_execution = previous_results[-1]
-            phase_success = all(
-                result.status == AgentStatus.COMPLETED
-                for result in last_execution["results"].values()
-            )
+            proxy_entry.verified = False
+            proxy_entry.is_active = False
+            return False
             
-            if not phase_success:
-                print(f"⚠️ Previous phase {previous_phase} did not complete successfully")
-                return False
-        
-        return True
+        except Exception as e:
+            proxy_entry.verified = False
+            proxy_entry.is_active = False
+            return False
     
-    async def _execute_agents_parallel(self, agent_ids: List[str], results: Dict[str, AgentResult]):
-        """Execute multiple agents in parallel"""
-        tasks = []
+    def get_best_proxy(self) -> Optional[str]:
+        """Get best available proxy"""
+        working_proxies = [p for p in self.proxies if p.is_active and p.verified]
+        if not working_proxies:
+            return None
         
-        for agent_id in agent_ids:
-            if agent_id in self.agents and self.agents[agent_id] is not None:
-                # Check agent dependencies
-                if await self._check_agent_dependencies(agent_id, results):
-                    task = asyncio.create_task(
-                        self._execute_single_agent(agent_id, results)
-                    )
-                    tasks.append(task)
-                else:
-                    print(f"⚠️ Agent {agent_id} dependencies not met, skipping")
-        
-        if tasks:
-            await asyncio.gather(*tasks, return_exceptions=True)
+        # Sort by response time and usage
+        working_proxies.sort(key=lambda x: (x.avg_response_time, x.reports_used))
+        return working_proxies[0].proxy
     
-    async def _execute_agent(self, agent_id: str, results: Dict[str, AgentResult]):
-        """Execute a single agent"""
-        if agent_id in self.agents and self.agents[agent_id] is not None:
-            # Check agent dependencies
-            if await self._check_agent_dependencies(agent_id, results):
-                await self._execute_single_agent(agent_id, results)
-            else:
-                print(f"⚠️ Agent {agent_id} dependencies not met, skipping")
-                results[agent_id] = AgentResult(
-                    agent_id=agent_id,
-                    status=AgentStatus.BLOCKED,
-                    start_time=datetime.now(),
-                    end_time=datetime.now(),
-                    errors=[f"Dependencies not met: {self.dependencies.get(agent_id, [])}"]
-                )
+    async def cleanup(self):
+        """Cleanup resources"""
+        if self.session:
+            await self.session.close()
+
+class AccountManager:
+    """Manages Telegram accounts"""
     
-    async def _check_agent_dependencies(self, agent_id: str, results: Dict[str, AgentResult]) -> bool:
-        """Check if all dependencies for an agent are met"""
-        dependencies = self.dependencies.get(agent_id, [])
-        
-        for dep_agent_id in dependencies:
-            if dep_agent_id not in results:
-                return False
-            
-            if results[dep_agent_id].status != AgentStatus.COMPLETED:
-                return False
-        
-        return True
+    def __init__(self, proxy_manager: ProxyManager):
+        self.proxy_manager = proxy_manager
+        self.accounts: Dict[str, TelegramAccount] = {}
+        self._load_accounts()
     
-    async def _execute_single_agent(self, agent_id: str, results: Dict[str, AgentResult]):
-        """Execute a single agent and store result"""
-        agent = self.agents[agent_id]
-        
-        print(f"  🚀 Starting agent: {agent_id}")
-        
-        # Special handling for different agent types
-        if agent_id == "redis_safeguards_agent":
-            result = await agent.initialize()
-            agent_result = AgentResult(
-                agent_id=agent_id,
-                status=AgentStatus.COMPLETED if result else AgentStatus.FAILED,
-                start_time=datetime.now(),
-                end_time=datetime.now(),
-                errors=[] if result else ["Redis initialization failed"]
-            )
-            self.redis_safeguards = agent if result else None
-        elif agent_id == "audit_logging_agent":
-            # Audit logger doesn't need execution
-            agent_result = AgentResult(
-                agent_id=agent_id,
-                status=AgentStatus.COMPLETED,
-                start_time=datetime.now(),
-                end_time=datetime.now()
-            )
-        elif hasattr(agent, 'execute'):
-            # Standard agent with execute method
-            dependencies = self.dependencies.get(agent_id, [])
-            agent_result = await agent.execute(dependencies)
-        else:
-            agent_result = AgentResult(
-                agent_id=agent_id,
-                status=AgentStatus.SKIPPED,
-                start_time=datetime.now(),
-                end_time=datetime.now(),
-                errors=["Agent not implemented"]
-            )
-        
-        results[agent_id] = agent_result
-        
-        # Log execution result
-        if agent_result.status == AgentStatus.COMPLETED:
-            print(f"  ✅ Agent completed: {agent_id}")
-        elif agent_result.status == AgentStatus.FAILED:
-            print(f"  ❌ Agent failed: {agent_id}")
-            for error in agent_result.errors:
-                print(f"    Error: {error}")
+    def _load_accounts(self):
+        """Load accounts from JSON file"""
+        try:
+            if ACCOUNTS_FILE.exists():
+                with open(ACCOUNTS_FILE, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                
+                for phone, acc_data in data.items():
+                    try:
+                        account = TelegramAccount.from_dict(acc_data)
+                        self.accounts[phone] = account
+                    except Exception as e:
+                        console.print(f"[yellow]⚠️ Skipping invalid account {phone}: {e}[/yellow]")
+                        continue
+                
+                console.print(f"[green]✅ Loaded {len(self.accounts)} accounts[/green]")
+        except Exception as e:
+            console.print(f"[red]❌ Error loading accounts: {e}[/red]")
     
-    async def execute_full_program(self) -> Dict[str, Any]:
-        """
-        Execute the complete security hardening program
-        """
-        print("=" * 60)
-        print("🔒 MULTI-AGENT SECURITY HARDENING PROGRAM")
-        print("=" * 60)
+    def _save_accounts(self):
+        """Save accounts to JSON file"""
+        try:
+            data = {phone: account.to_dict() for phone, account in self.accounts.items()}
+            with open(ACCOUNTS_FILE, 'w', encoding='utf-8') as f:
+                json.dump(data, f, indent=2, ensure_ascii=False)
+        except Exception as e:
+            console.print(f"[red]❌ Error saving accounts: {e}[/red]")
+    
+    async def add_account(self, phone: str, added_by: int) -> Tuple[bool, str]:
+        """Add new Telegram account"""
+        # Validate phone number
+        if not re.match(r'^\+\d{10,15}$', phone):
+            return False, "Invalid phone number format. Use: +1234567890"
         
-        self.program_status = AgentStatus.RUNNING
-        program_start = datetime.now()
+        # Check if account already exists
+        if phone in self.accounts:
+            return False, "Account already exists"
         
-        program_results = {
-            "phases": {},
-            "overall_status": AgentStatus.PENDING,
-            "start_time": program_start.isoformat(),
-            "end_time": None,
-            "total_agents": 0,
-            "successful_agents": 0,
-            "failed_agents": 0,
-            "blocked_agents": 0,
-        }
+        # Get proxy for account
+        proxy = self.proxy_manager.get_best_proxy()
+        if not proxy:
+            return False, "No working proxies available"
+        
+        # Create session file
+        session_file = SESSION_DIR / f"{phone.replace('+', '')}.session"
+        
+        # Create account
+        account = TelegramAccount(
+            phone=phone,
+            session_file=session_file,
+            proxy=proxy,
+            status=AccountStatus.UNVERIFIED
+        )
+        
+        self.accounts[phone] = account
+        self._save_accounts()
+        
+        console.print(f"[green]✅ Added account: {phone}[/green]")
+        return True, f"Account {phone} added successfully"
+    
+    async def create_session(self, phone: str, update: Update) -> Tuple[bool, str]:
+        """Create Telegram session with OTP verification"""
+        if phone not in self.accounts:
+            return False, "Account not found"
+        
+        account = self.accounts[phone]
+        
+        # Create Telegram client
+        client = TelegramClient(
+            str(account.session_file),
+            API_ID,
+            API_HASH,
+            device_model="Desktop",
+            system_version="Windows 10",
+            app_version="4.0.0",
+            system_lang_code="en",
+            lang_code="en"
+        )
         
         try:
-            # Execute each phase in order
-            for phase_id in self.phases.keys():
-                print(f"\n📋 Phase: {self.phases[phase_id]['name']}")
-                print("-" * 40)
+            # Connect to Telegram
+            await client.connect()
+            
+            # Check if already authorized
+            if await client.is_user_authorized():
+                account.client = client
+                account.status = AccountStatus.ACTIVE
+                account.last_used = datetime.now()
+                self._save_accounts()
                 
-                phase_results = await self.execute_phase(phase_id)
-                
-                # Store phase results
-                program_results["phases"][phase_id] = {
-                    "results": {
-                        agent_id: {
-                            "status": result.status.value,
-                            "duration": result.duration,
-                            "error_count": len(result.errors),
-                            "warning_count": len(result.warnings),
-                        }
-                        for agent_id, result in phase_results.items()
-                    },
-                    "summary": self._summarize_phase_results(phase_results)
-                }
-                
-                # Add to execution history
-                self.execution_history.append({
-                    "phase": phase_id,
-                    "timestamp": datetime.now().isoformat(),
-                    "results": phase_results
-                })
-                
-                # Check if we should continue
-                phase_success = all(
-                    result.status == AgentStatus.COMPLETED
-                    for result in phase_results.values()
+                await update.message.reply_text(
+                    f"✅ *Already Logged In!*\n\n"
+                    f"Account `{phone}` was already logged in.\n"
+                    f"Session restored successfully!",
+                    parse_mode='Markdown'
                 )
-                
-                if not phase_success and phase_id != "phase_3":
-                    print(f"⚠️ Phase {phase_id} failed, stopping program")
+                return True, "Session restored"
+            
+            # Send OTP
+            await update.message.reply_text(
+                f"📱 *Sending OTP to {phone}...*\n\n"
+                f"Please wait for the OTP code.",
+                parse_mode='Markdown'
+            )
+            
+            sent_code = await client.send_code_request(phone)
+            phone_code_hash = sent_code.phone_code_hash
+            
+            # Store session data
+            update._user_sessions = getattr(update, '_user_sessions', {})
+            update._user_sessions[update.effective_user.id] = {
+                "phone": phone,
+                "client": client,
+                "phone_code_hash": phone_code_hash,
+                "step": "waiting_otp"
+            }
+            
+            await update.message.reply_text(
+                f"✅ *OTP Sent!*\n\n"
+                f"Please reply with the 5-digit code you received.\n\n"
+                f"Format: `12345`",
+                parse_mode='Markdown'
+            )
+            
+            return True, "OTP sent successfully"
+            
+        except FloodWaitError as e:
+            account.status = AccountStatus.FLOOD_WAIT
+            self._save_accounts()
+            return False, f"Flood wait: {e.seconds} seconds"
+        except PhoneNumberInvalidError:
+            return False, "Invalid phone number"
+        except PhoneNumberBannedError:
+            account.status = AccountStatus.BANNED
+            self._save_accounts()
+            return False, "Phone number is banned"
+        except Exception as e:
+            return False, f"Error: {str(e)[:100]}"
+    
+    async def verify_otp(self, phone: str, otp_code: str, update: Update) -> Tuple[bool, str]:
+        """Verify OTP code"""
+        user_id = update.effective_user.id
+        
+        if not hasattr(update, '_user_sessions') or user_id not in update._user_sessions:
+            return False, "Session expired"
+        
+        session_data = update._user_sessions[user_id]
+        if session_data.get("phone") != phone:
+            return False, "Phone mismatch"
+        
+        client = session_data["client"]
+        phone_code_hash = session_data["phone_code_hash"]
+        
+        try:
+            # Sign in with OTP
+            await client.sign_in(
+                phone=phone,
+                code=otp_code,
+                phone_code_hash=phone_code_hash
+            )
+            
+            # Update account
+            account = self.accounts[phone]
+            account.client = client
+            account.status = AccountStatus.ACTIVE
+            account.last_used = datetime.now()
+            self._save_accounts()
+            
+            # Get account info
+            me = await client.get_me()
+            account_info = f"✅ *Login Successful!*\n\n"
+            account_info += f"📱 Phone: `{phone}`\n"
+            account_info += f"👤 User ID: `{me.id}`\n"
+            if me.username:
+                account_info += f"📛 Username: @{me.username}\n"
+            account_info += f"👋 Name: {me.first_name or ''}"
+            if me.last_name:
+                account_info += f" {me.last_name}"
+            account_info += f"\n\nReady for reporting!"
+            
+            await update.message.reply_text(account_info, parse_mode='Markdown')
+            return True, "Login successful"
+            
+        except SessionPasswordNeededError:
+            return False, "2FA_PASSWORD_NEEDED"
+        except PhoneCodeInvalidError:
+            return False, "Invalid OTP code"
+        except PhoneCodeExpiredError:
+            return False, "OTP code expired"
+        except Exception as e:
+            return False, f"Verification error: {str(e)[:100]}"
+    
+    def get_available_accounts(self, count: int = 3) -> List[TelegramAccount]:
+        """Get available accounts for reporting"""
+        available = []
+        
+        for account in self.accounts.values():
+            if (account.status == AccountStatus.ACTIVE and 
+                account.report_count < 9 and
+                account.client):
+                available.append(account)
+                if len(available) >= count:
                     break
-            
-            # Calculate program statistics
-            all_results = []
-            for phase_data in program_results["phases"].values():
-                all_results.extend(list(phase_data["results"].values()))
-            
-            program_results["total_agents"] = len(all_results)
-            program_results["successful_agents"] = len(
-                [r for r in all_results if r["status"] == "completed"]
-            )
-            program_results["failed_agents"] = len(
-                [r for r in all_results if r["status"] == "failed"]
-            )
-            program_results["blocked_agents"] = len(
-                [r for r in all_results if r["status"] == "blocked"]
-            )
-            
-            # Determine overall status
-            if program_results["failed_agents"] > 0:
-                program_results["overall_status"] = AgentStatus.FAILED.value
-            elif program_results["blocked_agents"] > 0:
-                program_results["overall_status"] = AgentStatus.BLOCKED.value
-            else:
-                program_results["overall_status"] = AgentStatus.COMPLETED.value
-            
-            program_results["end_time"] = datetime.now().isoformat()
-            
-            # Generate final report
-            final_report = await self._generate_final_report(program_results)
-            program_results["final_report"] = final_report
-            
-            print("\n" + "=" * 60)
-            print("📊 PROGRAM EXECUTION COMPLETE")
-            print("=" * 60)
-            print(f"Total Agents: {program_results['total_agents']}")
-            print(f"Successful: {program_results['successful_agents']}")
-            print(f"Failed: {program_results['failed_agents']}")
-            print(f"Blocked: {program_results['blocked_agents']}")
-            print(f"Overall Status: {program_results['overall_status']}")
-            
-            # Save report to file
-            await self._save_program_report(program_results)
-            
-            return program_results
-            
-        except Exception as e:
-            program_results["overall_status"] = AgentStatus.FAILED.value
-            program_results["end_time"] = datetime.now().isoformat()
-            program_results["error"] = str(e)
-            
-            print(f"❌ Program execution failed: {e}")
-            
-            return program_results
-    
-    def _summarize_phase_results(self, results: Dict[str, AgentResult]) -> Dict[str, Any]:
-        """Create summary of phase results"""
-        total = len(results)
-        completed = len([r for r in results.values() if r.status == AgentStatus.COMPLETED])
-        failed = len([r for r in results.values() if r.status == AgentStatus.FAILED])
-        blocked = len([r for r in results.values() if r.status == AgentStatus.BLOCKED])
         
-        return {
-            "total_agents": total,
-            "completed": completed,
-            "failed": failed,
-            "blocked": blocked,
-            "success_rate": (completed / total * 100) if total > 0 else 0,
+        return available
+
+class ReportingEngine:
+    """Handles report creation and processing"""
+    
+    def __init__(self, account_manager: AccountManager):
+        self.account_manager = account_manager
+        self.active_jobs: Dict[str, ReportJob] = {}
+        self.job_history: List[ReportJob] = {}
+        
+        # Report categories
+        self.categories = {
+            "spam": {"name": "Spam", "reason": InputReportReasonSpam},
+            "violence": {"name": "Violence", "reason": InputReportReasonViolence},
+            "pornography": {"name": "Pornography", "reason": InputReportReasonPornography},
+            "child_abuse": {"name": "Child Abuse", "reason": InputReportReasonChildAbuse},
+            "copyright": {"name": "Copyright", "reason": InputReportReasonCopyright},
+            "fake": {"name": "Fake Account", "reason": InputReportReasonFake},
+            "drugs": {"name": "Illegal Drugs", "reason": InputReportReasonIllegalDrugs},
+            "other": {"name": "Other", "reason": InputReportReasonOther},
         }
     
-    async def _generate_final_report(self, program_results: Dict[str, Any]) -> Dict[str, Any]:
-        """Generate final program report"""
-        report = {
-            "program_name": "Multi-Agent Security Hardening",
-            "version": "1.0.0",
-            "execution_date": datetime.now().isoformat(),
-            "summary": {
-                "total_phases": len(program_results["phases"]),
-                "total_agents": program_results["total_agents"],
-                "successful_agents": program_results["successful_agents"],
-                "failed_agents": program_results["failed_agents"],
-                "blocked_agents": program_results["blocked_agents"],
-                "overall_success_rate": (
-                    program_results["successful_agents"] / program_results["total_agents"] * 100
-                ) if program_results["total_agents"] > 0 else 0,
-            },
-            "phases": {},
-            "critical_findings": [],
-            "recommendations": [],
-            "next_steps": [],
-        }
+    async def create_job(self, target: str, category: str,
+                        description: str, user_id: int) -> Tuple[bool, str, Optional[str]]:
+        """Create new report job"""
+        if category not in self.categories:
+            return False, f"Invalid category: {category}", None
         
-        # Add phase details
-        for phase_id, phase_data in program_results["phases"].items():
-            report["phases"][phase_id] = {
-                "name": self.phases[phase_id]["name"],
-                "summary": phase_data["summary"],
-                "agent_results": phase_data["results"],
-            }
+        # Generate job ID
+        job_id = hashlib.sha256(
+            f"{target}{category}{user_id}{time.time()}".encode()
+        ).hexdigest()[:16]
         
-        # Generate critical findings
-        for phase_id, phase_data in program_results["phases"].items():
-            for agent_id, agent_result in phase_data["results"].items():
-                if agent_result["status"] == "failed":
-                    report["critical_findings"].append({
-                        "phase": phase_id,
-                        "agent": agent_id,
-                        "issue": "Agent execution failed",
-                        "severity": "HIGH"
-                    })
+        # Create job
+        job = ReportJob(
+            job_id=job_id,
+            target=target,
+            target_type="user",  # Will be detected
+            category=category,
+            description=description,
+            created_by=user_id
+        )
         
-        # Generate recommendations
-        if program_results["failed_agents"] > 0:
-            report["recommendations"].append(
-                "Investigate and fix failed agents before production deployment"
-            )
+        self.active_jobs[job_id] = job
+        console.print(f"[cyan]📝 Created job {job_id} for {target}[/cyan]")
         
-        if program_results["blocked_agents"] > 0:
-            report["recommendations"].append(
-                "Resolve agent dependencies to unblock execution"
-            )
-        
-        report["recommendations"].extend([
-            "Conduct security review of all hardened components",
-            "Perform penetration testing on the secured system",
-            "Establish ongoing security monitoring",
-            "Schedule regular security updates and patches",
-        ])
-        
-        # Define next steps
-        if program_results["overall_status"] == "completed":
-            report["next_steps"] = [
-                "Deploy secured system to staging environment",
-                "Conduct integration testing",
-                "Validate security controls",
-                "Deploy to production with monitoring",
-            ]
-        else:
-            report["next_steps"] = [
-                "Review and fix failed agents",
-                "Re-run the security hardening program",
-                "Validate fixes before proceeding",
-            ]
-        
-        return report
+        return True, "Job created successfully", job_id
     
-    async def _save_program_report(self, program_results: Dict[str, Any]):
-        """Save program report to file"""
+    async def process_job(self, job_id: str):
+        """Process report job"""
+        if job_id not in self.active_jobs:
+            return
+        
+        job = self.active_jobs[job_id]
+        job.status = ReportStatus.PROCESSING
+        job.started_at = datetime.now()
+        
+        console.print(f"[cyan]🔧 Processing job {job_id}[/cyan]")
+        
         try:
-            report_file = SECURITY_DIR / f"security_program_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+            # Get accounts
+            accounts = self.account_manager.get_available_accounts(3)
+            if not accounts:
+                raise Exception("No accounts available")
             
-            with open(report_file, 'w', encoding='utf-8') as f:
-                json.dump(program_results, f, indent=2, ensure_ascii=False)
+            # Process with each account
+            for account in accounts:
+                result = await self._process_with_account(account, job)
+                job.results.append(result)
+                job.accounts_used.append(account.phone)
+                
+                # Update account
+                account.report_count += 1
+                account.total_reports += 1
+                account.last_report_time = datetime.now()
             
-            print(f"📄 Program report saved to: {report_file}")
+            job.status = ReportStatus.COMPLETED
+            job.completed_at = datetime.now()
+            
+            console.print(f"[green]✅ Completed job {job_id}[/green]")
             
         except Exception as e:
-            print(f"⚠️ Failed to save program report: {e}")
+            job.status = ReportStatus.FAILED
+            console.print(f"[red]❌ Job {job_id} failed: {e}[/red]")
+        
+        # Move to history
+        self.job_history.append(job)
+        del self.active_jobs[job_id]
     
-    async def get_program_status(self) -> Dict[str, Any]:
-        """Get current program status"""
-        return {
-            "program_status": self.program_status.value,
-            "phases_completed": len(self.execution_history),
-            "total_phases": len(self.phases),
-            "execution_history": [
-                {
-                    "phase": entry["phase"],
-                    "timestamp": entry["timestamp"],
-                    "agent_count": len(entry["results"])
-                }
-                for entry in self.execution_history
-            ]
+    async def _process_with_account(self, account: TelegramAccount,
+                                  job: ReportJob) -> Dict[str, Any]:
+        """Process report with single account"""
+        result = {
+            "account": account.phone,
+            "status": "FAILED",
+            "timestamp": datetime.now().isoformat(),
         }
+        
+        try:
+            if not account.client or not account.client.is_connected():
+                await account.client.connect()
+            
+            # Resolve target
+            entity = await account.client.get_entity(job.target)
+            
+            # Get report reason
+            category_info = self.categories[job.category]
+            reason = category_info["reason"]()
+            
+            # Submit report
+            await account.client(ReportPeerRequest(
+                peer=entity,
+                reason=reason(),
+                message=job.description[:200]
+            ))
+            
+            # Simulate realistic delay
+            await asyncio.sleep(random.uniform(2, 5))
+            
+            result["status"] = "COMPLETED"
+            result["target_id"] = getattr(entity, 'id', None)
+            
+        except Exception as e:
+            result["error"] = str(e)[:200]
+        
+        return result
 
 # ============================================
-# SECTION 10: MAIN EXECUTION
+# BOT HANDLER
+# ============================================
+
+class BotHandler:
+    """Handles Telegram bot commands and conversations"""
+    
+    def __init__(self, user_manager: UserManager,
+                 account_manager: AccountManager,
+                 reporting_engine: ReportingEngine):
+        self.user_manager = user_manager
+        self.account_manager = account_manager
+        self.reporting_engine = reporting_engine
+        
+        # Conversation states
+        self.ADD_PHONE, self.ADD_OTP = range(2)
+        self.REPORT_TARGET, self.REPORT_CATEGORY, self.REPORT_DESCRIPTION = range(3, 6)
+    
+    async def start_command(self, update: Update, context: CallbackContext):
+        """Handle /start command"""
+        user = update.effective_user
+        
+        # Get or create user
+        telegram_user = self.user_manager.get_or_create_user(
+            user.id, user.username, user.first_name, user.last_name
+        )
+        
+        welcome_message = f"""
+🤖 *Telegram Enterprise Reporting System*
+
+👤 *Your Status:*
+• Role: {telegram_user.role.name}
+• Reports Made: {telegram_user.reports_made}
+• Last Active: {telegram_user.last_active.strftime('%Y-%m-%d %H:%M') if telegram_user.last_active else 'Never'}
+
+🛠️ *Available Commands:*
+/report - Start new report
+/accounts - Account management
+/stats - View statistics
+/help - Help guide
+
+💡 *Quick Start:*
+1. Add accounts with /accounts
+2. Start reporting with /report
+3. Monitor with /stats
+"""
+        
+        await update.message.reply_text(welcome_message, parse_mode='Markdown')
+    
+    async def help_command(self, update: Update, context: CallbackContext):
+        """Handle /help command"""
+        help_text = """
+🆘 *Help Guide*
+
+*Basic Commands:*
+/start - Welcome message
+/report - Start new report
+/accounts - Manage Telegram accounts
+/stats - View statistics
+/help - This guide
+
+*Reporting Process:*
+1. Use /report to start
+2. Enter target (username or link)
+3. Select category
+4. Add description
+5. System processes with multiple accounts
+
+*Account Management:*
+• Add accounts with /accounts
+• Each account can report 9 times
+• Automatic proxy rotation
+• OTP verification required
+
+*Best Practices:*
+• Use detailed descriptions
+• Add multiple accounts for better results
+• Monitor account health
+• Use working proxies
+"""
+        
+        await update.message.reply_text(help_text, parse_mode='Markdown')
+    
+    async def stats_command(self, update: Update, context: CallbackContext):
+        """Handle /stats command"""
+        user = update.effective_user
+        telegram_user = self.user_manager.users.get(user.id)
+        
+        if not telegram_user:
+            await update.message.reply_text("Please use /start first.")
+            return
+        
+        # Get account stats
+        active_accounts = sum(1 for a in self.account_manager.accounts.values() 
+                            if a.status == AccountStatus.ACTIVE)
+        total_accounts = len(self.account_manager.accounts)
+        
+        stats_message = f"""
+📊 *Statistics*
+
+👤 *Personal:*
+• Role: {telegram_user.role.name}
+• Reports Made: {telegram_user.reports_made}
+• Trust Level: {'⭐' * min(telegram_user.role.value, 5)}
+
+📱 *Accounts:*
+• Total: {total_accounts}
+• Active: {active_accounts}
+• Available for reporting: {sum(1 for a in self.account_manager.accounts.values() 
+                              if a.status == AccountStatus.ACTIVE and a.report_count < 9)}
+
+📈 *System:*
+• Active Jobs: {len(self.reporting_engine.active_jobs)}
+• Completed Jobs: {len(self.reporting_engine.job_history)}
+• System Status: ✅ Operational
+"""
+        
+        await update.message.reply_text(stats_message, parse_mode='Markdown')
+    
+    async def accounts_command(self, update: Update, context: CallbackContext):
+        """Handle /accounts command"""
+        keyboard = [
+            [InlineKeyboardButton("📱 Add Account", callback_data="acc_add")],
+            [InlineKeyboardButton("📋 List Accounts", callback_data="acc_list")],
+            [InlineKeyboardButton("🔄 Refresh", callback_data="acc_refresh")],
+        ]
+        
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await update.message.reply_text(
+            "📱 *Account Management*\n\n"
+            "Manage your Telegram accounts for reporting.",
+            parse_mode='Markdown',
+            reply_markup=reply_markup
+        )
+    
+    async def report_command(self, update: Update, context: CallbackContext):
+        """Handle /report command"""
+        # Check if user has accounts
+        active_accounts = sum(1 for a in self.account_manager.accounts.values() 
+                            if a.status == AccountStatus.ACTIVE and a.report_count < 9)
+        
+        if active_accounts == 0:
+            await update.message.reply_text(
+                "❌ *No accounts available for reporting*\n\n"
+                "Please add accounts first with /accounts",
+                parse_mode='Markdown'
+            )
+            return
+        
+        await update.message.reply_text(
+            "📝 *Start New Report*\n\n"
+            "Please send the target username or link:\n\n"
+            "*Examples:*\n"
+            "• @username\n"
+            "• https://t.me/username\n"
+            "• channelname",
+            parse_mode='Markdown',
+            reply_markup=ReplyKeyboardRemove()
+        )
+        
+        return self.REPORT_TARGET
+    
+    async def handle_report_target(self, update: Update, context: CallbackContext):
+        """Handle report target input"""
+        target = update.message.text.strip()
+        
+        # Store in context
+        context.user_data["report_target"] = target
+        
+        # Create category keyboard
+        keyboard = []
+        for category_id, category_info in self.reporting_engine.categories.items():
+            keyboard.append([InlineKeyboardButton(
+                category_info["name"],
+                callback_data=f"cat_{category_id}"
+            )])
+        
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await update.message.reply_text(
+            f"✅ *Target Accepted:* `{target}`\n\n"
+            "Now select the report category:",
+            parse_mode='Markdown',
+            reply_markup=reply_markup
+        )
+        
+        return self.REPORT_CATEGORY
+    
+    async def handle_report_category(self, update: Update, context: CallbackContext):
+        """Handle category selection"""
+        query = update.callback_query
+        await query.answer()
+        
+        category = query.data.replace("cat_", "")
+        
+        if category not in self.reporting_engine.categories:
+            await query.edit_message_text("Invalid category selected.")
+            return self.REPORT_CATEGORY
+        
+        # Store in context
+        context.user_data["report_category"] = category
+        
+        await query.edit_message_text(
+            f"📑 *Category:* {self.reporting_engine.categories[category]['name']}\n\n"
+            "Please provide a detailed description of the violation:\n\n"
+            "*Requirements:*\n"
+            "• Minimum 20 characters\n"
+            "• Be specific and factual\n"
+            "• Include evidence if available\n\n"
+            "*Example:*\n"
+            "\"This account is sending spam messages promoting fake investments.\"",
+            parse_mode='Markdown'
+        )
+        
+        return self.REPORT_DESCRIPTION
+    
+    async def handle_report_description(self, update: Update, context: CallbackContext):
+        """Handle description and create report job"""
+        description = update.message.text.strip()
+        
+        if len(description) < 20:
+            await update.message.reply_text(
+                "❌ Description must be at least 20 characters.",
+                parse_mode='Markdown'
+            )
+            return self.REPORT_DESCRIPTION
+        
+        # Get data from context
+        target = context.user_data.get("report_target")
+        category = context.user_data.get("report_category")
+        user_id = update.effective_user.id
+        
+        if not target or not category:
+            await update.message.reply_text("Session expired. Please start over.")
+            return ConversationHandler.END
+        
+        # Create job
+        success, message, job_id = await self.reporting_engine.create_job(
+            target=target,
+            category=category,
+            description=description,
+            user_id=user_id
+        )
+        
+        if success:
+            # Start processing
+            asyncio.create_task(self.reporting_engine.process_job(job_id))
+            
+            await update.message.reply_text(
+                f"✅ *Report Job Created!*\n\n"
+                f"Job ID: `{job_id}`\n"
+                f"Target: `{target}`\n"
+                f"Category: {self.reporting_engine.categories[category]['name']}\n\n"
+                f"⏳ *Processing started...*\n\n"
+                f"Using 3 accounts simultaneously.\n"
+                f"You'll receive a notification when complete.",
+                parse_mode='Markdown'
+            )
+            
+            # Update user's report count
+            if user_id in self.user_manager.users:
+                self.user_manager.users[user_id].reports_made += 1
+                self.user_manager._save_users()
+        else:
+            await update.message.reply_text(
+                f"❌ *Failed to create job:*\n{message}",
+                parse_mode='Markdown'
+            )
+        
+        # Clear context
+        context.user_data.clear()
+        
+        return ConversationHandler.END
+    
+    async def handle_callback_query(self, update: Update, context: CallbackContext):
+        """Handle callback queries"""
+        query = update.callback_query
+        await query.answer()
+        
+        data = query.data
+        
+        if data == "acc_add":
+            await query.edit_message_text(
+                "📱 *Add New Account*\n\n"
+                "Please send the phone number:\n"
+                "Format: `+1234567890`",
+                parse_mode='Markdown'
+            )
+            
+            # Store state
+            context.user_data["action"] = "add_account"
+            return self.ADD_PHONE
+        
+        elif data == "acc_list":
+            accounts = list(self.account_manager.accounts.values())
+            
+            if not accounts:
+                await query.edit_message_text("No accounts added yet.")
+                return
+            
+            accounts_list = "📋 *Accounts List*\n\n"
+            for i, account in enumerate(accounts, 1):
+                status_icon = {
+                    AccountStatus.ACTIVE: "🟢",
+                    AccountStatus.INACTIVE: "🟡",
+                    AccountStatus.BANNED: "🔴",
+                    AccountStatus.FLOOD_WAIT: "⏳",
+                }.get(account.status, "❓")
+                
+                accounts_list += (
+                    f"{i}. {status_icon} `{account.phone}`\n"
+                    f"   Status: {account.status.name}\n"
+                    f"   Reports: {account.report_count}/9\n"
+                )
+                
+                if account.last_used:
+                    accounts_list += f"   Last Used: {account.last_used.strftime('%Y-%m-%d')}\n"
+                
+                accounts_list += "\n"
+            
+            await query.edit_message_text(accounts_list, parse_mode='Markdown')
+        
+        elif data == "acc_refresh":
+            await query.edit_message_text("Refreshing accounts...")
+            # Could implement refresh logic here
+    
+    async def handle_add_phone(self, update: Update, context: CallbackContext):
+        """Handle phone number for account addition"""
+        phone = update.message.text.strip()
+        
+        # Validate phone number
+        if not re.match(r'^\+\d{10,15}$', phone):
+            await update.message.reply_text(
+                "❌ Invalid phone number format.\n"
+                "Please use: `+1234567890`",
+                parse_mode='Markdown'
+            )
+            return self.ADD_PHONE
+        
+        # Add account
+        success, message = await self.account_manager.add_account(
+            phone, update.effective_user.id
+        )
+        
+        if success:
+            await update.message.reply_text(
+                f"✅ *Account Added*\n\n"
+                f"Phone: `{phone}`\n\n"
+                f"Now creating session...",
+                parse_mode='Markdown'
+            )
+            
+            # Create session
+            session_success, session_message = await self.account_manager.create_session(
+                phone, update
+            )
+            
+            if session_success:
+                return self.ADD_OTP
+            else:
+                await update.message.reply_text(
+                    f"⚠️ *Session Creation:*\n{session_message}",
+                    parse_mode='Markdown'
+                )
+                return ConversationHandler.END
+        else:
+            await update.message.reply_text(
+                f"❌ *Failed to add account:*\n{message}",
+                parse_mode='Markdown'
+            )
+            return ConversationHandler.END
+    
+    async def handle_otp(self, update: Update, context: CallbackContext):
+        """Handle OTP verification"""
+        otp_code = update.message.text.strip()
+        
+        if not re.match(r'^\d{5}$', otp_code):
+            await update.message.reply_text(
+                "❌ Invalid OTP format. Must be 5 digits.",
+                parse_mode='Markdown'
+            )
+            return self.ADD_OTP
+        
+        # Get phone from context (simplified - in production, store in user_data)
+        accounts = list(self.account_manager.accounts.values())
+        if not accounts:
+            await update.message.reply_text("No accounts found.")
+            return ConversationHandler.END
+        
+        # Use the most recently added account
+        account = accounts[-1]
+        
+        success, message = await self.account_manager.verify_otp(
+            account.phone, otp_code, update
+        )
+        
+        if success:
+            await update.message.reply_text(
+                "✅ *Account Verified!*\n\n"
+                "Ready for reporting!",
+                parse_mode='Markdown'
+            )
+        elif message == "2FA_PASSWORD_NEEDED":
+            await update.message.reply_text(
+                "🔒 *2FA Password Required*\n\n"
+                "Please send your 2FA password:",
+                parse_mode='Markdown'
+            )
+            # Could add 2FA handling here
+        else:
+            await update.message.reply_text(
+                f"❌ *Verification Failed:*\n{message}",
+                parse_mode='Markdown'
+            )
+        
+        return ConversationHandler.END
+    
+    async def cancel_command(self, update: Update, context: CallbackContext):
+        """Cancel any operation"""
+        await update.message.reply_text(
+            "Operation cancelled.",
+            reply_markup=ReplyKeyboardRemove()
+        )
+        return ConversationHandler.END
+
+# ============================================
+# MAIN APPLICATION
+# ============================================
+
+class TelegramEnterpriseBot:
+    """Main enterprise bot application"""
+    
+    def __init__(self):
+        console.print("[cyan]🚀 Initializing Telegram Enterprise Bot[/cyan]")
+        
+        # Initialize managers
+        self.user_manager = UserManager()
+        self.proxy_manager = ProxyManager()
+        self.account_manager = AccountManager(self.proxy_manager)
+        self.reporting_engine = ReportingEngine(self.account_manager)
+        
+        # Initialize bot handler
+        self.bot_handler = BotHandler(
+            self.user_manager,
+            self.account_manager,
+            self.reporting_engine
+        )
+        
+        # Create Telegram bot application
+        persistence = PicklePersistence(filepath="data/bot_persistence.pickle")
+        
+        self.application = (
+            ApplicationBuilder()
+            .token(BOT_TOKEN)
+            .persistence(persistence)
+            .post_init(self._setup_commands)
+            .build()
+        )
+        
+        # Setup handlers
+        self._setup_handlers()
+    
+    async def _setup_commands(self, application: Application):
+        """Setup bot commands"""
+        commands = [
+            BotCommand("start", "Start the bot"),
+            BotCommand("help", "Show help information"),
+            BotCommand("report", "Start a new report"),
+            BotCommand("accounts", "Manage accounts"),
+            BotCommand("stats", "Show statistics"),
+            BotCommand("cancel", "Cancel current operation"),
+        ]
+        
+        await application.bot.set_my_commands(commands)
+        console.print("[green]✅ Bot commands setup complete[/green]")
+    
+    def _setup_handlers(self):
+        """Setup all bot handlers"""
+        
+        # Basic commands
+        self.application.add_handler(CommandHandler("start", self.bot_handler.start_command))
+        self.application.add_handler(CommandHandler("help", self.bot_handler.help_command))
+        self.application.add_handler(CommandHandler("stats", self.bot_handler.stats_command))
+        self.application.add_handler(CommandHandler("accounts", self.bot_handler.accounts_command))
+        self.application.add_handler(CommandHandler("cancel", self.bot_handler.cancel_command))
+        
+        # Report conversation
+        report_conv = ConversationHandler(
+            entry_points=[CommandHandler("report", self.bot_handler.report_command)],
+            states={
+                self.bot_handler.REPORT_TARGET: [
+                    MessageHandler(filters.TEXT & ~filters.COMMAND,
+                                 self.bot_handler.handle_report_target)
+                ],
+                self.bot_handler.REPORT_CATEGORY: [
+                    CallbackQueryHandler(self.bot_handler.handle_report_category,
+                                       pattern="^cat_")
+                ],
+                self.bot_handler.REPORT_DESCRIPTION: [
+                    MessageHandler(filters.TEXT & ~filters.COMMAND,
+                                 self.bot_handler.handle_report_description)
+                ],
+            },
+            fallbacks=[CommandHandler("cancel", self.bot_handler.cancel_command)],
+        )
+        self.application.add_handler(report_conv)
+        
+        # Account addition conversation
+        account_conv = ConversationHandler(
+            entry_points=[CallbackQueryHandler(
+                self.bot_handler.handle_callback_query,
+                pattern="^acc_"
+            )],
+            states={
+                self.bot_handler.ADD_PHONE: [
+                    MessageHandler(filters.TEXT & ~filters.COMMAND,
+                                 self.bot_handler.handle_add_phone)
+                ],
+                self.bot_handler.ADD_OTP: [
+                    MessageHandler(filters.TEXT & ~filters.COMMAND,
+                                 self.bot_handler.handle_otp)
+                ],
+            },
+            fallbacks=[CommandHandler("cancel", self.bot_handler.cancel_command)],
+        )
+        self.application.add_handler(account_conv)
+        
+        # Callback query handler
+        self.application.add_handler(
+            CallbackQueryHandler(self.bot_handler.handle_callback_query)
+        )
+        
+        console.print("[green]✅ Bot handlers setup complete[/green]")
+    
+    async def initialize(self) -> bool:
+        """Initialize the enterprise system"""
+        console.print("[cyan]🔧 Initializing system components...[/cyan]")
+        
+        try:
+            # Initialize proxy manager
+            proxy_ok = await self.proxy_manager.initialize()
+            if not proxy_ok:
+                console.print("[yellow]⚠️ Continuing without proxies[/yellow]")
+            
+            # Display system status
+            await self._display_status()
+            
+            console.print("[green]✅ System initialization complete[/green]")
+            return True
+            
+        except Exception as e:
+            console.print(f"[red]❌ Initialization failed: {e}[/red]")
+            return False
+    
+    async def _display_status(self):
+        """Display system status"""
+        user_stats = len(self.user_manager.users)
+        account_stats = len(self.account_manager.accounts)
+        active_accounts = sum(1 for a in self.account_manager.accounts.values() 
+                            if a.status == AccountStatus.ACTIVE)
+        
+        status_table = Table(title="System Status", box=box.ROUNDED)
+        status_table.add_column("Component", style="cyan")
+        status_table.add_column("Status", style="green")
+        status_table.add_column("Details", style="yellow")
+        
+        status_table.add_row("Users", str(user_stats), "Loaded from storage")
+        status_table.add_row("Accounts", str(account_stats), f"{active_accounts} active")
+        status_table.add_row("Proxies", "✅" if self.proxy_manager.proxies else "⚠️", 
+                           f"{len([p for p in self.proxy_manager.proxies if p.is_active])} working")
+        status_table.add_row("Bot", "✅", "Ready")
+        
+        console.print(status_table)
+    
+    async def run(self):
+        """Run the enterprise bot"""
+        # Initialize system
+        initialized = await self.initialize()
+        if not initialized:
+            console.print("[red]❌ Cannot start bot[/red]")
+            return
+        
+        # Start bot
+        console.print("[green]🤖 Starting Telegram Enterprise Bot...[/green]")
+        
+        try:
+            await self.application.initialize()
+            await self.application.start()
+            await self.application.updater.start_polling()
+            
+            console.print("[green]✅ Bot is running![/green]")
+            console.print("[yellow]📱 Use /start in Telegram to begin[/yellow]")
+            
+            # Keep running
+            await asyncio.Event().wait()
+            
+        except KeyboardInterrupt:
+            console.print("\n[yellow]⚠️ Shutting down...[/yellow]")
+        except Exception as e:
+            console.print(f"[red]❌ Bot error: {e}[/red]")
+        finally:
+            await self.shutdown()
+    
+    async def shutdown(self):
+        """Shutdown the system gracefully"""
+        console.print("[yellow]🔧 Shutting down...[/yellow]")
+        
+        try:
+            # Stop proxy manager
+            await self.proxy_manager.cleanup()
+            
+            # Save data
+            self.user_manager._save_users()
+            self.account_manager._save_accounts()
+            
+            # Stop bot
+            if hasattr(self.application, 'updater'):
+                await self.application.updater.stop()
+            await self.application.stop()
+            await self.application.shutdown()
+            
+            console.print("[green]✅ Shutdown complete[/green]")
+            
+        except Exception as e:
+            console.print(f"[red]❌ Shutdown error: {e}[/red]")
+
+# ============================================
+# MAIN ENTRY POINT
 # ============================================
 
 async def main():
-    """
-    Main execution function for the security hardening program
-    """
-    print("🔒 Enterprise Security Hardening System")
-    print("=" * 50)
+    """Main entry point"""
+    console.print("[bright_cyan]⚡ TELEGRAM ENTERPRISE REPORTING SYSTEM[/bright_cyan]")
     
-    # Create program manager
-    program_manager = SecurityProgramManager()
+    # Create and run bot
+    bot = TelegramEnterpriseBot()
     
-    # Execute the full program
-    results = await program_manager.execute_full_program()
-    
-    # Display final results
-    print("\n" + "=" * 50)
-    print("🎯 EXECUTION RESULTS")
-    print("=" * 50)
-    
-    print(f"Overall Status: {results['overall_status']}")
-    print(f"Total Agents Executed: {results['total_agents']}")
-    print(f"Successful: {results['successful_agents']}")
-    print(f"Failed: {results['failed_agents']}")
-    print(f"Blocked: {results['blocked_agents']}")
-    
-    # Print phase summaries
-    for phase_id, phase_data in results["phases"].items():
-        phase_name = program_manager.phases[phase_id]["name"]
-        summary = phase_data["summary"]
-        
-        print(f"\n📋 {phase_name}:")
-        print(f"  Agents: {summary['total_agents']}")
-        print(f"  Completed: {summary['completed']}")
-        print(f"  Failed: {summary['failed']}")
-        print(f"  Success Rate: {summary['success_rate']:.1f}%")
-    
-    # Recommendations
-    if "final_report" in results:
-        print("\n💡 RECOMMENDATIONS:")
-        for rec in results["final_report"].get("recommendations", [])[:3]:
-            print(f"  • {rec}")
-    
-    print("\n" + "=" * 50)
-    print("✅ Security Hardening Program Complete")
-    print("=" * 50)
+    try:
+        await bot.run()
+    except KeyboardInterrupt:
+        console.print("\n[yellow]👋 Goodbye![/yellow]")
 
 if __name__ == "__main__":
-    # Run the security hardening program
-    asyncio.run(main())
+    # Set event loop policy for Windows
+    if sys.platform == 'win32':
+        asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
+    
+    # Run the application
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        console.print("\n[yellow]Application terminated[/yellow]")
+    except Exception as e:
+        console.print(f"[red]❌ Fatal error: {e}[/red]")
+        sys.exit(1)
