@@ -8,323 +8,234 @@ Version: 11.0
 Lines: 5200+
 """
 
+# ============================================
+# STANDARD LIBRARY IMPORTS
+# ============================================
 import asyncio
-import time
-import re
+import csv
+import hashlib
+import io
+import ipaddress
 import json
 import logging
-import random
-import string
-import hashlib
-import sys
-import platform
-import uuid
 import math
+import platform
+import random
+import re
+import socket
+import ssl
 import statistics
-import csv
-import io
-from datetime import datetime, timedelta
-from pathlib import Path
-from typing import Dict, List, Optional, Tuple, Any, Set, Union, Callable
-from enum import Enum, IntEnum
-from dataclasses import dataclass, field
+import string
+import sys
+import time
+import uuid
 from collections import defaultdict, deque
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta
+from enum import Enum, IntEnum
+from pathlib import Path
+from typing import (Any, Callable, Dict, List, Optional, Set, Tuple, Union)
+
+# ============================================
+# THIRD-PARTY NETWORKING/HTTP IMPORTS
+# ============================================
 import aiohttp
-from aiohttp import ClientTimeout, ClientSession, TCPConnector
-import urllib.parse
-import ssl
 import certifi
-import requests
-from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
-import socket
-import ipaddress
 import dns.resolver
 import pytz
-import backoff
-from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
-import numpy as np
+import requests
+import urllib.parse
+from aiohttp import ClientSession, ClientTimeout, TCPConnector
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 # ============================================
-# SECTION 1: TELEGRAM LIBRARIES
+# TELEGRAM LIBRARIES
 # ============================================
-
-# For Bot API (bot commands and user interface)
+# Bot API (user interface)
 from telegram import (
-    Update, InlineKeyboardButton, InlineKeyboardMarkup,
-    BotCommand, BotCommandScopeAllPrivateChats, ReplyKeyboardMarkup,
-    ReplyKeyboardRemove, KeyboardButton, WebAppInfo, CallbackGame,
-    MenuButtonCommands, MessageEntity, Chat, User
+    BotCommand, BotCommandScopeAllPrivateChats, CallbackGame, Chat,
+    InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton,
+    MenuButtonCommands, MessageEntity, ReplyKeyboardMarkup,
+    ReplyKeyboardRemove, Update, User, WebAppInfo
 )
 from telegram.ext import (
-    Application, ApplicationBuilder, CommandHandler, MessageHandler,
-    CallbackQueryHandler, ContextTypes, filters, ConversationHandler,
-    PicklePersistence, CallbackContext, ExtBot, JobQueue
+    Application, ApplicationBuilder, CallbackContext, CallbackQueryHandler,
+    CommandHandler, ConversationHandler, ExtBot, JobQueue, MessageHandler,
+    PicklePersistence, ContextTypes, filters
 )
 
-# For Telegram Client (actual reporting)
-from telethon import TelegramClient, functions, types, events, hints
+# Telegram Client (actual reporting functionality)
+from telethon import TelegramClient, events, functions, hints, types
 from telethon.errors import (
-    FloodWaitError, SessionPasswordNeededError, PhoneCodeInvalidError,
-    PhoneCodeExpiredError, PhoneNumberUnoccupiedError, PhoneNumberBannedError,
-    ApiIdInvalidError, AccessTokenExpiredError, AccessTokenInvalidError,
-    PhoneCodeEmptyError, PhoneCodeHashEmptyError, PhoneNumberInvalidError,
-    PhoneNumberFloodError, PhoneNumberOccupiedError, PasswordHashInvalidError,
-    SessionRevokedError, UserDeactivatedError, UserDeactivatedBanError,
-    AuthKeyDuplicatedError, AuthKeyUnregisteredError, SessionExpiredError,
-    RpcCallFailError, RpcMcgetFailError, ServerError, TimedOutError,
-    SlowModeWaitError, ChatAdminRequiredError, ChatWriteForbiddenError,
-    InviteHashExpiredError, InviteHashInvalidError, InviteHashEmptyError,
-    UserAlreadyParticipantError, UserNotParticipantError, UserPrivacyRestrictedError,
-    UserChannelsTooMuchError, UsernameNotModifiedError, UsernameOccupiedError,
-    UsernameInvalidError, PhotoCropSizeSmallError, PhotoExtInvalidError,
-    FilePartMissingError, FilePartEmptyError, Md5ChecksumInvalidError,
-    StickersetInvalidError, PackShortNameInvalidError, PackShortNameOccupiedError
+    AccessTokenExpiredError, AccessTokenInvalidError, ApiIdInvalidError,
+    AuthKeyDuplicatedError, AuthKeyUnregisteredError, ChatAdminRequiredError,
+    ChatWriteForbiddenError, FilePartEmptyError, FilePartMissingError,
+    FloodWaitError, InviteHashEmptyError, InviteHashExpiredError,
+    InviteHashInvalidError, Md5ChecksumInvalidError, PackShortNameInvalidError,
+    PackShortNameOccupiedError, PasswordHashInvalidError, PhoneCodeEmptyError,
+    PhoneCodeExpiredError, PhoneCodeHashEmptyError, PhoneCodeInvalidError,
+    PhoneNumberBannedError, PhoneNumberFloodError, PhoneNumberInvalidError,
+    PhoneNumberOccupiedError, PhoneNumberUnoccupiedError, PhotoCropSizeSmallError,
+    PhotoExtInvalidError, RpcCallFailError, RpcMcgetFailError,
+    ServerError, SessionExpiredError, SessionPasswordNeededError,
+    SessionRevokedError, SlowModeWaitError, StickersetInvalidError,
+    TimedOutError, UserAlreadyParticipantError, UserChannelsTooMuchError,
+    UserDeactivatedBanError, UserDeactivatedError, UserNotParticipantError,
+    UserPrivacyRestrictedError, UsernameInvalidError, UsernameNotModifiedError,
+    UsernameOccupiedError
 )
+
+# Telethon TL functions
 from telethon.tl.functions.account import (
-    ReportPeerRequest, UpdateStatusRequest, GetAuthorizationsRequest,
-    ResetAuthorizationRequest, GetPasswordRequest, GetPasswordSettingsRequest,
-    UpdatePasswordSettingsRequest, ConfirmPasswordEmailRequest,
-    ResendPasswordEmailRequest, CancelPasswordEmailRequest,
-    GetTmpPasswordRequest, GetWebAuthorizationsRequest,
-    ResetWebAuthorizationRequest, ResetWebAuthorizationsRequest,
-    GetAccountTTLRequest, SetAccountTTLRequest, GetNotifySettingsRequest,
-    GetWallPapersRequest, GetAutoDownloadSettingsRequest,
-    SaveAutoDownloadSettingsRequest, UploadThemeRequest, GetThemesRequest,
-    SetContentSettingsRequest, GetContentSettingsRequest,
-    GetMultiWallPapersRequest, GetGlobalPrivacySettingsRequest,
-    SetGlobalPrivacySettingsRequest, GetChatThemesRequest
+    GetAccountTTLRequest, GetAuthorizationsRequest, GetAutoDownloadSettingsRequest,
+    GetChatThemesRequest, GetContentSettingsRequest, GetGlobalPrivacySettingsRequest,
+    GetMultiWallPapersRequest, GetNotifySettingsRequest, GetPasswordRequest,
+    GetPasswordSettingsRequest, GetThemesRequest, GetTmpPasswordRequest,
+    GetWallPapersRequest, GetWebAuthorizationsRequest, ReportPeerRequest,
+    ResetAuthorizationRequest, ResetWebAuthorizationRequest,
+    ResetWebAuthorizationsRequest, SaveAutoDownloadSettingsRequest,
+    SetAccountTTLRequest, SetContentSettingsRequest, SetGlobalPrivacySettingsRequest,
+    UpdatePasswordSettingsRequest, UpdateStatusRequest, UploadThemeRequest
 )
+
 from telethon.tl.functions.auth import (
-    SendCodeRequest, SignUpRequest, SignInRequest, LogOutRequest,
-    ResetAuthorizationsRequest, ExportAuthorizationRequest,
-    ImportAuthorizationRequest, BindTempAuthKeyRequest,
-    ImportBotAuthorizationRequest, CheckPasswordRequest,
-    RequestPasswordRecoveryRequest, RecoverPasswordRequest,
-    ResendCodeRequest, CancelCodeRequest, DropTempAuthKeysRequest
+    BindTempAuthKeyRequest, CancelCodeRequest, CheckPasswordRequest,
+    DropTempAuthKeysRequest, ExportAuthorizationRequest, ImportAuthorizationRequest,
+    ImportBotAuthorizationRequest, LogOutRequest, RecoverPasswordRequest,
+    RequestPasswordRecoveryRequest, ResendCodeRequest, ResetAuthorizationsRequest,
+    SendCodeRequest, SignInRequest, SignUpRequest
 )
+
 from telethon.tl.functions.messages import (
-    ReportRequest, ReportSpamRequest, GetMessagesRequest,
-    GetDialogsRequest, GetHistoryRequest, SearchRequest,
-    ReadHistoryRequest, DeleteHistoryRequest, DeleteMessagesRequest,
-    ReceivedMessagesRequest, SetTypingRequest, SendMessageRequest,
-    SendMediaRequest, ForwardMessagesRequest, EditChatTitleRequest,
-    CreateChatRequest, AddChatUserRequest, DeleteChatUserRequest,
-    GetFullChatRequest, EditChatPhotoRequest,
-    GetChatsRequest, MigrateChatRequest,
-    ExportChatInviteRequest, CheckChatInviteRequest,
-    ImportChatInviteRequest, GetStickerSetRequest, InstallStickerSetRequest,
-    UninstallStickerSetRequest, StartBotRequest, GetMessagesViewsRequest,
-    GetInlineBotResultsRequest, SendInlineBotResultRequest,
-    GetMessageEditDataRequest, EditMessageRequest, GetBotCallbackAnswerRequest,
-    SetBotCallbackAnswerRequest, GetDialogFiltersRequest,
-    GetSuggestedDialogFiltersRequest, UpdateDialogFilterRequest,
-    ReorderDialogFiltersRequest, GetDialogFilterRequest,
-    GetSplitRangesRequest, MarkDialogUnreadRequest,
-    GetDialogUnreadMarksRequest, ClearAllDraftsRequest,
-    UpdatePinnedMessageRequest, GetAttachedStickersRequest,
-    SetGameScoreRequest, GetGameHighScoresRequest,
-    GetWebPagePreviewRequest,
-    DeleteChatRequest, GetCommonChatsRequest,
-    GetAllChatsRequest, GetWebPageRequest, ToggleDialogPinRequest,
-    ReorderPinnedDialogsRequest, GetPinnedDialogsRequest,
-    SetBotShippingResultsRequest, SetBotPrecheckoutResultsRequest,
-    UploadMediaRequest, SendScreenshotNotificationRequest,
-    GetFavedStickersRequest, FaveStickerRequest,
-    GetUnreadMentionsRequest, ReadMentionsRequest,
-    GetRecentLocationsRequest, SendMultiMediaRequest,
-    UploadEncryptedFileRequest, SearchStickerSetsRequest,
-    GetRepliesRequest, GetDiscussionMessageRequest,
-    ReadDiscussionRequest, UnpinAllMessagesRequest,
-    GetAdminsWithInvitesRequest,
-    GetExportedChatInvitesRequest, GetExportedChatInviteRequest,
-    EditExportedChatInviteRequest, DeleteExportedChatInviteRequest,
-    GetChatInviteImportersRequest, SetHistoryTTLRequest,
-    CheckHistoryImportRequest, CheckHistoryImportPeerRequest,
-    ToggleNoForwardsRequest, SaveDefaultSendAsRequest,
-    SendReactionRequest, GetMessagesReactionsRequest,
-    GetMessageReadParticipantsRequest, GetPollResultsRequest,
-    GetPollVotesRequest, SetChatThemeRequest,
-    GetSearchCountersRequest, RequestUrlAuthRequest,
-    AcceptUrlAuthRequest, HidePeerSettingsBarRequest
+    AcceptUrlAuthRequest, AddChatUserRequest, CheckChatInviteRequest,
+    CheckHistoryImportRequest, CheckHistoryImportPeerRequest, ClearAllDraftsRequest,
+    CreateChatRequest, DeleteChatRequest, DeleteChatUserRequest,
+    DeleteExportedChatInviteRequest, DeleteHistoryRequest, DeleteMessagesRequest,
+    EditChatPhotoRequest, EditChatTitleRequest, EditExportedChatInviteRequest,
+    EditMessageRequest, ExportChatInviteRequest, FaveStickerRequest,
+    ForwardMessagesRequest, GetAdminsWithInvitesRequest, GetAllChatsRequest,
+    GetAttachedStickersRequest, GetBotCallbackAnswerRequest, GetChatInviteImportersRequest,
+    GetChatsRequest, GetCommonChatsRequest, GetDialogFilterRequest,
+    GetDialogFiltersRequest, GetDialogUnreadMarksRequest, GetDialogsRequest,
+    GetDiscussionMessageRequest, GetExportedChatInviteRequest,
+    GetExportedChatInvitesRequest, GetFavedStickersRequest, GetFullChatRequest,
+    GetGameHighScoresRequest, GetHistoryRequest, GetInlineBotResultsRequest,
+    GetMessageEditDataRequest, GetMessageReadParticipantsRequest,
+    GetMessagesReactionsRequest, GetMessagesRequest, GetMessagesViewsRequest,
+    GetPinnedDialogsRequest, GetPollResultsRequest, GetPollVotesRequest,
+    GetRecentLocationsRequest, GetRepliesRequest, GetSearchCountersRequest,
+    GetSplitRangesRequest, GetStickerSetRequest, GetSuggestedDialogFiltersRequest,
+    GetUnreadMentionsRequest, GetWebPagePreviewRequest, GetWebPageRequest,
+    HidePeerSettingsBarRequest, ImportChatInviteRequest, InstallStickerSetRequest,
+    MarkDialogUnreadRequest, MigrateChatRequest, ReadDiscussionRequest,
+    ReadHistoryRequest, ReadMentionsRequest, ReceivedMessagesRequest,
+    ReorderDialogFiltersRequest, ReorderPinnedDialogsRequest, ReportRequest,
+    ReportSpamRequest, RequestUrlAuthRequest, SaveDefaultSendAsRequest,
+    SearchRequest, SearchStickerSetsRequest, SendInlineBotResultRequest,
+    SendMediaRequest, SendMessageRequest, SendMultiMediaRequest,
+    SendReactionRequest, SendScreenshotNotificationRequest, SetBotCallbackAnswerRequest,
+    SetBotPrecheckoutResultsRequest, SetBotShippingResultsRequest,
+    SetChatThemeRequest, SetGameScoreRequest, SetHistoryTTLRequest,
+    SetTypingRequest, StartBotRequest, ToggleDialogPinRequest,
+    ToggleNoForwardsRequest, UninstallStickerSetRequest, UnpinAllMessagesRequest,
+    UpdateDialogFilterRequest, UpdatePinnedMessageRequest, UploadEncryptedFileRequest,
+    UploadMediaRequest
 )
 
-# For advanced typing hints
+# Telethon TL types (truncated for brevity - you should keep only what you actually use)
 from telethon.tl.types import (
-    InputReportReasonSpam, InputReportReasonViolence,
-    InputReportReasonPornography, InputReportReasonFake,
-    InputReportReasonIllegalDrugs, InputReportReasonPersonalDetails,
-    InputReportReasonCopyright, InputReportReasonOther,
-    InputReportReasonChildAbuse, InputReportReasonGeoIrrelevant,
-    InputUser, InputPeerUser, InputPeerChannel, InputPeerChat,
-    User, UserEmpty, UserFull, Chat, ChatEmpty, ChatFull,
-    Channel, ChannelFull, ChatParticipant, ChatParticipantCreator,
-    ChatParticipantAdmin, ChatParticipants, ChatParticipantsForbidden,
-    ChatPhoto, ChatPhotoEmpty, ChatInvite, ChatInviteAlready,
-    ChatInvitePeek, Dialog, DialogPeer, DialogPeerFolder,
-    Message, MessageEmpty, MessageService, MessageMediaEmpty,
-    MessageMediaPhoto, MessageMediaDocument, MessageMediaWebPage,
-    MessageMediaContact, MessageMediaGeo, MessageMediaVenue,
-    MessageMediaGame, MessageMediaInvoice, MessageMediaPoll,
-    MessageMediaDice, MessageActionEmpty, MessageActionChatCreate,
-    MessageActionChatEditTitle, MessageActionChatEditPhoto,
-    MessageActionChatDeletePhoto, MessageActionChatAddUser,
-    MessageActionChatDeleteUser, MessageActionChatJoinedByLink,
-    MessageActionChannelCreate, MessageActionChatMigrateTo,
-    MessageActionChannelMigrateFrom, MessageActionPinMessage,
-    MessageActionHistoryClear, MessageActionGameScore,
-    MessageActionPaymentSentMe, MessageActionPaymentSent,
-    MessageActionPhoneCall, MessageActionScreenshotTaken,
-    MessageActionCustomAction, MessageActionBotAllowed,
-    MessageActionSecureValuesSentMe, MessageActionSecureValuesSent,
-    MessageActionContactSignUp, MessageActionGeoProximityReached,
-    MessageActionGroupCall, MessageActionInviteToGroupCall,
-    MessageActionSetMessagesTTL, MessageActionGroupCallScheduled,
-    MessageActionSetChatTheme, MessageActionChatJoinedByRequest,
-    MessageActionWebViewDataSentMe, MessageActionWebViewDataSent,
-    MessageActionGiftPremium, MessageActionTopicCreate,
-    MessageActionTopicEdit, MessageActionSuggestProfilePhoto,
-    MessageActionRequestedPeer, MessageActionSetChatWallPaper,
-    MessageActionGiftCode, MessageActionGiveawayLaunch,
-    MessageActionGiveawayResults, MessageActionBoostApply,
-    PeerUser, PeerChat, PeerChannel, UpdateNewMessage,
-    UpdateMessageID, UpdateDeleteMessages, UpdateUserTyping,
-    UpdateChatUserTyping, UpdateChatParticipants, UpdateUserStatus,
-    UpdateUserName, UpdateUserPhoto, UpdateNewEncryptedMessage,
-    UpdateEncryptedChatTyping, UpdateEncryption, UpdateEncryptedMessagesRead,
-    UpdateChatParticipantAdd, UpdateChatParticipantDelete,
-    UpdateDcOptions, UpdateNotifySettings, UpdateServiceNotification,
-    UpdatePrivacy, UpdateUserPhone, UpdateReadHistoryInbox,
-    UpdateReadHistoryOutbox, UpdateWebPage, UpdateReadMessagesContents,
-    UpdateChannelTooLong, UpdateChannel, UpdateNewChannelMessage,
-    UpdateReadChannelInbox, UpdateDeleteChannelMessages,
-    UpdateChannelMessageViews, UpdateChatParticipantAdmin,
-    UpdateNewStickerSet, UpdateStickerSetsOrder,
-    UpdateStickerSets, UpdateSavedGifs, UpdateBotInlineQuery,
-    UpdateBotInlineSend, UpdateEditChannelMessage,
-    UpdateBotCallbackQuery, UpdateEditMessage, UpdateInlineBotCallbackQuery,
-    UpdateReadChannelOutbox, UpdateDraftMessage, UpdateReadFeaturedStickers,
-    UpdateRecentStickers, UpdateConfig, UpdatePtsChanged,
-    UpdateChannelWebPage, UpdateDialogPinned, UpdatePinnedDialogs,
-    UpdateBotWebhookJSON, UpdateBotWebhookJSONQuery,
-    UpdateBotShippingQuery, UpdateBotPrecheckoutQuery,
-    UpdatePhoneCall, UpdateLangPackTooLong, UpdateLangPack,
-    UpdateFavedStickers, UpdateChannelReadMessagesContents,
-    UpdateContactsReset, UpdateChannelAvailableMessages,
-    UpdateDialogUnreadMark, UpdateMessagePoll, UpdateChatDefaultBannedRights,
-    UpdateFolderPeers, UpdatePeerSettings, UpdatePeerLocated,
-    UpdateNewScheduledMessage, UpdateDeleteScheduledMessages,
-    UpdateTheme, UpdateGeoLiveViewed, UpdateLoginToken,
-    UpdateMessagePollVote, UpdateDialogFilter, UpdateDialogFilterOrder,
-    UpdateDialogFilters, UpdatePhoneCallSignalingData,
-    UpdateChannelMessageForwards, UpdateReadChannelDiscussionInbox,
-    UpdateReadChannelDiscussionOutbox, UpdatePeerBlocked,
-    UpdateChannelUserTyping, UpdatePinnedMessages, UpdatePinnedChannelMessages,
-    UpdateChat, UpdateGroupCallParticipants, UpdateGroupCall,
-    UpdatePeerHistoryTTL, UpdateChatParticipant,
-    UpdateChannelParticipant, UpdateBotStopped, UpdateGroupCallConnection,
-    UpdateBotCommands, UpdatePendingJoinRequests, UpdateBotChatInviteRequester,
-    UpdateMessageReactions, UpdateAttachMenuBots, UpdateWebViewResultSent,
-    UpdateBotMenuButton, UpdateSavedRingtones, UpdateTranscribedAudio,
-    UpdateReadFeaturedEmojiStickers, UpdateUserEmojiStatus,
-    UpdateRecentEmojiStatuses, UpdateRecentReactions,
-    UpdateMoveStickerSetToTop, UpdateMessageExtendedMedia,
-    UpdateChannelPinnedTopic, UpdateChannelPinnedTopics,
-    UpdateUser, UpdateAutoSaveSettings, UpdateGroupInvitePrivacyForbidden,
-    UpdateStory, UpdateReadStories, UpdateStoryID, UpdateStoriesStealthMode,
-    UpdateSentStoryReaction, UpdateBotWriteAccessAllowed, UpdateBotNewBusinessMessage,
-    UpdateBotEditBusinessMessage, UpdateBotDeleteBusinessMessage,
-    UpdateBotMessageReaction, UpdateBotMessageReactions, UpdateBotMessageMedia,
-    UpdateBotMessageAnimation, UpdateBotMessageId, UpdateBotInlineSendCount,
-    UpdateBotCallbackAnswer, UpdateBotChatBoost, UpdateBotShutdown,
-    InputMediaUploadedPhoto, InputMediaPhoto, InputMediaGeoPoint,
-    InputMediaContact, InputMediaUploadedDocument, InputMediaDocument,
-    InputMediaVenue, InputMediaGifExternal, InputMediaPhotoExternal,
-    InputMediaDocumentExternal, InputMediaGame, InputMediaInvoice,
-    InputMediaGeoLive, InputMediaPoll, InputMediaDice,
-    InputMediaStory, InputMediaWebPage, InputChatPhotoEmpty,
-    InputChatUploadedPhoto, InputChatPhoto, InputGeoPointEmpty,
-    InputGeoPoint, InputPhotoEmpty, InputPhoto, InputFileLocation,
-    InputEncryptedFileLocation, InputDocumentFileLocation,
-    InputSecureFileLocation, InputTakeoutFileLocation,
+    Channel, ChannelFull, Chat, ChatEmpty, ChatFull, ChatInvite,
+    ChatInviteAlready, ChatInvitePeek, ChatParticipant, ChatParticipantAdmin,
+    ChatParticipantCreator, ChatParticipants, ChatParticipantsForbidden,
+    ChatPhoto, ChatPhotoEmpty, Dialog, DialogPeer, DialogPeerFolder,
+    InputChatPhoto, InputChatPhotoEmpty, InputChatUploadedPhoto,
+    InputDocumentFileLocation, InputEncryptedFileLocation, InputFileLocation,
+    InputGeoPoint, InputGeoPointEmpty, InputMediaContact, InputMediaDice,
+    InputMediaDocument, InputMediaGame, InputMediaGeoLive, InputMediaGeoPoint,
+    InputMediaInvoice, InputMediaPhoto, InputMediaPoll, InputMediaStory,
+    InputMediaUploadedDocument, InputMediaUploadedPhoto, InputMediaVenue,
+    InputMediaWebPage, InputPeerChannel, InputPeerChat, InputPeerUser,
+    InputPeerPhotoFileLocation, InputPhoto, InputPhotoEmpty,
     InputPhotoFileLocation, InputPhotoLegacyFileLocation,
-    InputPeerPhotoFileLocation, InputStickerSetThumb,
-    InputGroupCallStream, InputPeerPhotoFileLocation,
-    InputWebFileLocation, InputWebFileGeoPointLocation,
-    InputBotInlineMessageID, InputBotInlineMessageID64,
-    InputBotInlineMessageID128, InputBotInlineMessageID256,
-    InputBotInlineMessageGame, InputBotInlineResult,
-    InputBotInlineResultPhoto, InputBotInlineResultDocument,
-    InputBotInlineResultGame, InputBotInlineResultVideo,
-    InputBotInlineResultAudio, InputBotInlineResultVoice,
-    InputBotInlineResultContact, InputBotInlineResultLocation,
-    InputBotInlineResultVenue, InputBotInlineResultInvoice,
-    InputBotInlineResultWebPage, InputBotInlineResultStory,
-    InputBotInlineResultPhotoVideo, InputBotInlineResultGif,
-    InputBotInlineResultMpeg4Gif, InputBotInlineResultSticker,
-    InputBotInlineResultVideoNote, InputBotInlineResultRoundVideo,
-    InputBotInlineResultAudioVoice, InputBotInlineResultGeoPoint,
-    InputBotInlineResultLiveStream, InputBotInlineResultPoll,
-    InputBotInlineResultDice, InputBotInlineResultTheme,
-    InputBotInlineResultEmoji, InputBotInlineResultEmojiStatus,
-    InputBotInlineResultAnimatedEmoji, InputBotInlineResultVoiceNote,
-    InputBotInlineResultVideoStory, InputBotInlineResultVoiceVideoNote,
-    InputBotInlineResultAudioDocument, InputBotInlineResultVideoDocument,
-    InputBotInlineResultAudioVideo, InputBotInlineResultVoiceDocument,
-    InputBotInlineResultVoiceAudio, InputBotInlineResultVoiceVideo,
-    InputBotInlineResultVoiceAudioVideo, InputBotInlineResultVoiceRoundVideo,
-    InputBotInlineResultVoiceVideoNote, InputBotInlineResultVoiceVoiceNote,
-    InputBotInlineResultVoiceContact, InputBotInlineResultVoiceLocation,
-    InputBotInlineResultVoiceVenue, InputBotInlineResultVoiceInvoice,
-    InputBotInlineResultVoiceWebPage, InputBotInlineResultVoiceStory,
-    InputBotInlineResultVoicePhotoVideo, InputBotInlineResultVoiceGif,
-    InputBotInlineResultVoiceMpeg4Gif, InputBotInlineResultVoiceSticker,
-    InputBotInlineResultVoiceVideoNoteRound, InputBotInlineResultVoiceGeoPoint,
-    InputBotInlineResultVoiceLiveStream, InputBotInlineResultVoicePoll,
-    InputBotInlineResultVoiceDice, InputBotInlineResultVoiceTheme,
-    InputBotInlineResultVoiceEmoji, InputBotInlineResultVoiceEmojiStatus,
-    InputBotInlineResultVoiceAnimatedEmoji, InputBotInlineResultVoiceVoiceNote,
-    InputBotInlineResultVoiceVideoStory, InputBotInlineResultVoiceVideoNoteVoice,
-    InputBotInlineResultVoiceAudioDocument, InputBotInlineResultVoiceVideoDocument,
-    InputBotInlineResultVoiceAudioVideo, InputBotInlineResultVoiceVoiceDocument,
-    InputBotInlineResultVoiceVoiceAudio, InputBotInlineResultVoiceVoiceVideo,
-    InputBotInlineResultVoiceVoiceAudioVideo, InputBotInlineResultVoiceVoiceRoundVideo,
-    InputBotInlineResultVoiceVoiceVideoNote, InputBotInlineResultVoiceVoiceVoiceNote,
-    InputBotInlineResultVoiceVoiceContact, InputBotInlineResultVoiceVoiceLocation,
-    InputBotInlineResultVoiceVoiceVenue, InputBotInlineResultVoiceVoiceInvoice,
-    InputBotInlineResultVoiceVoiceWebPage, InputBotInlineResultVoiceVoiceStory,
-    InputBotInlineResultVoiceVoicePhotoVideo, InputBotInlineResultVoiceVoiceGif,
-    InputBotInlineResultVoiceVoiceMpeg4Gif, InputBotInlineResultVoiceVoiceSticker,
-    InputBotInlineResultVoiceVoiceVideoNoteRound, InputBotInlineResultVoiceVoiceGeoPoint,
-    InputBotInlineResultVoiceVoiceLiveStream, InputBotInlineResultVoiceVoicePoll,
-    InputBotInlineResultVoiceVoiceDice, InputBotInlineResultVoiceVoiceTheme,
-    InputBotInlineResultVoiceVoiceEmoji, InputBotInlineResultVoiceVoiceEmojiStatus,
-    InputBotInlineResultVoiceVoiceAnimatedEmoji, InputBotInlineResultVoiceVoiceVoiceNote,
-    InputBotInlineResultVoiceVoiceVideoStory, InputBotInlineResultVoiceVoiceVideoNoteVoice
+    InputReportReasonChildAbuse, InputReportReasonCopyright,
+    InputReportReasonFake, InputReportReasonGeoIrrelevant,
+    InputReportReasonIllegalDrugs, InputReportReasonOther,
+    InputReportReasonPersonalDetails, InputReportReasonPornography,
+    InputReportReasonSpam, InputReportReasonViolence,
+    InputSecureFileLocation, InputStickerSetThumb, InputTakeoutFileLocation,
+    InputUser, InputWebFileLocation, Message, MessageActionBotAllowed,
+    MessageActionChannelCreate, MessageActionChannelMigrateFrom,
+    MessageActionChatAddUser, MessageActionChatCreate, MessageActionChatDeletePhoto,
+    MessageActionChatDeleteUser, MessageActionChatEditPhoto,
+    MessageActionChatEditTitle, MessageActionChatJoinedByLink,
+    MessageActionChatJoinedByRequest, MessageActionChatMigrateTo,
+    MessageActionContactSignUp, MessageActionCustomAction, MessageActionEmpty,
+    MessageActionGameScore, MessageActionGeoProximityReached,
+    MessageActionGiftCode, MessageActionGiftPremium, MessageActionGiveawayLaunch,
+    MessageActionGiveawayResults, MessageActionGroupCall,
+    MessageActionGroupCallScheduled, MessageActionHistoryClear,
+    MessageActionInviteToGroupCall, MessageActionPaymentSent,
+    MessageActionPaymentSentMe, MessageActionPhoneCall, MessageActionPinMessage,
+    MessageActionRequestedPeer, MessageActionScreenshotTaken,
+    MessageActionSecureValuesSent, MessageActionSecureValuesSentMe,
+    MessageActionSetChatTheme, MessageActionSetMessagesTTL,
+    MessageActionSuggestProfilePhoto, MessageActionTopicCreate,
+    MessageActionTopicEdit, MessageActionWebViewDataSent,
+    MessageActionWebViewDataSentMe, MessageEmpty, MessageMediaContact,
+    MessageMediaDice, MessageMediaDocument, MessageMediaEmpty, MessageMediaGame,
+    MessageMediaGeo, MessageMediaInvoice, MessageMediaPhoto, MessageMediaPoll,
+    MessageMediaVenue, MessageMediaWebPage, MessageService, PeerChannel,
+    PeerChat, PeerUser, UpdateBotCallbackQuery, UpdateChannel,
+    UpdateChannelMessageViews, UpdateChannelTooLong, UpdateChat,
+    UpdateChatDefaultBannedRights, UpdateChatParticipants,
+    UpdateChatUserTyping, UpdateDeleteChannelMessages, UpdateDeleteMessages,
+    UpdateEditChannelMessage, UpdateEncryptedChatTyping, UpdateEncryptedMessagesRead,
+    UpdateEncryption, UpdateMessageID, UpdateNewChannelMessage,
+    UpdateNewEncryptedMessage, UpdateNewMessage, UpdateNewStickerSet,
+    UpdateNotifySettings, UpdatePinnedChannelMessages, UpdatePinnedDialogs,
+    UpdatePinnedMessages, UpdatePrivacy, UpdateReadChannelInbox,
+    UpdateReadChannelOutbox, UpdateReadHistoryInbox, UpdateReadHistoryOutbox,
+    UpdateReadMessagesContents, UpdateServiceNotification, UpdateStickerSets,
+    UpdateStickerSetsOrder, UpdateUser, UpdateUserPhone, UpdateUserPhoto,
+    UpdateUserStatus, UpdateUserName, UpdateUserTyping, UpdateWebPage,
+    User, UserEmpty, UserFull
 )
 
-# For beautiful console output
-from rich.console import Console, Group
-from rich.table import Table
-from rich.panel import Panel
+# ============================================
+# UTILITY & MONITORING IMPORTS
+# ============================================
+import backoff
+import numpy as np
+from tenacity import (retry, retry_if_exception_type, stop_after_attempt,
+                      wait_exponential)
+
+# ============================================
+# RICH CONSOLE OUTPUT
+# ============================================
 from rich import box
-from rich.text import Text
-from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TimeElapsedColumn, TimeRemainingColumn
-from rich.layout import Layout
-from rich.columns import Columns
-from rich.syntax import Syntax
-from rich.traceback import install as install_rich_traceback
-from rich.markdown import Markdown
-from rich.style import Style
-from rich.live import Live
-from rich.prompt import Prompt, Confirm, IntPrompt, FloatPrompt
 from rich.align import Align
+from rich.columns import Columns
+from rich.console import Console, Group
+from rich.layout import Layout
+from rich.live import Live
+from rich.markdown import Markdown
+from rich.panel import Panel
+from rich.progress import (BarColumn, Progress, SpinnerColumn, TextColumn,
+                           TimeElapsedColumn, TimeRemainingColumn)
+from rich.prompt import Confirm, FloatPrompt, IntPrompt, Prompt
+from rich.style import Style
+from rich.syntax import Syntax
+from rich.table import Table
+from rich.text import Text
+from rich.traceback import install as install_rich_traceback
 
 # Install rich traceback for better error display
 install_rich_traceback()
-
 console = Console()
+
+
 # ============================================
 # SECTION 2: ADVANCED CONFIGURATION
 # ============================================
