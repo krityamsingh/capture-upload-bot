@@ -111,7 +111,7 @@ from telethon.tl.functions.messages import (
     ReceivedMessagesRequest, SetTypingRequest, SendMessageRequest,
     SendMediaRequest, ForwardMessagesRequest, EditChatTitleRequest,
     CreateChatRequest, AddChatUserRequest, DeleteChatUserRequest,
-    GetFullChatRequest, EditChatPhotoRequest, DeleteChatPhotoRequest,
+    GetFullChatRequest, EditChatPhotoRequest,
     GetChatsRequest, GetFullChatRequest, MigrateChatRequest,
     ExportChatInviteRequest, CheckChatInviteRequest,
     ImportChatInviteRequest, GetStickerSetRequest, InstallStickerSetRequest,
