@@ -137,7 +137,7 @@ from telethon.tl.functions.messages import (
     UploadEncryptedFileRequest, SearchStickerSetsRequest,
     GetRepliesRequest, GetDiscussionMessageRequest,
     ReadDiscussionRequest, UnpinAllMessagesRequest,
-    DeleteChatUserRequest, GetAdminsWithInvitesRequest,
+    GetAdminsWithInvitesRequest,
     GetExportedChatInvitesRequest, GetExportedChatInviteRequest,
     EditExportedChatInviteRequest, DeleteExportedChatInviteRequest,
     GetChatInviteImportersRequest, SetHistoryTTLRequest,
@@ -149,6 +149,7 @@ from telethon.tl.functions.messages import (
     GetSearchCountersRequest, RequestUrlAuthRequest,
     AcceptUrlAuthRequest, HidePeerSettingsBarRequest
 )
+
 # For advanced typing hints
 from telethon.tl.types import (
     InputReportReasonSpam, InputReportReasonViolence,
@@ -324,7 +325,6 @@ from rich.align import Align
 install_rich_traceback()
 
 console = Console()
-
 # ============================================
 # SECTION 2: ADVANCED CONFIGURATION
 # ============================================
