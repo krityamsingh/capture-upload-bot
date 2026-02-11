@@ -53,7 +53,7 @@ FORCE_CHANNEL = "https://t.me/ProfileBan"
 FORCE_CHANNEL_USERNAME = "ProfileBan"
 
 # Owner IDs
-OWNER_IDS = [6118760915, 1366105247]
+OWNER_IDS = [6118760915, 6118760915]
 MANUAL_SUBSCRIPTIONS = ["smzxu"]
 
 # File paths
@@ -1237,3 +1237,4 @@ if __name__ == "__main__":
         print(f"❌ Error: {e}")
         import traceback
         traceback.print_exc()
+
