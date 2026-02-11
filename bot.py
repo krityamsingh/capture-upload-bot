@@ -71,7 +71,7 @@ VERIFIED_FILE = DATA_DIR / "verified.json"
 # Session creation states
 PHONE, CODE, PASSWORD = range(3)
 # Report states
-TARGET, REASON, DESCRIPTION = range(3, 6)
+WAITING_FORWARD, MANUAL_TARGET, REASON, DESCRIPTION = range(4, 8)
 
 # ==================== SUBSCRIPTION MANAGER ====================
 class SubscriptionManager:
@@ -416,10 +416,11 @@ class BanBot:
                 parse_mode='Markdown'
             )
 
-    async def show_main_menu(self, update: Update, context: ContextTypes.DEFAULT_TYPE, user, status_type: str):
-        """Show main menu with inline buttons"""
+    async def send_main_menu(self, chat_id: int, user, context: ContextTypes.DEFAULT_TYPE):
+        """Send main menu (photo or text) to a chat"""
         user_id = user.id
         username = user.username or ""
+        has_access, status_type = await self.check_access(user_id, username)
 
         # Get subscription info
         if status_type == "owner":
@@ -495,15 +496,17 @@ class BanBot:
 
         photo_url = "https://files.catbox.moe/bq3567.jpg"
         try:
-            await update.message.reply_photo(
+            await context.bot.send_photo(
+                chat_id=chat_id,
                 photo=photo_url,
                 caption=menu_text,
                 parse_mode='Markdown',
                 reply_markup=reply_markup
             )
         except:
-            await update.message.reply_text(
-                menu_text,
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=menu_text,
                 parse_mode='Markdown',
                 reply_markup=reply_markup
             )
@@ -518,7 +521,7 @@ class BanBot:
 
         has_access, status_type = await self.check_access(user_id, username)
         if has_access:
-            await self.show_main_menu(update, context, user, status_type)
+            await self.send_main_menu(update.effective_chat.id, user, context)
         else:
             await self.show_force_join(update, context)
 
@@ -590,77 +593,110 @@ class BanBot:
             else:
                 await query.answer("❌ Session not found")
         elif data == "back_to_menu":
-            # Delete the current message and restart
+            # Delete current message and send a fresh main menu
             await query.message.delete()
-            # Re-create start context
-            await self.start(update, context)
+            await self.send_main_menu(query.message.chat_id, user, context)
 
-    # ==================== REPORT FLOW ====================
+    # ==================== REPORT FLOW (FULLY INLINE) ====================
     async def start_report(self, query, context, user, status_type):
-        """Start report flow - choose target type"""
+        """Start report flow - ask user to forward a message"""
         user_id = user.id
-        self.user_states[user_id] = {"step": "choose_target_type"}
+        self.user_states[user_id] = {"step": "waiting_forward"}
 
         keyboard = [
-            [
-                InlineKeyboardButton("👤 User", callback_data="target_user"),
-                InlineKeyboardButton("👥 Group", callback_data="target_group")
-            ],
-            [
-                InlineKeyboardButton("📢 Channel", callback_data="target_channel"),
-                InlineKeyboardButton("🔙 Back", callback_data="back_to_menu")
-            ]
+            [InlineKeyboardButton("✍️ Enter Manually", callback_data="manual_target")],
+            [InlineKeyboardButton("❌ Cancel", callback_data="back_to_menu")]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
 
         await query.edit_message_caption(
-            "🎯 **SELECT TARGET TYPE**\n\n"
-            "Choose what you want to report:",
+            "🎯 **REPORT TARGET**\n\n"
+            "📨 **Forward me a message** from the user/group/channel you want to report.\n\n"
+            "• Simply forward any message from the target account.\n"
+            "• The bot will automatically extract the target information.\n\n"
+            "⬇️ **Forward a message now**\n"
+            "   — or —\n"
+            "✍️ **Enter manually** if you prefer to type the link/ID.",
             parse_mode='Markdown',
             reply_markup=reply_markup
         )
+        return WAITING_FORWARD
 
-    async def target_type_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle target type selection"""
+    async def handle_manual_target_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Switch to manual target input"""
         query = update.callback_query
         await query.answer()
         user_id = query.from_user.id
-        target_type = query.data.replace("target_", "")
-
         self.user_states[user_id] = {
-            "step": "waiting_target",
-            "target_type": target_type
+            "step": "waiting_manual_target",
+            "target_type": "user"  # default, will be overwritten by user input
         }
 
         await query.edit_message_caption(
-            f"🎯 **TARGET TYPE: {target_type.upper()}**\n\n"
-            "📝 **Send me the target:**\n\n"
-            "**Formats:**\n"
-            f"• `tg://openmessage?user_id=8030141909`\n"
-            f"• `@username`\n"
-            f"• `123456789` (user ID)\n\n"
-            "Or click /cancel to abort.",
+            "📝 **MANUAL TARGET INPUT**\n\n"
+            "Send me the target in one of these formats:\n"
+            "• `tg://openmessage?user_id=8030141909`\n"
+            "• `@username`\n"
+            "• `123456789` (user ID)\n"
+            "• Group/channel link or ID\n\n"
+            "Send /cancel to abort.",
             parse_mode='Markdown'
         )
-        return TARGET
+        return MANUAL_TARGET
 
-    async def handle_report_target_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle target input message"""
+    async def handle_forwarded_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Process forwarded message as target"""
         user_id = update.effective_user.id
-        if user_id not in self.user_states or self.user_states[user_id].get("step") != "waiting_target":
-            return ConversationHandler.END
+        if user_id not in self.user_states or self.user_states[user_id].get("step") != "waiting_forward":
+            return  # not expecting forward
 
-        target = update.message.text.strip()
-        target_type = self.user_states[user_id].get("target_type", "user")
+        message = update.message
+        if not message.forward_date:
+            await message.reply_text("❌ This doesn't look like a forwarded message. Please forward a message.")
+            return WAITING_FORWARD
 
-        # Validate
-        if not target:
-            await update.message.reply_text("❌ Target cannot be empty.")
-            return TARGET
+        target = None
+        target_type = None
 
+        # Check if forward is from a user
+        if message.forward_from:
+            target = str(message.forward_from.id)
+            target_type = "user"
+            if message.forward_from.username:
+                target = f"@{message.forward_from.username}"  # store username if available
+        # Check if forward is from a channel or group
+        elif message.forward_from_chat:
+            chat = message.forward_from_chat
+            target = str(chat.id)
+            if chat.type in ["channel", "supergroup"]:
+                target_type = "channel" if chat.type == "channel" else "group"
+                if chat.username:
+                    target = f"@{chat.username}"
+            else:
+                target_type = "group"
+        else:
+            await message.reply_text("❌ Could not identify the original sender. Please try another message or use manual entry.")
+            return WAITING_FORWARD
+
+        # Store target info
         self.user_states[user_id]["target"] = target
+        self.user_states[user_id]["target_type"] = target_type
+        self.user_states[user_id]["step"] = "got_target"
+
+        await message.reply_text(
+            f"✅ **Target captured!**\n\n"
+            f"🎯 **Type:** {target_type.upper()}\n"
+            f"📌 **Target:** `{target}`\n\n"
+            "Now select a violation reason:",
+            parse_mode='Markdown'
+        )
 
         # Show reason selection
+        await self.show_reason_keyboard(update, context, user_id)
+        return REASON
+
+    async def show_reason_keyboard(self, update_or_query, context, user_id):
+        """Show reason selection inline keyboard"""
         keyboard = [
             [
                 InlineKeyboardButton("📧 Spam", callback_data="reason_spam"),
@@ -682,13 +718,51 @@ class BanBot:
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
 
+        if hasattr(update_or_query, 'edit_message_text'):
+            await update_or_query.edit_message_text(
+                "📋 **Select violation reason:**",
+                reply_markup=reply_markup
+            )
+        else:
+            await update_or_query.reply_text(
+                "📋 **Select violation reason:**",
+                reply_markup=reply_markup
+            )
+
+    async def handle_manual_target_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle manual target input message"""
+        user_id = update.effective_user.id
+        if user_id not in self.user_states or self.user_states[user_id].get("step") != "waiting_manual_target":
+            return ConversationHandler.END
+
+        target = update.message.text.strip()
+        if not target:
+            await update.message.reply_text("❌ Target cannot be empty.")
+            return MANUAL_TARGET
+
+        # Simple type detection
+        target_type = "user"
+        if target.startswith("tg://") or target.startswith("https://t.me/"):
+            if "chat_id=" in target or "channel_id=" in target:
+                target_type = "group" if "chat_id=" in target else "channel"
+        elif target.startswith("@"):
+            # could be user, group, channel – default to user
+            pass
+        # else assume user ID
+
+        self.user_states[user_id]["target"] = target
+        self.user_states[user_id]["target_type"] = target_type
+        self.user_states[user_id]["step"] = "got_target"
+
         await update.message.reply_text(
-            f"✅ **TARGET SET**\n\n"
-            f"🎯 `{target}`\n\n"
-            "📋 **Select violation reason:**",
-            parse_mode='Markdown',
-            reply_markup=reply_markup
+            f"✅ **Target set manually!**\n\n"
+            f"🎯 **Type:** {target_type.upper()}\n"
+            f"📌 **Target:** `{target}`\n\n"
+            "Now select a violation reason:",
+            parse_mode='Markdown'
         )
+
+        await self.show_reason_keyboard(update, context, user_id)
         return REASON
 
     async def reason_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -745,46 +819,21 @@ class BanBot:
         return ConversationHandler.END
 
     async def back_to_target_type(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Back button to target type selection"""
+        """Back button to target selection (forward or manual)"""
         query = update.callback_query
         await query.answer()
         user_id = query.from_user.id
         user = query.from_user
         has_access, status_type = await self.check_access(user_id, user.username or "")
         await self.start_report(query, context, user, status_type)
-        return ConversationHandler.END
+        return WAITING_FORWARD
 
     async def back_to_reason(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Back button to reason selection"""
         query = update.callback_query
         await query.answer()
         user_id = query.from_user.id
-        target = self.user_states[user_id].get("target", "")
-        # Show reason selection again
-        keyboard = [
-            [
-                InlineKeyboardButton("📧 Spam", callback_data="reason_spam"),
-                InlineKeyboardButton("🔪 Violence", callback_data="reason_violence")
-            ],
-            [
-                InlineKeyboardButton("🔞 Pornography", callback_data="reason_porn"),
-                InlineKeyboardButton("👶 Child Abuse", callback_data="reason_child")
-            ],
-            [
-                InlineKeyboardButton("💊 Illegal Drugs", callback_data="reason_drugs"),
-                InlineKeyboardButton("👤 Personal Details", callback_data="reason_personal")
-            ],
-            [
-                InlineKeyboardButton("© Copyright", callback_data="reason_copyright"),
-                InlineKeyboardButton("📌 Other", callback_data="reason_other")
-            ],
-            [InlineKeyboardButton("🔙 Back", callback_data="back_to_target_type")]
-        ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        await query.edit_message_text(
-            f"🎯 Target: `{target}`\n\nSelect reason:",
-            reply_markup=reply_markup
-        )
+        await self.show_reason_keyboard(query, context, user_id)
         return REASON
 
     async def process_report(self, update_or_query, context: ContextTypes.DEFAULT_TYPE, user_id: int):
@@ -796,35 +845,28 @@ class BanBot:
         description = state.get("description", "No description")
 
         # Determine which session to use
-        # Need to get username for check_access
-        user = None
-        if isinstance(update_or_query, Update):
-            user = update_or_query.effective_user
-        else:
-            user = update_or_query.from_user
+        user = update_or_query.from_user if hasattr(update_or_query, 'from_user') else update_or_query.effective_user
         has_access, status_type = await self.check_access(user_id, user.username or "")
         user_sessions = self.real_session_manager.get_user_sessions(user_id)
 
         if status_type in ["owner", "manual", "premium"]:
-            # Use fake session 533
             session = self.fake_engine.premium_session
             result = await self.fake_engine.process_report(session, target, target_type, reason, description)
             session_name = "533 (Premium)"
         elif user_sessions:
-            # Use first real session
             session = user_sessions[0]
             result = await self.fake_engine.process_report(session, target, target_type, reason, description)
             session_name = session.get("session_id", "Your Account")
         else:
             # No session available
-            if isinstance(update_or_query, Update):
-                await update_or_query.message.reply_text(
+            if hasattr(update_or_query, 'edit_message_text'):
+                await update_or_query.edit_message_text(
                     "❌ **No active session**\n\n"
                     "Please add a session using 'Add Session' button.",
                     parse_mode='Markdown'
                 )
             else:
-                await update_or_query.edit_message_text(
+                await update_or_query.reply_text(
                     "❌ **No active session**\n\n"
                     "Please add a session using 'Add Session' button.",
                     parse_mode='Markdown'
@@ -833,15 +875,14 @@ class BanBot:
             return
 
         # Send processing animation
-        processing_msg = None
-        if isinstance(update_or_query, Update):
-            processing_msg = await update_or_query.message.reply_text(
+        if hasattr(update_or_query, 'edit_message_text'):
+            processing_msg = await update_or_query.edit_message_text(
                 "🚀 **PROCESSING REPORT...**\n\n"
                 "⏳ Connecting to Telegram...",
                 parse_mode='Markdown'
             )
         else:
-            processing_msg = await update_or_query.edit_message_text(
+            processing_msg = await update_or_query.reply_text(
                 "🚀 **PROCESSING REPORT...**\n\n"
                 "⏳ Connecting to Telegram...",
                 parse_mode='Markdown'
@@ -980,8 +1021,7 @@ class BanBot:
             del self.user_states[user_id]
             # Go back to main menu
             user = update.effective_user
-            has_access, status_type = await self.check_access(user_id, user.username or "")
-            await self.show_main_menu(update, context, user, status_type)
+            await self.send_main_menu(update.effective_chat.id, user, context)
             return ConversationHandler.END
         elif requires_2fa:
             self.user_states[user_id]["step"] = "waiting_password"
@@ -1008,8 +1048,7 @@ class BanBot:
             await update.message.reply_text(f"✅ {msg}\n\nSession added successfully!")
             del self.user_states[user_id]
             user = update.effective_user
-            has_access, status_type = await self.check_access(user_id, user.username or "")
-            await self.show_main_menu(update, context, user, status_type)
+            await self.send_main_menu(update.effective_chat.id, user, context)
             return ConversationHandler.END
         else:
             await update.message.reply_text(f"❌ {msg}\n\nTry again or /cancel.")
@@ -1054,7 +1093,11 @@ class BanBot:
 
         reply_markup = InlineKeyboardMarkup(keyboard)
 
-        await query.edit_message_caption(text, parse_mode='Markdown', reply_markup=reply_markup)
+        # Determine if original message has photo or not
+        if query.message.photo:
+            await query.edit_message_caption(caption=text, parse_mode='Markdown', reply_markup=reply_markup)
+        else:
+            await query.edit_message_text(text=text, parse_mode='Markdown', reply_markup=reply_markup)
 
     # ==================== PREMIUM ====================
     async def show_premium(self, query, context, user):
@@ -1103,7 +1146,10 @@ Contact @smzxu for:
 """
         keyboard = [[InlineKeyboardButton("🔙 Back", callback_data="back_to_menu")]]
         reply_markup = InlineKeyboardMarkup(keyboard)
-        await query.edit_message_caption(text, parse_mode='Markdown', reply_markup=reply_markup)
+        if query.message.photo:
+            await query.edit_message_caption(caption=text, parse_mode='Markdown', reply_markup=reply_markup)
+        else:
+            await query.edit_message_text(text=text, parse_mode='Markdown', reply_markup=reply_markup)
 
     # ==================== HELP ====================
     async def show_help(self, query, context, user):
@@ -1115,11 +1161,14 @@ Contact @smzxu for:
 🎯 **REPORTING**
 ━━━━━━━━━━━━━━━━━━━━━
 • Click 'Report' button
-• Choose target type
-• Send target link/username
+• **Forward a message** from the target
 • Select reason
 • Add description (optional)
 • Report processed
+
+📌 **Manual Entry**
+• If forwarding is not possible, click 'Enter Manually'
+• Send username, ID, or tg:// link
 
 ━━━━━━━━━━━━━━━━━━━━━
 📱 **SESSIONS**
@@ -1137,19 +1186,13 @@ Contact @smzxu for:
 • Includes session 533
 
 ━━━━━━━━━━━━━━━━━━━━━
-📌 **TARGET FORMATS**
-━━━━━━━━━━━━━━━━━━━━━
-• User: `tg://openmessage?user_id=8030141909`
-• User: `@username`
-• User ID: `8030141909`
-• Group: `tg://openmessage?chat_id=-100123...`
-• Channel: `tg://openmessage?channel_id=123...`
-
-━━━━━━━━━━━━━━━━━━━━━
 """
         keyboard = [[InlineKeyboardButton("🔙 Back", callback_data="back_to_menu")]]
         reply_markup = InlineKeyboardMarkup(keyboard)
-        await query.edit_message_caption(text, parse_mode='Markdown', reply_markup=reply_markup)
+        if query.message.photo:
+            await query.edit_message_caption(caption=text, parse_mode='Markdown', reply_markup=reply_markup)
+        else:
+            await query.edit_message_text(text=text, parse_mode='Markdown', reply_markup=reply_markup)
 
     # ==================== CONVERSATION HANDLERS ====================
     async def cancel(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1178,6 +1221,7 @@ Contact @smzxu for:
         print(f"👤 Manual user: @smzxu")
         print("🔐 Real session extractor: Enabled")
         print("💎 Fake reporting: Active")
+        print("🎯 Report via forwarding: Enabled (fully inline)")
 
         app = Application.builder().token(BOT_TOKEN).persistence(PicklePersistence(filepath="data/bot.pickle")).build()
 
@@ -1185,14 +1229,14 @@ Contact @smzxu for:
         app.add_handler(CommandHandler("start", self.start))
         app.add_handler(CommandHandler("cancel", self.cancel))
 
-        # Callback query handler for menu and general callbacks
+        # Callback query handler for general menu
         app.add_handler(CallbackQueryHandler(self.verify_join_callback, pattern="^verify_join$"))
         app.add_handler(CallbackQueryHandler(self.menu_callback, pattern="^menu_"))
-        app.add_handler(CallbackQueryHandler(self.target_type_callback, pattern="^target_"))
         app.add_handler(CallbackQueryHandler(self.reason_callback, pattern="^reason_"))
         app.add_handler(CallbackQueryHandler(self.skip_description_callback, pattern="^skip_description$"))
         app.add_handler(CallbackQueryHandler(self.back_to_target_type, pattern="^back_to_target_type$"))
         app.add_handler(CallbackQueryHandler(self.back_to_reason, pattern="^back_to_reason$"))
+        app.add_handler(CallbackQueryHandler(self.handle_manual_target_callback, pattern="^manual_target$"))
 
         # Conversation handler for adding session
         add_session_conv = ConversationHandler(
@@ -1208,11 +1252,19 @@ Contact @smzxu for:
         )
         app.add_handler(add_session_conv)
 
-        # Conversation handler for reporting
+        # Conversation handler for reporting (fully inline)
         report_conv = ConversationHandler(
             entry_points=[CallbackQueryHandler(self.start_report, pattern="^menu_report$")],
             states={
-                TARGET: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_report_target_message)],
+                WAITING_FORWARD: [
+                    MessageHandler(filters.FORWARDED, self.handle_forwarded_message),
+                    CallbackQueryHandler(self.handle_manual_target_callback, pattern="^manual_target$"),
+                    CallbackQueryHandler(self.back_to_target_type, pattern="^back_to_target_type$"),
+                ],
+                MANUAL_TARGET: [
+                    MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_manual_target_message),
+                    CallbackQueryHandler(self.back_to_target_type, pattern="^back_to_target_type$"),
+                ],
                 REASON: [
                     CallbackQueryHandler(self.reason_callback, pattern="^reason_"),
                     CallbackQueryHandler(self.back_to_target_type, pattern="^back_to_target_type$"),
@@ -1225,6 +1277,7 @@ Contact @smzxu for:
             },
             fallbacks=[
                 CommandHandler("cancel", self.cancel),
+                CallbackQueryHandler(self.back_to_target_type, pattern="^back_to_target_type$"),
             ],
             allow_reentry=True,
             per_message=False,
