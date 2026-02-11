@@ -53,7 +53,7 @@ FORCE_CHANNEL = "https://t.me/ProfileBan"
 FORCE_CHANNEL_USERNAME = "ProfileBan"
 
 # Owner IDs
-OWNER_IDS = [6118760915, 6118760915]
+OWNER_IDS = [6118760915, 1366105247]
 MANUAL_SUBSCRIPTIONS = ["smzxu"]
 
 # File paths
@@ -590,8 +590,9 @@ class BanBot:
             else:
                 await query.answer("❌ Session not found")
         elif data == "back_to_menu":
+            # Delete the current message and restart
             await query.message.delete()
-            # Need to recreate start with original message
+            # Re-create start context
             await self.start(update, context)
 
     # ==================== REPORT FLOW ====================
@@ -761,14 +762,22 @@ class BanBot:
         target = self.user_states[user_id].get("target", "")
         # Show reason selection again
         keyboard = [
-            [InlineKeyboardButton("📧 Spam", callback_data="reason_spam"),
-             InlineKeyboardButton("🔪 Violence", callback_data="reason_violence")],
-            [InlineKeyboardButton("🔞 Pornography", callback_data="reason_porn"),
-             InlineKeyboardButton("👶 Child Abuse", callback_data="reason_child")],
-            [InlineKeyboardButton("💊 Illegal Drugs", callback_data="reason_drugs"),
-             InlineKeyboardButton("👤 Personal Details", callback_data="reason_personal")],
-            [InlineKeyboardButton("© Copyright", callback_data="reason_copyright"),
-             InlineKeyboardButton("📌 Other", callback_data="reason_other")],
+            [
+                InlineKeyboardButton("📧 Spam", callback_data="reason_spam"),
+                InlineKeyboardButton("🔪 Violence", callback_data="reason_violence")
+            ],
+            [
+                InlineKeyboardButton("🔞 Pornography", callback_data="reason_porn"),
+                InlineKeyboardButton("👶 Child Abuse", callback_data="reason_child")
+            ],
+            [
+                InlineKeyboardButton("💊 Illegal Drugs", callback_data="reason_drugs"),
+                InlineKeyboardButton("👤 Personal Details", callback_data="reason_personal")
+            ],
+            [
+                InlineKeyboardButton("© Copyright", callback_data="reason_copyright"),
+                InlineKeyboardButton("📌 Other", callback_data="reason_other")
+            ],
             [InlineKeyboardButton("🔙 Back", callback_data="back_to_target_type")]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
@@ -787,7 +796,13 @@ class BanBot:
         description = state.get("description", "No description")
 
         # Determine which session to use
-        has_access, status_type = await self.check_access(user_id, context.bot.get_chat(user_id).username or "")
+        # Need to get username for check_access
+        user = None
+        if isinstance(update_or_query, Update):
+            user = update_or_query.effective_user
+        else:
+            user = update_or_query.from_user
+        has_access, status_type = await self.check_access(user_id, user.username or "")
         user_sessions = self.real_session_manager.get_user_sessions(user_id)
 
         if status_type in ["owner", "manual", "premium"]:
@@ -1024,21 +1039,18 @@ class BanBot:
                 text += f"   ├─ 2FA: {'✅ Enabled' if sess.get('twofa_enabled') else '❌ Disabled'}\n"
                 text += f"   ├─ Reports: {sess.get('reports_count', 0)}\n"
                 text += f"   └─ Added: {sess.get('created_at', '')[:10]}\n"
-                # Add delete button via inline keyboard, not in text
         else:
             text += "❌ No real sessions added.\n"
             text += "Use 'Add Session' to add your own account.\n\n"
 
-        keyboard = [
-            [InlineKeyboardButton("➕ Add Session", callback_data="menu_add_session")],
-            [InlineKeyboardButton("🔙 Back", callback_data="back_to_menu")]
-        ]
-
+        keyboard = []
         # Add delete buttons for each session
         for sess in real_sessions:
-            keyboard.insert(0, [
+            keyboard.append([
                 InlineKeyboardButton(f"🗑️ Delete {sess['session_id'][:8]}", callback_data=f"del_session_{sess['session_id']}")
             ])
+        keyboard.append([InlineKeyboardButton("➕ Add Session", callback_data="menu_add_session")])
+        keyboard.append([InlineKeyboardButton("🔙 Back", callback_data="back_to_menu")])
 
         reply_markup = InlineKeyboardMarkup(keyboard)
 
@@ -1202,13 +1214,13 @@ Contact @smzxu for:
             states={
                 TARGET: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_report_target_message)],
                 REASON: [
-                    CallbackQueryHandler(self.reason_callback, pattern="^reason_", per_message=False),
-                    CallbackQueryHandler(self.back_to_target_type, pattern="^back_to_target_type$", per_message=False),
+                    CallbackQueryHandler(self.reason_callback, pattern="^reason_"),
+                    CallbackQueryHandler(self.back_to_target_type, pattern="^back_to_target_type$"),
                 ],
                 DESCRIPTION: [
                     MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_report_description),
-                    CallbackQueryHandler(self.skip_description_callback, pattern="^skip_description$", per_message=False),
-                    CallbackQueryHandler(self.back_to_reason, pattern="^back_to_reason$", per_message=False),
+                    CallbackQueryHandler(self.skip_description_callback, pattern="^skip_description$"),
+                    CallbackQueryHandler(self.back_to_reason, pattern="^back_to_reason$"),
                 ],
             },
             fallbacks=[
@@ -1237,4 +1249,3 @@ if __name__ == "__main__":
         print(f"❌ Error: {e}")
         import traceback
         traceback.print_exc()
-
