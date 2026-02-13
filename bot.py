@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 Telegram Enterprise Reporting Bot
+REQUIRES: pyrogram>=2.0.0  (install with: pip install pyrogram>=2.0.0)
 - Uses Pyrogram for Telegram client API
 - Sessions stored in MongoDB as strings
 - Proxies fetched from @ProxyMTProto channel
@@ -24,21 +25,19 @@ from urllib.parse import urlparse
 import pymongo
 from pymongo.collection import Collection
 
-# Pyrogram imports with fallback for StringSession (compatible with v1 and v2)
+# Pyrogram imports with version check
 try:
-    from pyrogram import StringSession
-except ImportError:
-    try:
-        from pyrogram.client import StringSession
-    except ImportError:
-        from pyrogram.session import StringSession
-
-from pyrogram import Client, filters, enums
-from pyrogram.raw import functions, types
-from pyrogram.errors import (
-    SessionPasswordNeeded, PhoneCodeInvalid, PhoneCodeExpired,
-    FloodWait, PhoneNumberBanned, PhoneNumberUnoccupied, ApiIdInvalid
-)
+    from pyrogram import StringSession, Client, filters, enums
+    from pyrogram.raw import functions, types
+    from pyrogram.errors import (
+        SessionPasswordNeeded, PhoneCodeInvalid, PhoneCodeExpired,
+        FloodWait, PhoneNumberBanned, PhoneNumberUnoccupied, ApiIdInvalid
+    )
+except ImportError as e:
+    raise ImportError(
+        "Pyrogram is not installed or is too old. "
+        "Please install pyrogram>=2.0.0 with: pip install pyrogram>=2.0.0"
+    ) from e
 
 from telegram import (
     Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand
