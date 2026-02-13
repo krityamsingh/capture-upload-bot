@@ -29,7 +29,7 @@ from pyrogram.errors import (
     SessionPasswordNeeded, PhoneCodeInvalid, PhoneCodeExpired,
     FloodWait, PhoneNumberBanned, PhoneNumberUnoccupied, ApiIdInvalid
 )
-from pyrogram.session import StringSession
+from pyrogram import StringSession
 
 from telegram import (
     Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand
@@ -1011,3 +1011,4 @@ if __name__ == "__main__":
     bot = TelegramEnterpriseBot()
     asyncio.run(bot.initialize())
     bot.run()
+
