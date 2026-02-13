@@ -1,4 +1,4 @@
-pyrogram==2.0.115
+pyrogram
 python-telegram-bot[job-queue]==20.6
 motor==3.3.2
 aiohttp==3.9.1
