@@ -23,13 +23,22 @@ from urllib.parse import urlparse
 
 import pymongo
 from pymongo.collection import Collection
+
+# Pyrogram imports with fallback for StringSession (compatible with v1 and v2)
+try:
+    from pyrogram import StringSession
+except ImportError:
+    try:
+        from pyrogram.client import StringSession
+    except ImportError:
+        from pyrogram.session import StringSession
+
 from pyrogram import Client, filters, enums
 from pyrogram.raw import functions, types
 from pyrogram.errors import (
     SessionPasswordNeeded, PhoneCodeInvalid, PhoneCodeExpired,
     FloodWait, PhoneNumberBanned, PhoneNumberUnoccupied, ApiIdInvalid
 )
-from pyrogram import StringSession
 
 from telegram import (
     Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand
@@ -1011,4 +1020,3 @@ if __name__ == "__main__":
     bot = TelegramEnterpriseBot()
     asyncio.run(bot.initialize())
     bot.run()
-
