@@ -3,11 +3,11 @@
 """
 Telegram Enterprise Reporting Bot
 - Uses Pyrogram for Telegram client API
-- Sessions stored in MongoDB
+- Sessions stored in MongoDB as strings
 - Proxies fetched from @ProxyMTProto channel
 - Rotates proxy after 9 reports per account
 - Reports users, groups, channels, messages, and profile pictures
-- Logs bot messages to a specified group
+- Logs user activity to specified group
 """
 
 import asyncio
@@ -15,6 +15,7 @@ import logging
 import re
 import time
 import random
+import uuid
 from datetime import datetime, timedelta
 from typing import Optional, Dict, List, Any, Tuple
 from dataclasses import dataclass, field
@@ -28,8 +29,7 @@ from pyrogram.errors import (
     SessionPasswordNeeded, PhoneCodeInvalid, PhoneCodeExpired,
     FloodWait, PhoneNumberBanned, PhoneNumberUnoccupied, ApiIdInvalid
 )
-from pyrogram.storage import Storage
-import pyrogram.utils
+from pyrogram.session import StringSession
 
 from telegram import (
     Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand
@@ -69,86 +69,16 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# ==================== CUSTOM PYROGRAM STORAGE ====================
-class MongoStorage(Storage):
-    """
-    Stores Pyrogram session data in MongoDB.
-    """
-    def __init__(self, name: str, collection: Collection):
-        super().__init__(name)
-        self.collection = collection
-        self.data = {}
-
-    async def open(self):
-        doc = self.collection.find_one({"_id": self.name})
-        if doc:
-            self.data = doc.get("data", {})
-        else:
-            self.data = {}
-
-    async def save(self):
-        self.collection.update_one(
-            {"_id": self.name},
-            {"$set": {"data": self.data}},
-            upsert=True
-        )
-
-    async def close(self):
-        pass
-
-    async def delete(self):
-        self.collection.delete_one({"_id": self.name})
-
-    # Required storage methods
-    async def set_dc(self, dc_id: int, auth_key: bytes):
-        self.data["dc_id"] = dc_id
-        self.data["auth_key"] = auth_key.hex() if auth_key else None
-        await self.save()
-
-    async def get_dc(self) -> Tuple[int, bytes]:
-        dc_id = self.data.get("dc_id")
-        auth_key_hex = self.data.get("auth_key")
-        auth_key = bytes.fromhex(auth_key_hex) if auth_key_hex else None
-        return dc_id, auth_key
-
-    async def set_user(self, user):
-        self.data["user"] = user.write() if user else None
-        await self.save()
-
-    async def get_user(self):
-        data = self.data.get("user")
-        if data:
-            return types.User.read(data)
-        return None
-
-    async def update_peers(self, peers):
-        for peer in peers:
-            self.data[f"peer_{peer.id}"] = peer.write()
-        await self.save()
-
-    async def get_peer_by_id(self, peer_id: int):
-        data = self.data.get(f"peer_{peer_id}")
-        if data:
-            return pyrogram.utils.get_peer(types.Peer read(data))  # Simplified
-        return None
-
-    # ... other methods (get_peer_by_username, get_peer_by_phone) can be added if needed
-
 # ==================== PROXY FETCHER ====================
 async def fetch_proxies_from_channel(client: Client, limit: int = 50) -> List[str]:
-    """
-    Fetch proxy strings from the @ProxyMTProto channel.
-    Returns list of proxy URLs.
-    """
+    """Fetch proxy strings from the @ProxyMTProto channel."""
     proxies = []
     try:
         chat = await client.get_chat(PROXY_CHANNEL)
         async for msg in client.get_chat_history(chat.id, limit=limit):
             if msg.text:
-                # Find all proxy links in the message
                 found = re.findall(r'(socks5://[^\s]+|mtproto://[^\s]+)', msg.text)
                 proxies.extend(found)
-        # Remove duplicates
         proxies = list(set(proxies))
         logger.info(f"Fetched {len(proxies)} proxies from {PROXY_CHANNEL}")
     except Exception as e:
@@ -156,14 +86,10 @@ async def fetch_proxies_from_channel(client: Client, limit: int = 50) -> List[st
     return proxies
 
 def parse_proxy(proxy_str: str) -> Optional[Dict]:
-    """
-    Convert proxy string to Pyrogram proxy dict.
-    Supports socks5:// and mtproto://.
-    """
+    """Convert proxy string to Pyrogram proxy dict."""
     try:
         parsed = urlparse(proxy_str)
         if parsed.scheme == 'mtproto':
-            # MTProto proxy: secret is in query
             secret = parsed.query.split('=')[-1] if parsed.query else ''
             return {
                 'scheme': 'mtproto',
@@ -172,7 +98,6 @@ def parse_proxy(proxy_str: str) -> Optional[Dict]:
                 'secret': secret
             }
         else:
-            # SOCKS5 proxy
             return {
                 'scheme': parsed.scheme,
                 'hostname': parsed.hostname,
@@ -339,13 +264,11 @@ class AccountManager:
         self.load_accounts()
 
     def load_accounts(self):
-        """Load accounts from MongoDB."""
         for doc in accounts_collection.find():
             acc = TelegramAccount.from_dict(doc)
             self.accounts[acc.phone] = acc
 
     def save_account(self, account: TelegramAccount):
-        """Save or update an account in MongoDB."""
         accounts_collection.update_one(
             {"phone": account.phone},
             {"$set": account.to_dict()},
@@ -353,45 +276,61 @@ class AccountManager:
         )
 
     async def fetch_proxies(self, client: Client):
-        """Fetch proxies from channel and store in pool."""
         self.proxy_pool = await fetch_proxies_from_channel(client)
-        # Also cache in MongoDB
         proxies_collection.update_one(
             {"_id": "proxy_pool"},
             {"$set": {"proxies": self.proxy_pool, "updated": datetime.now().isoformat()}},
             upsert=True
         )
 
-    def get_next_proxy(self, account: TelegramAccount) -> Optional[str]:
-        """Return next proxy for account (round-robin)."""
+    def get_next_proxy(self, account: Optional[TelegramAccount] = None) -> Optional[str]:
         if not self.proxy_pool:
             return None
-        idx = account.proxy_index % len(self.proxy_pool)
-        account.proxy_index += 1
-        return self.proxy_pool[idx]
+        if account:
+            idx = account.proxy_index % len(self.proxy_pool)
+            account.proxy_index += 1
+            return self.proxy_pool[idx]
+        else:
+            return self.proxy_pool[0] if self.proxy_pool else None
+
+    async def save_session_string(self, phone: str, client: Client):
+        session_string = await client.export_session_string()
+        session_name = phone.replace('+', '')
+        sessions_collection.update_one(
+            {"_id": session_name},
+            {"$set": {"session": session_string}},
+            upsert=True
+        )
 
     async def create_client(self, phone: str, proxy: Optional[str] = None) -> Tuple[Client, bool]:
-        """
-        Create a Pyrogram client for the phone, using MongoDB storage.
-        Returns (client, is_authorized).
-        """
         session_name = phone.replace('+', '')
-        storage = MongoStorage(session_name, sessions_collection)
+        doc = sessions_collection.find_one({"_id": session_name})
+        session_string = doc.get("session") if doc else None
         proxy_dict = parse_proxy(proxy) if proxy else None
-        client = Client(
-            name=session_name,
-            api_id=API_ID,
-            api_hash=API_HASH,
-            proxy=proxy_dict,
-            storage=storage,
-            in_memory=True
-        )
+
+        if session_string:
+            client = Client(
+                name=session_name,
+                session_string=session_string,
+                api_id=API_ID,
+                api_hash=API_HASH,
+                proxy=proxy_dict,
+                in_memory=True
+            )
+        else:
+            client = Client(
+                name=session_name,
+                api_id=API_ID,
+                api_hash=API_HASH,
+                proxy=proxy_dict,
+                in_memory=True
+            )
+
         await client.connect()
         authorized = await client.is_user_authorized()
         return client, authorized
 
     async def add_account(self, phone: str, proxy: Optional[str] = None) -> Tuple[bool, str, Optional[Client]]:
-        """Initiate adding a new account."""
         if phone in self.accounts:
             return False, "Account already exists", None
         client, authorized = await self.create_client(phone, proxy)
@@ -403,14 +342,13 @@ class AccountManager:
             status=AccountStatus.ACTIVE if authorized else AccountStatus.UNVERIFIED
         )
         if authorized:
-            # Already logged in, fetch info
             await self._update_account_info(account, client)
+            await self.save_session_string(phone, client)
         self.accounts[phone] = account
         self.save_account(account)
         return True, "Account added", client
 
     async def _update_account_info(self, account: TelegramAccount, client: Client):
-        """Fetch and store account details from Telegram."""
         try:
             me = await client.get_me()
             account.user_id = me.id
@@ -424,10 +362,8 @@ class AccountManager:
             logger.error(f"Failed to update account info for {account.phone}: {e}")
 
     async def send_otp(self, phone: str, client: Client) -> Tuple[bool, str]:
-        """Send OTP code to the phone."""
         try:
             sent = await client.send_code(phone)
-            # Store phone_code_hash in account for later verification
             acc = self.accounts.get(phone)
             if acc:
                 acc.otp_data = {"phone_code_hash": sent.phone_code_hash}
@@ -440,7 +376,6 @@ class AccountManager:
             return False, str(e)
 
     async def verify_otp(self, phone: str, code: str) -> Tuple[bool, str, Optional[Client]]:
-        """Verify OTP code and complete login."""
         acc = self.accounts.get(phone)
         if not acc or not acc.client:
             return False, "Account not found or client missing", None
@@ -448,6 +383,7 @@ class AccountManager:
         try:
             await client.sign_in(phone, code)
             await self._update_account_info(acc, client)
+            await self.save_session_string(phone, client)
             return True, "Login successful", client
         except SessionPasswordNeeded:
             acc.status = AccountStatus.NEED_PASSWORD
@@ -459,32 +395,28 @@ class AccountManager:
             return False, str(e), client
 
     async def verify_2fa(self, phone: str, password: str) -> Tuple[bool, str]:
-        """Verify 2FA password."""
         acc = self.accounts.get(phone)
         if not acc or not acc.client:
             return False, "Account not found"
         try:
             await acc.client.check_password(password)
             await self._update_account_info(acc, acc.client)
+            await self.save_session_string(phone, acc.client)
             return True, "2FA verified"
         except Exception as e:
             return False, str(e)
 
     async def rotate_proxy(self, phone: str) -> Tuple[bool, str]:
-        """Rotate proxy for an account (after 9 reports)."""
         acc = self.accounts.get(phone)
         if not acc:
             return False, "Account not found"
         new_proxy = self.get_next_proxy(acc)
         if not new_proxy:
             return False, "No proxies available"
-        # Stop old client
         if acc.client:
             await acc.client.stop()
-        # Create new client with new proxy
         client, authorized = await self.create_client(phone, new_proxy)
         if not authorized:
-            # Should not happen if session is valid
             return False, "Session lost after proxy change"
         acc.client = client
         acc.proxy = new_proxy
@@ -493,10 +425,8 @@ class AccountManager:
         return True, f"Proxy rotated to {new_proxy}"
 
     async def get_proxy_country(self, proxy: str) -> str:
-        """Get country of proxy by IP geolocation."""
         try:
             import aiohttp
-            # Extract host from proxy string
             if '@' in proxy:
                 host = proxy.split('@')[1].split(':')[0]
             else:
@@ -514,7 +444,6 @@ class ReportingEngine:
         self.account_manager = account_manager
         self.active_jobs: Dict[str, ReportJob] = {}
 
-    # Report reasons mapping for Pyrogram raw API
     REASON_MAP = {
         "spam": types.InputReportReasonSpam(),
         "violence": types.InputReportReasonViolence(),
@@ -530,8 +459,6 @@ class ReportingEngine:
                          category: str, description: str, user_id: int,
                          message_chat: Optional[str] = None,
                          message_id: Optional[int] = None) -> Tuple[bool, str, str]:
-        """Create a new report job."""
-        import uuid
         job_id = str(uuid.uuid4())[:8]
         job = ReportJob(
             job_id=job_id,
@@ -545,17 +472,14 @@ class ReportingEngine:
             message_id=message_id
         )
         self.active_jobs[job_id] = job
-        # Save to MongoDB
         jobs_collection.insert_one(job.to_dict())
         return True, "Job created", job_id
 
     async def process_job(self, job_id: str):
-        """Process a report job using available accounts."""
         job = self.active_jobs.get(job_id)
         if not job:
             return
         job.status = "processing"
-        # Get up to 3 active accounts
         accounts = [acc for acc in self.account_manager.accounts.values()
                     if acc.status == AccountStatus.ACTIVE][:3]
         if not accounts:
@@ -564,15 +488,12 @@ class ReportingEngine:
             self._finish_job(job)
             return
 
-        # For each account, perform the report
         for acc in accounts:
-            # Check if need proxy rotation
             if acc.report_count >= MAX_REPORTS_PER_PROXY:
                 rotated, msg = await self.account_manager.rotate_proxy(acc.phone)
                 if not rotated:
                     job.results.append({"account": acc.phone, "error": f"Proxy rotation failed: {msg}"})
                     continue
-            # Execute report
             result = await self._report_with_account(acc, job)
             job.results.append(result)
             job.accounts_used.append(acc.phone)
@@ -581,29 +502,21 @@ class ReportingEngine:
                 acc.total_reports += 1
                 acc.last_report_time = datetime.now()
                 self.account_manager.save_account(acc)
-        # Determine overall status
         successes = [r for r in job.results if r.get("success")]
         job.status = "completed" if successes else "failed"
         self._finish_job(job)
 
     async def _report_with_account(self, account: TelegramAccount, job: ReportJob) -> Dict:
-        """Perform report using a specific account."""
         client = account.client
         if not client or not client.is_connected:
             return {"account": account.phone, "success": False, "error": "Client not connected"}
         try:
-            # Resolve target
             if job.target_type == "user":
                 peer = await client.resolve_peer(job.target)
-            elif job.target_type in ["group", "channel"]:
-                peer = await client.resolve_peer(job.target)
             else:
-                return {"account": account.phone, "success": False, "error": "Unknown target type"}
-
+                peer = await client.resolve_peer(job.target)
             reason = self.REASON_MAP.get(job.category.lower(), types.InputReportReasonOther())
-
             if job.job_type == "message":
-                # Report a specific message
                 if not job.message_chat or not job.message_id:
                     return {"account": account.phone, "success": False, "error": "Message details missing"}
                 msg_peer = await client.resolve_peer(job.message_chat)
@@ -616,13 +529,10 @@ class ReportingEngine:
                     )
                 )
                 return {"account": account.phone, "success": True, "type": "message"}
-
             elif job.job_type == "profile":
-                # Check if user has profile picture
                 photos = await client.get_chat_photos(job.target)
                 if not photos:
                     return {"account": account.phone, "success": False, "error": "No profile picture"}
-                # Report the user (there's no direct profile pic report, so we report user with description)
                 await client.invoke(
                     functions.account.ReportPeer(
                         peer=peer,
@@ -631,8 +541,7 @@ class ReportingEngine:
                     )
                 )
                 return {"account": account.phone, "success": True, "type": "profile"}
-
-            else:  # entity (user/group/channel itself)
+            else:  # entity
                 await client.invoke(
                     functions.account.ReportPeer(
                         peer=peer,
@@ -641,14 +550,12 @@ class ReportingEngine:
                     )
                 )
                 return {"account": account.phone, "success": True, "type": "entity"}
-
         except FloodWait as e:
             return {"account": account.phone, "success": False, "error": f"Flood wait {e.value}s"}
         except Exception as e:
             return {"account": account.phone, "success": False, "error": str(e)}
 
     def _finish_job(self, job: ReportJob):
-        """Finalize job and update DB."""
         jobs_collection.update_one({"job_id": job.job_id}, {"$set": job.to_dict()})
         if job.job_id in self.active_jobs:
             del self.active_jobs[job.job_id]
@@ -676,7 +583,6 @@ class UserManager:
         if user_id in self.users:
             user = self.users[user_id]
             user.last_active = datetime.now()
-            # Update name if changed
             if username:
                 user.username = username
             if first_name:
@@ -714,14 +620,15 @@ class BotHandler:
         self.user_manager = user_manager
         self.account_manager = account_manager
         self.reporting_engine = reporting_engine
-        self.user_sessions = {}  # temp storage per user
+        self.user_sessions = {}
+        self.application = None  # will be set later
 
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         user = update.effective_user
         bot_user = self.user_manager.get_or_create(
             user.id, user.username, user.first_name, user.last_name
         )
-        await self._send_log(f"User {user.id} (@{user.username}) started the bot.")
+        await self._send_log(f"🆕 User {user.id} (@{user.username}) started the bot.")
         await update.message.reply_text(
             f"👋 Hello {user.first_name}!\n"
             f"Your role: {bot_user.role}\n\n"
@@ -734,7 +641,6 @@ class BotHandler:
         return self.MAIN
 
     async def add_account_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Start account addition process."""
         await update.message.reply_text(
             "Please send the phone number in international format:\n"
             "Example: `+1234567890`"
@@ -742,33 +648,28 @@ class BotHandler:
         return self.ADD_PHONE
 
     async def add_account_phone(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Receive phone number, create client, send OTP."""
         phone = update.message.text.strip()
         if not re.match(r'^\+\d{10,15}$', phone):
             await update.message.reply_text("Invalid phone number. Use format +1234567890")
             return self.ADD_PHONE
 
-        # Assign a proxy from pool (round-robin)
-        proxy = self.account_manager.get_next_proxy(None) if self.account_manager.proxy_pool else None
+        proxy = self.account_manager.get_next_proxy() if self.account_manager.proxy_pool else None
         success, msg, client = await self.account_manager.add_account(phone, proxy)
         if not success:
             await update.message.reply_text(f"Error: {msg}")
             return self.MAIN
 
         if client and not await client.is_user_authorized():
-            # Send OTP
             ok, msg = await self.account_manager.send_otp(phone, client)
             if not ok:
                 await update.message.reply_text(f"Failed to send OTP: {msg}")
                 return self.MAIN
-            # Store phone in session for later OTP input
             self.user_sessions[update.effective_user.id] = {"phone": phone}
             await update.message.reply_text(
                 "OTP sent to your phone. Please enter the 5-digit code."
             )
             return self.ADD_OTP
         else:
-            # Already authorized
             country = await self.account_manager.get_proxy_country(proxy) if proxy else "Unknown"
             await update.message.reply_text(
                 f"Account already logged in.\nProxy country: {country}"
@@ -776,7 +677,6 @@ class BotHandler:
             return self.MAIN
 
     async def add_account_otp(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Verify OTP code."""
         code = update.message.text.strip()
         if not code.isdigit() or len(code) != 5:
             await update.message.reply_text("Invalid code. Please enter 5 digits.")
@@ -790,18 +690,15 @@ class BotHandler:
 
         success, msg, client = await self.account_manager.verify_otp(phone, code)
         if success:
-            # Get proxy country
             acc = self.account_manager.accounts.get(phone)
             country = await self.account_manager.get_proxy_country(acc.proxy) if acc.proxy else "Unknown"
             await update.message.reply_text(
                 f"✅ Login successful!\nProxy country: {country}\nReports today: 0/{MAX_REPORTS_PER_PROXY}"
             )
-            await self._send_log(f"Account {phone} added successfully. Proxy: {acc.proxy}")
-            # Clear session
+            await self._send_log(f"✅ Account {phone} added successfully. Proxy: {acc.proxy}")
             self.user_sessions.pop(user_id, None)
             return self.MAIN
         elif msg == "2FA required":
-            # Store that 2FA is needed
             self.user_sessions[user_id] = {"phone": phone, "need_2fa": True}
             await update.message.reply_text(
                 "This account has 2FA enabled. Please enter your password."
@@ -812,7 +709,6 @@ class BotHandler:
             return self.ADD_OTP
 
     async def add_account_2fa(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle 2FA password."""
         password = update.message.text.strip()
         user_id = update.effective_user.id
         phone = self.user_sessions.get(user_id, {}).get("phone")
@@ -826,7 +722,7 @@ class BotHandler:
             await update.message.reply_text(
                 f"✅ 2FA verified! Account ready.\nProxy country: {country}"
             )
-            await self._send_log(f"Account {phone} added with 2FA. Proxy: {acc.proxy}")
+            await self._send_log(f"✅ Account {phone} added with 2FA. Proxy: {acc.proxy}")
         else:
             await update.message.reply_text(f"2FA failed: {msg}")
             return self.ADD_2FA
@@ -834,7 +730,6 @@ class BotHandler:
         return self.MAIN
 
     async def report_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Start report conversation."""
         keyboard = [
             [InlineKeyboardButton("👤 User", callback_data="target_user")],
             [InlineKeyboardButton("👥 Group", callback_data="target_group")],
@@ -850,7 +745,7 @@ class BotHandler:
         query = update.callback_query
         await query.answer()
         user_id = query.from_user.id
-        target_type = query.data.split('_')[1]  # user, group, channel
+        target_type = query.data.split('_')[1]
         self.user_sessions[user_id] = {"target_type": target_type}
         if target_type == "user":
             await query.edit_message_text(
@@ -885,7 +780,6 @@ class BotHandler:
             )
             return self.REPORT_USER_OPTION
         else:
-            # Group or channel: ask entity or message
             keyboard = [
                 [InlineKeyboardButton(f"📢 Report entire {target_type}", callback_data="entity_whole")],
                 [InlineKeyboardButton("💬 Report a specific message", callback_data="entity_message")]
@@ -900,7 +794,7 @@ class BotHandler:
         query = update.callback_query
         await query.answer()
         user_id = query.from_user.id
-        option = query.data  # user_profile or user_message
+        option = query.data
         sess = self.user_sessions.get(user_id)
         if not sess:
             await query.edit_message_text("Session expired.")
@@ -913,14 +807,13 @@ class BotHandler:
             )
             return self.REPORT_MESSAGE_LINK
         else:
-            # For profile, proceed to category selection
             return await self._show_categories(query, user_id)
 
     async def report_entity_option_cb(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         query = update.callback_query
         await query.answer()
         user_id = query.from_user.id
-        option = query.data  # entity_whole or entity_message
+        option = query.data
         sess = self.user_sessions.get(user_id)
         if not sess:
             await query.edit_message_text("Session expired.")
@@ -938,7 +831,6 @@ class BotHandler:
     async def report_message_link(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_id = update.effective_user.id
         link = update.message.text.strip()
-        # Extract chat and message id
         match = re.search(r't\.me/([^/]+)/(\d+)', link)
         if not match:
             await update.message.reply_text("Invalid message link. Please provide a valid t.me link.")
@@ -954,7 +846,6 @@ class BotHandler:
         return await self._show_categories(update.message, user_id, via_message=True)
 
     async def _show_categories(self, target, user_id, via_message=False):
-        """Show category selection keyboard."""
         keyboard = []
         categories = [
             ("spam", "Spam"),
@@ -1000,11 +891,9 @@ class BotHandler:
         if not sess:
             await update.message.reply_text("Session expired.")
             return self.MAIN
-        # Create job
         target = sess["target"]
         target_type = sess["target_type"]
         category = sess["category"]
-        # Determine job_type
         if target_type == "user" and sess.get("user_option") == "user_profile":
             job_type = "profile"
         elif sess.get("user_option") == "user_message" or sess.get("entity_option") == "entity_message":
@@ -1025,16 +914,13 @@ class BotHandler:
         )
         if success:
             await update.message.reply_text(f"✅ Report job created! Job ID: {job_id}\nProcessing started...")
-            # Process the job asynchronously
             asyncio.create_task(self.reporting_engine.process_job(job_id))
         else:
             await update.message.reply_text(f"❌ Failed to create job: {msg}")
-        # Clear session
         self.user_sessions.pop(user_id, None)
         return self.MAIN
 
     async def accounts_list(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """List all accounts added by the user (simplified: show all accounts)."""
         if not self.account_manager.accounts:
             await update.message.reply_text("No accounts added yet.")
             return
@@ -1055,14 +941,12 @@ class BotHandler:
         await update.message.reply_text(help_text)
 
     async def cancel(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Cancel current conversation."""
         user_id = update.effective_user.id
         self.user_sessions.pop(user_id, None)
         await update.message.reply_text("Operation cancelled.")
         return self.MAIN
 
     async def _send_log(self, text: str):
-        """Send a log message to the designated group."""
         try:
             await self.application.bot.send_message(LOG_GROUP_ID, text)
         except Exception as e:
@@ -1078,9 +962,6 @@ class TelegramEnterpriseBot:
         self.application = None
 
     async def initialize(self):
-        """Initialize bot components."""
-        # Fetch proxies using a temporary client (or use bot's own client)
-        # We'll use a separate client for proxy fetching
         temp_client = Client("proxy_fetcher", api_id=API_ID, api_hash=API_HASH)
         await temp_client.start()
         await self.account_manager.fetch_proxies(temp_client)
@@ -1088,13 +969,10 @@ class TelegramEnterpriseBot:
         logger.info(f"Proxy pool: {len(self.account_manager.proxy_pool)} proxies")
 
     def run(self):
-        """Start the bot."""
-        # Build application
         app = Application.builder().token(BOT_TOKEN).build()
         self.application = app
-        self.bot_handler.application = app  # for logging
+        self.bot_handler.application = app
 
-        # Add conversation handlers
         conv_handler = ConversationHandler(
             entry_points=[
                 CommandHandler("start", self.bot_handler.start),
@@ -1125,7 +1003,6 @@ class TelegramEnterpriseBot:
         )
         app.add_handler(conv_handler)
 
-        # Run bot
         logger.info("Bot started.")
         app.run_polling()
 
