@@ -30,22 +30,8 @@ class CatboxUploader:
         """Ultra-fast upload to Catbox.moe - optimized for speed"""
         start_time = time.time()
         
-        # Prepare form data
-        data = aiohttp.FormData()
-        
-        # Add file
+        # Read file payload once so retries can rebuild form-data safely
         file_data = file_bytes.getvalue() if hasattr(file_bytes, 'getvalue') else file_bytes
-        data.add_field('fileToUpload', 
-                      file_data,
-                      filename=filename,
-                      content_type=self._get_content_type(filename))
-        
-        # Add required parameters
-        data.add_field('reqtype', 'fileupload')
-        
-        # Add user hash if API key is provided
-        if self.api_key:
-            data.add_field('userhash', self.api_key)
         
         headers = {
             'User-Agent': 'Catbox-Upload-Bot/2.0',
@@ -55,6 +41,20 @@ class CatboxUploader:
         # Upload with retry mechanism
         for attempt in range(self.max_retries):
             try:
+                # IMPORTANT: create a fresh FormData object on each attempt.
+                # aiohttp consumes the payload stream during the first request,
+                # so reusing it causes: "Form data has been processed already".
+                data = aiohttp.FormData()
+                data.add_field(
+                    'fileToUpload',
+                    file_data,
+                    filename=filename,
+                    content_type=self._get_content_type(filename),
+                )
+                data.add_field('reqtype', 'fileupload')
+                if self.api_key:
+                    data.add_field('userhash', self.api_key)
+
                 async with aiohttp.ClientSession() as session:
                     timeout = aiohttp.ClientTimeout(total=self.timeout)
                     
