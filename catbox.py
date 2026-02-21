@@ -30,22 +30,9 @@ class CatboxUploader:
         """Ultra-fast upload to Catbox.moe - optimized for speed"""
         start_time = time.time()
         
-        # Prepare form data
-        data = aiohttp.FormData()
-        
-        # Add file
+        # Prepare immutable file payload once and rebuild multipart form per retry.
+        # aiohttp form objects are one-shot streams and cannot be reused.
         file_data = file_bytes.getvalue() if hasattr(file_bytes, 'getvalue') else file_bytes
-        data.add_field('fileToUpload', 
-                      file_data,
-                      filename=filename,
-                      content_type=self._get_content_type(filename))
-        
-        # Add required parameters
-        data.add_field('reqtype', 'fileupload')
-        
-        # Add user hash if API key is provided
-        if self.api_key:
-            data.add_field('userhash', self.api_key)
         
         headers = {
             'User-Agent': 'Catbox-Upload-Bot/2.0',
@@ -55,6 +42,8 @@ class CatboxUploader:
         # Upload with retry mechanism
         for attempt in range(self.max_retries):
             try:
+                data = self._build_form_data(file_data, filename)
+
                 async with aiohttp.ClientSession() as session:
                     timeout = aiohttp.ClientTimeout(total=self.timeout)
                     
@@ -123,7 +112,7 @@ class CatboxUploader:
                         'error': f'Upload timeout after {self.timeout} seconds',
                         'upload_time': self.timeout
                     }
-                    
+
             except Exception as e:
                 error_msg = f"Upload error (attempt {attempt + 1}): {str(e)}"
                 logger.error(error_msg)
@@ -137,6 +126,22 @@ class CatboxUploader:
                         'error': str(e),
                         'upload_time': time.time() - start_time
                     }
+
+    def _build_form_data(self, file_data: bytes, filename: str) -> aiohttp.FormData:
+        """Create a fresh multipart payload for each upload attempt."""
+        data = aiohttp.FormData()
+        data.add_field(
+            'fileToUpload',
+            file_data,
+            filename=filename,
+            content_type=self._get_content_type(filename)
+        )
+        data.add_field('reqtype', 'fileupload')
+
+        if self.api_key:
+            data.add_field('userhash', self.api_key)
+
+        return data
     
     async def test_connection(self) -> Dict[str, Any]:
         """Test Catbox connection and speed"""
