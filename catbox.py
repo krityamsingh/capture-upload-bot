@@ -30,7 +30,8 @@ class CatboxUploader:
         """Ultra-fast upload to Catbox.moe - optimized for speed"""
         start_time = time.time()
         
-        # Read file payload once so retries can rebuild form-data safely
+        # Prepare immutable file payload once and rebuild multipart form per retry.
+        # aiohttp form objects are one-shot streams and cannot be reused.
         file_data = file_bytes.getvalue() if hasattr(file_bytes, 'getvalue') else file_bytes
         
         headers = {
@@ -38,24 +39,16 @@ class CatboxUploader:
             'Accept': 'application/json',
         }
         
-        # Upload with retry mechanism
-        for attempt in range(self.max_retries):
-            try:
-                # IMPORTANT: create a fresh FormData object on each attempt.
-                # aiohttp consumes the payload stream during the first request,
-                # so reusing it causes: "Form data has been processed already".
-                data = aiohttp.FormData()
-                data.add_field(
-                    'fileToUpload',
-                    file_data,
-                    filename=filename,
-                    content_type=self._get_content_type(filename),
-                )
-                data.add_field('reqtype', 'fileupload')
-                if self.api_key:
-                    data.add_field('userhash', self.api_key)
+        # Use context manager session or create new one
+        session = self.session or aiohttp.ClientSession()
+        close_session = self.session is None
+        
+        try:
+            for attempt in range(self.max_retries):
+                try:
+                    # Create fresh form data for each attempt - critical for retries
+                    data = self._build_form_data(file_data, filename)
 
-                async with aiohttp.ClientSession() as session:
                     timeout = aiohttp.ClientTimeout(total=self.timeout)
                     
                     async with session.post(
@@ -110,33 +103,53 @@ class CatboxUploader:
                                     'attempt': attempt + 1
                                 }
                                 
-            except asyncio.TimeoutError:
-                error_msg = f"Timeout after {self.timeout} seconds (attempt {attempt + 1})"
-                logger.warning(error_msg)
-                
-                if attempt < self.max_retries - 1:
-                    await asyncio.sleep(1)
-                    continue
-                else:
-                    return {
-                        'success': False,
-                        'error': f'Upload timeout after {self.timeout} seconds',
-                        'upload_time': self.timeout
-                    }
+                except asyncio.TimeoutError:
+                    error_msg = f"Timeout after {self.timeout} seconds (attempt {attempt + 1})"
+                    logger.warning(error_msg)
                     
-            except Exception as e:
-                error_msg = f"Upload error (attempt {attempt + 1}): {str(e)}"
-                logger.error(error_msg)
-                
-                if attempt < self.max_retries - 1:
-                    await asyncio.sleep(1)
-                    continue
-                else:
-                    return {
-                        'success': False,
-                        'error': str(e),
-                        'upload_time': time.time() - start_time
-                    }
+                    if attempt < self.max_retries - 1:
+                        await asyncio.sleep(1)
+                        continue
+                    else:
+                        return {
+                            'success': False,
+                            'error': f'Upload timeout after {self.timeout} seconds',
+                            'upload_time': self.timeout
+                        }
+
+                except Exception as e:
+                    error_msg = f"Upload error (attempt {attempt + 1}): {str(e)}"
+                    logger.error(error_msg)
+                    
+                    if attempt < self.max_retries - 1:
+                        await asyncio.sleep(1)
+                        continue
+                    else:
+                        return {
+                            'success': False,
+                            'error': str(e),
+                            'upload_time': time.time() - start_time
+                        }
+        finally:
+            # Only close if we created the session
+            if close_session:
+                await session.close()
+
+    def _build_form_data(self, file_data: bytes, filename: str) -> aiohttp.FormData:
+        """Create a fresh multipart payload for each upload attempt."""
+        data = aiohttp.FormData()
+        data.add_field(
+            'fileToUpload',
+            file_data,
+            filename=filename,
+            content_type=self._get_content_type(filename)
+        )
+        data.add_field('reqtype', 'fileupload')
+
+        if self.api_key:
+            data.add_field('userhash', self.api_key)
+
+        return data
     
     async def test_connection(self) -> Dict[str, Any]:
         """Test Catbox connection and speed"""

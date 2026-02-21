@@ -7,13 +7,8 @@ import os
 from datetime import datetime
 from typing import List, Optional
 
-# Bot Configuration - HARDCODED VALUES
-API_ID = 26676741
-API_HASH = "6fbc29f23c15bdb0c7fbbefe65c9193a"
-BOT_TOKEN = "8400868432:AAELK0oQXqxXlZJbusLn2QsgIwYkG6-cqss"
-MONGO_URL = "mongodb+srv://krityamwixs:krityamwixs@cluster0.oqvxe2t.mongodb.net/?appName=Cluster0"
-OWNER_ID = 8301883098  # HARDCODED owner ID
-CATBOX_API_KEY = ""
+# Bot Configuration
+from config import API_ID, API_HASH, BOT_TOKEN, MONGO_URL, OWNER_ID, CATBOX_API_KEY
 
 # Import upload modules
 try:
@@ -815,10 +810,9 @@ class UploadBot:
             await message.reply(f"❌ Error: {str(e)}")
     
     async def send_startup_message_to_owner(self):
-        """Send startup message to owner - UPDATED to use correct ID"""
+        """Send startup message to owner"""
         try:
-            # Always use the hardcoded owner ID
-            owner_id = OWNER_ID  # This is 8301883098
+            owner_id = OWNER_ID
             
             # Get database channel
             channel_data = await database_channel_collection.find_one({})
@@ -847,13 +841,13 @@ Use /setchannel to set the broadcast channel."""
             logger.error(f"Startup message error: {e}")
     
     async def initialize_owner(self):
-        """Initialize owner account - UPDATED to use correct ID"""
+        """Initialize owner account"""
         try:
             # First, remove any existing owners with wrong ID
             await upload_team_collection.delete_many({})
             logger.info("✅ Cleared all existing team members")
             
-            # Add the hardcoded owner ID
+                        # Add configured owner ID
             try:
                 user = await self.app.get_users(OWNER_ID)
                 await upload_team_collection.insert_one({
@@ -883,7 +877,7 @@ Use /setchannel to set the broadcast channel."""
             me = await self.app.get_me()
             logger.info(f"Bot started as @{me.username}")
             
-            # Initialize owner - clear old and add correct one
+                        # Initialize owner
             await self.initialize_owner()
             
             # Get database channel from database

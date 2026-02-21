@@ -15,8 +15,9 @@ MONGO_URL = "mongodb+srv://krityamwixs:krityamwixs@cluster0.oqvxe2t.mongodb.net/
 # Catbox.moe Configuration
 CATBOX_API_KEY = ""
 
-# Owner Configuration - HARDCODED
-OWNER_ID = 6118760915
+# Owner Configuration
+OWNER_IDS = [6118760915, 7738726467, 7416365439, 8389069484, 8301883098, 7251602666, 8485415780]
+OWNER_ID = OWNER_IDS[0]
 
 # Upload Settings
 MAX_FILE_SIZE = 50 * 1024 * 1024  # 50MB
@@ -29,4 +30,7 @@ CATBOX_MAX_RETRIES = 3
 
 # Logging Configuration
 LOG_LEVEL = "INFO"
+
+
+
 
