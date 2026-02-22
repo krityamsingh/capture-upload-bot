@@ -3,172 +3,124 @@ import asyncio
 import json
 import time
 import hashlib
-from typing import Dict, Any, Optional, Tuple
-from io import BytesIO
+import os
 import logging
-from config import CATBOX_API_KEY, CATBOX_UPLOAD_URL, CATBOX_TIMEOUT, CATBOX_MAX_RETRIES
+from typing import Dict, Any, Optional, Union, BinaryIO
+from io import BytesIO
+
+# Import your config values (adjust as needed)
+from config import (
+    CATBOX_API_KEY,
+    CATBOX_UPLOAD_URL,
+    CATBOX_TIMEOUT,
+    CATBOX_MAX_RETRIES,
+    CATBOX_MAX_FILE_SIZE  # add this to config, e.g., 100 * 1024 * 1024 (100 MB)
+)
 
 logger = logging.getLogger(__name__)
 
+
 class CatboxUploader:
-    def __init__(self, api_key: Optional[str] = None):
+    """
+    Async uploader for Catbox.moe with support for both in-memory bytes and file paths.
+    Optimised for reliability and speed with proper error handling and retries.
+    """
+
+    def __init__(
+        self,
+        api_key: Optional[str] = None,
+        timeout: Optional[int] = None,
+        max_retries: Optional[int] = None,
+        max_file_size: Optional[int] = None
+    ):
         self.api_key = api_key or CATBOX_API_KEY
         self.upload_url = CATBOX_UPLOAD_URL
-        self.session = None
-        self.timeout = CATBOX_TIMEOUT
-        self.max_retries = CATBOX_MAX_RETRIES
-        
+        self.timeout = timeout or CATBOX_TIMEOUT
+        self.max_retries = max_retries or CATBOX_MAX_RETRIES
+        self.max_file_size = max_file_size or getattr(CATBOX_MAX_FILE_SIZE, None, 100 * 1024 * 1024)  # default 100 MB
+        self.session: Optional[aiohttp.ClientSession] = None
+
     async def __aenter__(self):
         self.session = aiohttp.ClientSession()
         return self
-    
+
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         if self.session:
             await self.session.close()
-    
+
+    # ==================== Public Methods ====================
+
     async def upload_bytes(self, file_bytes: BytesIO, filename: str) -> Dict[str, Any]:
-        """Ultra-fast upload to Catbox.moe - optimized for speed"""
-        start_time = time.time()
-        
-        # Prepare immutable file payload once and rebuild multipart form per retry.
-        # aiohttp form objects are one-shot streams and cannot be reused.
-        file_data = file_bytes.getvalue() if hasattr(file_bytes, 'getvalue') else file_bytes
-        
-        headers = {
-            'User-Agent': 'Catbox-Upload-Bot/2.0',
-            'Accept': 'application/json',
-        }
-        
-        # Use context manager session or create new one
-        session = self.session or aiohttp.ClientSession()
-        close_session = self.session is None
-        
-        try:
-            for attempt in range(self.max_retries):
-                try:
-                    # Create fresh form data for each attempt - critical for retries
-                    data = self._build_form_data(file_data, filename)
+        """
+        Upload a file from an in-memory BytesIO object.
+        Recommended for small files only (e.g., < 10 MB) to avoid memory issues.
+        For larger files, use `upload_file()` instead.
+        """
+        # Get the size
+        file_bytes.seek(0, os.SEEK_END)
+        size = file_bytes.tell()
+        file_bytes.seek(0)
 
-                    timeout = aiohttp.ClientTimeout(total=self.timeout)
-                    
-                    async with session.post(
-                        self.upload_url,
-                        data=data,
-                        headers=headers,
-                        timeout=timeout
-                    ) as response:
-                        
-                        response_text = await response.text()
-                        upload_time = time.time() - start_time
-                        
-                        if response.status == 200:
-                            # Catbox returns just the URL on success
-                            result_url = response_text.strip()
-                            
-                            if result_url and result_url.startswith('http'):
-                                # Extract file ID from URL
-                                file_id = result_url.split('/')[-1].split('.')[0]
-                                
-                                return {
-                                    'success': True,
-                                    'url': result_url,
-                                    'direct_url': result_url,
-                                    'view_url': result_url,
-                                    'file_id': file_id,
-                                    'filename': filename,
-                                    'size': len(file_data),
-                                    'upload_time': upload_time,
-                                    'attempt': attempt + 1,
-                                    'message': 'File uploaded successfully to Catbox.moe'
-                                }
-                            else:
-                                return {
-                                    'success': False,
-                                    'error': f'Invalid response from Catbox: {response_text}',
-                                    'upload_time': upload_time,
-                                    'attempt': attempt + 1
-                                }
-                        else:
-                            error_msg = f"HTTP {response.status}: {response_text[:200]}"
-                            logger.warning(f"Upload attempt {attempt + 1} failed: {error_msg}")
-                            
-                            if attempt < self.max_retries - 1:
-                                await asyncio.sleep(1)  # Wait before retry
-                                continue
-                            else:
-                                return {
-                                    'success': False,
-                                    'error': error_msg,
-                                    'upload_time': upload_time,
-                                    'attempt': attempt + 1
-                                }
-                                
-                except asyncio.TimeoutError:
-                    error_msg = f"Timeout after {self.timeout} seconds (attempt {attempt + 1})"
-                    logger.warning(error_msg)
-                    
-                    if attempt < self.max_retries - 1:
-                        await asyncio.sleep(1)
-                        continue
-                    else:
-                        return {
-                            'success': False,
-                            'error': f'Upload timeout after {self.timeout} seconds',
-                            'upload_time': self.timeout
-                        }
+        # Warn if file is large
+        if size > 10 * 1024 * 1024:  # 10 MB
+            logger.warning(f"Large file ({size / 1024 / 1024:.2f} MB) uploaded via upload_bytes(). "
+                           f"Consider using upload_file() for better memory efficiency.")
 
-                except Exception as e:
-                    error_msg = f"Upload error (attempt {attempt + 1}): {str(e)}"
-                    logger.error(error_msg)
-                    
-                    if attempt < self.max_retries - 1:
-                        await asyncio.sleep(1)
-                        continue
-                    else:
-                        return {
-                            'success': False,
-                            'error': str(e),
-                            'upload_time': time.time() - start_time
-                        }
-        finally:
-            # Only close if we created the session
-            if close_session:
-                await session.close()
+        # Check size limit
+        if size > self.max_file_size:
+            return {
+                'success': False,
+                'error': f'File size ({size} bytes) exceeds the maximum allowed ({self.max_file_size} bytes).',
+                'filename': filename,
+                'size': size
+            }
 
-    def _build_form_data(self, file_data: bytes, filename: str) -> aiohttp.FormData:
-        """Create a fresh multipart payload for each upload attempt."""
-        data = aiohttp.FormData()
-        data.add_field(
-            'fileToUpload',
-            file_data,
-            filename=filename,
-            content_type=self._get_content_type(filename)
-        )
-        data.add_field('reqtype', 'fileupload')
+        # Read all bytes (still in memory, but we already warned)
+        data = file_bytes.getvalue()
+        return await self._upload(data, filename, size)
 
-        if self.api_key:
-            data.add_field('userhash', self.api_key)
+    async def upload_file(self, file_path: str) -> Dict[str, Any]:
+        """
+        Upload a file directly from disk by streaming it.
+        This is the preferred method for large files.
+        """
+        if not os.path.isfile(file_path):
+            return {
+                'success': False,
+                'error': f'File not found: {file_path}'
+            }
 
-        return data
-    
+        size = os.path.getsize(file_path)
+        filename = os.path.basename(file_path)
+
+        # Check size limit
+        if size > self.max_file_size:
+            return {
+                'success': False,
+                'error': f'File size ({size} bytes) exceeds the maximum allowed ({self.max_file_size} bytes).',
+                'filename': filename,
+                'size': size
+            }
+
+        # Open the file and pass the file object to the upload routine
+        # The file will be closed automatically after the upload
+        with open(file_path, 'rb') as f:
+            return await self._upload(f, filename, size)
+
     async def test_connection(self) -> Dict[str, Any]:
-        """Test Catbox connection and speed"""
+        """Test connectivity and speed by uploading a tiny 1KB file."""
         try:
-            start_time = time.time()
-            
-            # Create a small test file (1KB)
             test_data = b"A" * 1024
             test_bytes = BytesIO(test_data)
-            
             result = await self.upload_bytes(test_bytes, "test.txt")
-            
             if result['success']:
+                speed_kbps = 1024 / result['upload_time'] if result['upload_time'] > 0 else 0
                 return {
                     'success': True,
                     'service': 'Catbox.moe',
                     'url': result['url'],
                     'upload_time': result['upload_time'],
-                    'speed': f"{1024 / result['upload_time']:.2f} KB/s",
+                    'speed': f"{speed_kbps:.2f} KB/s",
                     'api_key_status': 'Active' if self.api_key else 'Anonymous',
                     'message': 'Catbox connection test successful'
                 }
@@ -179,19 +131,122 @@ class CatboxUploader:
                     'error': result.get('error', 'Unknown error'),
                     'message': 'Catbox connection test failed'
                 }
-                
         except Exception as e:
+            logger.exception("Connection test failed")
             return {
                 'success': False,
                 'service': 'Catbox.moe',
                 'error': str(e),
                 'message': 'Connection test failed'
             }
-    
+
+    # ==================== Internal Upload Logic ====================
+
+    async def _upload(self, file_data: Union[bytes, BinaryIO], filename: str, size: int) -> Dict[str, Any]:
+        """
+        Core upload routine.
+        :param file_data: Either bytes or an open binary file-like object (will be read as needed).
+        :param filename: Name of the file.
+        :param size: File size in bytes (used for logging and stats).
+        """
+        start_time = time.time()
+        session = self.session or aiohttp.ClientSession()
+        close_session = self.session is None
+
+        try:
+            for attempt in range(self.max_retries):
+                try:
+                    # Create a fresh FormData for each attempt (required because streams are consumed)
+                    data = aiohttp.FormData(quote_fields=False)
+
+                    # Add the file field
+                    # If file_data is bytes, it will be sent as a chunk; if it's a file-like, it will be streamed
+                    data.add_field(
+                        'fileToUpload',
+                        file_data if isinstance(file_data, bytes) else file_data,  # aiohttp handles both
+                        filename=filename,
+                        content_type=self._get_content_type(filename)
+                    )
+                    data.add_field('reqtype', 'fileupload')
+                    if self.api_key:
+                        data.add_field('userhash', self.api_key)
+
+                    timeout = aiohttp.ClientTimeout(total=self.timeout)
+                    async with session.post(
+                        self.upload_url,
+                        data=data,
+                        timeout=timeout
+                    ) as response:
+                        response_text = await response.text()
+                        upload_time = time.time() - start_time
+
+                        # Success case: Catbox returns the URL as plain text
+                        if response.status == 200 and response_text.startswith('http'):
+                            file_id = response_text.split('/')[-1].split('.')[0]
+                            return {
+                                'success': True,
+                                'url': response_text,
+                                'direct_url': response_text,
+                                'view_url': response_text,
+                                'file_id': file_id,
+                                'filename': filename,
+                                'size': size,
+                                'upload_time': upload_time,
+                                'attempt': attempt + 1,
+                                'message': 'File uploaded successfully to Catbox.moe'
+                            }
+
+                        # Error handling
+                        error_msg = f"HTTP {response.status}: {response_text[:200]}"
+                        logger.error(f"Upload failed (attempt {attempt + 1}): {error_msg}")
+
+                        # Decide whether to retry
+                        if response.status >= 500 and attempt < self.max_retries - 1:
+                            # Server error – may be temporary
+                            await asyncio.sleep(1)
+                            continue
+                        else:
+                            # Client error (4xx) or final attempt
+                            return {
+                                'success': False,
+                                'error': error_msg,
+                                'upload_time': upload_time,
+                                'attempt': attempt + 1
+                            }
+
+                except asyncio.TimeoutError:
+                    logger.warning(f"Timeout on attempt {attempt + 1}")
+                    if attempt < self.max_retries - 1:
+                        await asyncio.sleep(1)
+                    else:
+                        return {
+                            'success': False,
+                            'error': f'Upload timeout after {self.timeout} seconds',
+                            'upload_time': self.timeout,
+                            'attempt': attempt + 1
+                        }
+
+                except Exception as e:
+                    logger.exception(f"Unexpected error on attempt {attempt + 1}")
+                    if attempt < self.max_retries - 1:
+                        await asyncio.sleep(1)
+                    else:
+                        return {
+                            'success': False,
+                            'error': str(e),
+                            'upload_time': time.time() - start_time,
+                            'attempt': attempt + 1
+                        }
+
+        finally:
+            if close_session:
+                await session.close()
+
+    # ==================== Helpers ====================
+
     def _get_content_type(self, filename: str) -> str:
-        """Get content type based on filename"""
+        """Return MIME type based on file extension."""
         ext = filename.lower().split('.')[-1] if '.' in filename else ''
-        
         content_types = {
             'jpg': 'image/jpeg',
             'jpeg': 'image/jpeg',
@@ -203,19 +258,17 @@ class CatboxUploader:
             'webp': 'image/webp',
             'webm': 'video/webm',
             'txt': 'text/plain',
+            'pdf': 'application/pdf',
+            'zip': 'application/zip',
         }
-        
         return content_types.get(ext, 'application/octet-stream')
-    
+
     @staticmethod
     def calculate_md5(file_bytes: BytesIO) -> str:
-        """Calculate MD5 hash of file for duplicate checking"""
+        """Calculate MD5 hash of a BytesIO object (seek to 0 after)."""
         file_bytes.seek(0)
-        md5_hash = hashlib.md5()
-        
-        # Read in chunks for large files
+        hash_md5 = hashlib.md5()
         for chunk in iter(lambda: file_bytes.read(4096), b""):
-            md5_hash.update(chunk)
-        
+            hash_md5.update(chunk)
         file_bytes.seek(0)
-        return md5_hash.hexdigest()
+        return hash_md5.hexdigest()
