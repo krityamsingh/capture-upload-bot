@@ -8,14 +8,8 @@ import logging
 from typing import Dict, Any, Optional, Union, BinaryIO
 from io import BytesIO
 
-# Import your config values (adjust as needed)
-from config import (
-    CATBOX_API_KEY,
-    CATBOX_UPLOAD_URL,
-    CATBOX_TIMEOUT,
-    CATBOX_MAX_RETRIES,
-    CATBOX_MAX_FILE_SIZE  # add this to config, e.g., 100 * 1024 * 1024 (100 MB)
-)
+# Import config module and access attributes safely with defaults
+import config
 
 logger = logging.getLogger(__name__)
 
@@ -33,11 +27,15 @@ class CatboxUploader:
         max_retries: Optional[int] = None,
         max_file_size: Optional[int] = None
     ):
-        self.api_key = api_key or CATBOX_API_KEY
-        self.upload_url = CATBOX_UPLOAD_URL
-        self.timeout = timeout or CATBOX_TIMEOUT
-        self.max_retries = max_retries or CATBOX_MAX_RETRIES
-        self.max_file_size = max_file_size or getattr(CATBOX_MAX_FILE_SIZE, None, 100 * 1024 * 1024)  # default 100 MB
+        # Use provided values, otherwise fall back to config, then hardcoded defaults
+        self.api_key = api_key or getattr(config, 'CATBOX_API_KEY', None)
+        self.upload_url = getattr(config, 'CATBOX_UPLOAD_URL', 'https://catbox.moe/user/api.php')
+        self.timeout = timeout or getattr(config, 'CATBOX_TIMEOUT', 300)  # 5 minutes default
+        self.max_retries = max_retries or getattr(config, 'CATBOX_MAX_RETRIES', 3)
+        # Default max file size: 200 MB for registered users, 100 MB for anonymous
+        default_max_size = 200 * 1024 * 1024 if self.api_key else 100 * 1024 * 1024
+        self.max_file_size = max_file_size or getattr(config, 'CATBOX_MAX_FILE_SIZE', default_max_size)
+
         self.session: Optional[aiohttp.ClientSession] = None
 
     async def __aenter__(self):
@@ -47,6 +45,12 @@ class CatboxUploader:
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         if self.session:
             await self.session.close()
+
+    async def close(self):
+        """Manually close the session if not using context manager."""
+        if self.session:
+            await self.session.close()
+            self.session = None
 
     # ==================== Public Methods ====================
 
