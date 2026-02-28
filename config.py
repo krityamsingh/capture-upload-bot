@@ -31,6 +31,5 @@ CATBOX_MAX_RETRIES = 3
 # Logging Configuration
 LOG_LEVEL = "INFO"
 
-# The new database channel ID (you can also set it via /setchannel later)
-# This is only a fallback; the bot will read from the database.
-DEFAULT_DATABASE_CHANNEL = -1003869604435
+# Fixed database channel (no longer set via command)
+DATABASE_CHANNEL = -1003869604435
