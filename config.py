@@ -15,8 +15,8 @@ MONGO_URL = "mongodb+srv://krityamwixs:krityamwixs@cluster0.oqvxe2t.mongodb.net/
 # Catbox.moe Configuration
 CATBOX_API_KEY = ""
 
-# Owner Configuration – updated list
-OWNER_IDS = [6118760915, 7738726467, 7416365439, 8389069484, 8301883098, 7251602666, 8485415780, 8239819061]
+# Owner Configuration
+OWNER_IDS = [6118760915, 7738726467, 7416365439, 8389069484, 8301883098, 7251602666, 8485415780]
 OWNER_ID = OWNER_IDS[0]
 
 # Upload Settings
@@ -30,3 +30,7 @@ CATBOX_MAX_RETRIES = 3
 
 # Logging Configuration
 LOG_LEVEL = "INFO"
+
+# The new database channel ID (you can also set it via /setchannel later)
+# This is only a fallback; the bot will read from the database.
+DEFAULT_DATABASE_CHANNEL = -1003869604435
