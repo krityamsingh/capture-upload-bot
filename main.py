@@ -3,17 +3,18 @@ from pyrogram.types import Message, CallbackQuery
 import asyncio
 import logging
 import sys
-import os
 from datetime import datetime
-from typing import List, Optional
 
-from config import API_ID, API_HASH, BOT_TOKEN, MONGO_URL, OWNER_ID, CATBOX_API_KEY, DEFAULT_DATABASE_CHANNEL
+from config import (
+    API_ID, API_HASH, BOT_TOKEN, OWNER_ID,
+    CATBOX_API_KEY, DATABASE_CHANNEL
+)
 
 try:
     from upload_flow import UploadFlow
     from team_manager import TeamManager
     from utils import UploadUtils
-    from database import upload_team_collection, collection, database_channel_collection
+    from database import upload_team_collection, collection
     from catbox import CatboxUploader
 except ImportError as e:
     print(f"Import error: {e}")
@@ -38,7 +39,7 @@ class UploadBot:
         )
         self.upload_flow = UploadFlow(self.app)
         self.team_manager = TeamManager(self.app)
-        self.database_channel = None
+        self.database_channel = DATABASE_CHANNEL  # Hardcoded
         self.start_time = datetime.now()
         self.upload_count = 0
         self.register_handlers()
@@ -76,13 +77,7 @@ class UploadBot:
         async def team_command(client, message: Message):
             await self.team_manager.show_team(message)
 
-        @self.app.on_message(filters.command("setchannel") & filters.private)
-        async def set_channel_command(client, message: Message):
-            await self.handle_set_channel_command(message)
-
-        @self.app.on_message(filters.command("channel") & filters.private)
-        async def channel_command(client, message: Message):
-            await self.handle_channel_info(message)
+        # ❌ Removed /setchannel, /channel, /removechannel handlers
 
         @self.app.on_message(filters.command("testcat") & filters.private)
         async def test_catbox_command(client, message: Message):
@@ -104,10 +99,6 @@ class UploadBot:
         async def ping_command(client, message: Message):
             await self.handle_ping_command(message)
 
-        @self.app.on_message(filters.command("removechannel") & filters.private)
-        async def remove_channel_command(client, message: Message):
-            await self.handle_remove_channel(message)
-
         @self.app.on_callback_query()
         async def callback_handler(client, callback_query: CallbackQuery):
             await self.upload_flow.handle_callback(callback_query)
@@ -124,9 +115,6 @@ class UploadBot:
 /addteam - Add team member
 /rmteam - Remove team member
 /team - View team
-/setchannel - Set database channel
-/channel - View current channel
-/removechannel - Remove channel
 /testcat - Test Catbox connection
 /testchannel - Test channel access
 /stats - View statistics
@@ -134,11 +122,9 @@ class UploadBot:
 /ping - Check bot status
 
 ⚡ **Features:**
-• Database channel: Set one channel for broadcasting
+• Database channel: Fixed channel for broadcasting
 • Catbox.moe uploads (Under 8 seconds)
-• Ultra-fast file hosting
 • 50MB file size limit
-• Auto-recovery on restart
 
 ⚠️ **Note:** Upload commands only work in groups."""
             await message.reply(welcome_text)
@@ -243,183 +229,44 @@ class UploadBot:
         except Exception as e:
             await message.reply(f"❌ Error: {str(e)}")
 
-    async def handle_set_channel_command(self, message: Message):
-        if not message.from_user or not await UploadUtils.is_owner(message.from_user.id):
-            await message.reply("❌ Only owners can set database channel!")
-            return
-        try:
-            args = message.text.split()
-            if len(args) < 2:
-                await message.reply("❓ Usage: /setchannel <channel_id>\n\nExample: /setchannel -1001234567890")
-                return
-            channel_input = args[1]
-            channel_id = None
-            if channel_input.startswith('@'):
-                channel_input = channel_input[1:]
-                try:
-                    chat = await self.app.get_chat(channel_input)
-                    channel_id = chat.id
-                except Exception as e:
-                    await message.reply(f"❌ Could not find channel @{channel_input}")
-                    return
-            else:
-                try:
-                    channel_id = int(channel_input)
-                except ValueError:
-                    await message.reply("❌ Invalid channel ID! Must be a number.\nExample: -1001234567890")
-                    return
-
-            try:
-                chat = await self.app.get_chat(channel_id)
-                test_msg = await self.app.send_message(
-                    channel_id,
-                    "✅ Database channel test successful! This message will be deleted."
-                )
-                await asyncio.sleep(2)
-                await self.app.delete_messages(channel_id, test_msg.id)
-
-                await database_channel_collection.update_one(
-                    {},
-                    {"$set": {
-                        "channel_id": channel_id,
-                        "channel_title": chat.title,
-                        "set_by": message.from_user.id,
-                        "set_at": datetime.utcnow()
-                    }},
-                    upsert=True
-                )
-                self.database_channel = channel_id
-                self.upload_flow.set_database_channel(channel_id)
-
-                await message.reply(
-                    f"✅ Database channel set successfully!\n\n"
-                    f"📡 Channel: {chat.title}\n"
-                    f"🆔 ID: `{channel_id}`\n"
-                    f"👤 Set by: {message.from_user.first_name}\n"
-                    f"⏰ Set at: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
-                    f"⚠️ All future uploads will be broadcasted to this channel."
-                )
-            except Exception as e:
-                await message.reply(
-                    f"❌ Cannot access channel!\n\n"
-                    f"⚠️ Error: {str(e)}\n\n"
-                    f"🔍 Make sure:\n"
-                    f"1. Bot is added as admin\n"
-                    f"2. Channel ID is correct\n"
-                    f"3. For supergroups, use format: -1001234567890"
-                )
-        except Exception as e:
-            await message.reply(f"❌ Error: {str(e)}")
-
-    async def handle_channel_info(self, message: Message):
-        if not message.from_user or not await UploadUtils.is_uploader(message.from_user.id):
-            await message.reply("❌ You don't have permission!")
-            return
-        try:
-            channel_data = await database_channel_collection.find_one({})
-            if not channel_data or 'channel_id' not in channel_data:
-                await message.reply("❌ No database channel set!\n\nUse /setchannel to set one.")
-                return
-            channel_id = channel_data['channel_id']
-            channel_title = channel_data.get('channel_title', 'Unknown')
-            set_by = channel_data.get('set_by', 'Unknown')
-            set_at = channel_data.get('set_at', datetime.utcnow())
-            try:
-                chat = await self.app.get_chat(channel_id)
-                channel_title = chat.title
-                channel_status = "✅ Accessible"
-                try:
-                    member = await self.app.get_chat_member(channel_id, (await self.app.get_me()).id)
-                    can_post = member.privileges.can_post_messages if hasattr(member, 'privileges') else False
-                    permissions = f"📤 Can Post: {'✅' if can_post else '❌'}"
-                except:
-                    permissions = "⚠️ Could not check permissions"
-            except Exception as e:
-                channel_status = f"❌ Inaccessible - {str(e)}"
-                permissions = "❌ No permissions"
-            if isinstance(set_at, datetime):
-                set_at_str = set_at.strftime('%Y-%m-%d %H:%M:%S')
-            else:
-                set_at_str = str(set_at)
-            await message.reply(
-                f"📡 **Database Channel Information**\n\n"
-                f"📝 **Title:** {channel_title}\n"
-                f"🆔 **ID:** `{channel_id}`\n"
-                f"🔧 **Status:** {channel_status}\n"
-                f"🔑 **Permissions:** {permissions}\n"
-                f"👤 **Set by:** `{set_by}`\n"
-                f"⏰ **Set at:** {set_at_str}\n\n"
-                f"ℹ️ **Note:** All uploads are broadcasted to this channel."
-            )
-        except Exception as e:
-            await message.reply(f"❌ Error: {str(e)}")
-
     async def handle_test_channel(self, message: Message):
         if not message.from_user or not await UploadUtils.is_uploader(message.from_user.id):
             await message.reply("❌ You don't have permission!")
             return
-        try:
-            channel_data = await database_channel_collection.find_one({})
-            if not channel_data or 'channel_id' not in channel_data:
-                await message.reply("❌ No database channel set!\n\nUse /setchannel first.")
-                return
-            channel_id = channel_data['channel_id']
-            test_msg = await message.reply(f"🔄 Testing channel {channel_id}...")
-            try:
-                chat = await self.app.get_chat(channel_id)
-                test_channel_msg = await self.app.send_message(
-                    channel_id,
-                    "📡 Bot channel test - This message will be deleted."
-                )
-                await self.app.delete_messages(channel_id, test_channel_msg.id)
-                member = await self.app.get_chat_member(channel_id, (await self.app.get_me()).id)
-                can_post = member.privileges.can_post_messages if hasattr(member, 'privileges') else False
-                await test_msg.edit(
-                    f"✅ Channel Test Successful!\n\n"
-                    f"📝 Channel: {chat.title}\n"
-                    f"🆔 ID: `{channel_id}`\n"
-                    f"🔧 Status: ✅ Accessible\n"
-                    f"📤 Can Post: {'✅ Yes' if can_post else '❌ No'}\n"
-                    f"👤 Bot Status: {member.status}\n\n"
-                    f"⚠️ {'Bot can post to this channel!' if can_post else 'Bot cannot post! Make bot admin with post permissions.'}"
-                )
-            except Exception as e:
-                await test_msg.edit(
-                    f"❌ Channel Test Failed!\n\n"
-                    f"🆔 ID: `{channel_id}`\n"
-                    f"🔧 Status: ❌ Inaccessible\n"
-                    f"⚠️ Error: {str(e)}\n\n"
-                    f"🔍 Make sure:\n"
-                    f"1. Bot is added to the channel\n"
-                    f"2. Bot has admin permissions\n"
-                    f"3. Channel ID is correct"
-                )
-        except Exception as e:
-            await message.reply(f"❌ Error: {str(e)}")
-
-    async def handle_remove_channel(self, message: Message):
-        if not message.from_user or not await UploadUtils.is_owner(message.from_user.id):
-            await message.reply("❌ Only owners can remove database channel!")
+        channel_id = self.database_channel
+        if not channel_id:
+            await message.reply("❌ No database channel configured in code!")
             return
+        test_msg = await message.reply(f"🔄 Testing channel {channel_id}...")
         try:
-            channel_data = await database_channel_collection.find_one({})
-            if not channel_data or 'channel_id' not in channel_data:
-                await message.reply("❌ No database channel is currently set!")
-                return
-            channel_id = channel_data['channel_id']
-            channel_title = channel_data.get('channel_title', 'Unknown')
-            await database_channel_collection.delete_one({})
-            self.database_channel = None
-            self.upload_flow.set_database_channel(None)
-            await message.reply(
-                f"✅ Database channel removed successfully!\n\n"
-                f"📝 Channel: {channel_title}\n"
-                f"🆔 ID: `{channel_id}`\n\n"
-                f"⚠️ Warning: Uploads will NOT be broadcasted until a new channel is set!\n"
-                f"Use /setchannel to set a new broadcast channel."
+            chat = await self.app.get_chat(channel_id)
+            test_channel_msg = await self.app.send_message(
+                channel_id,
+                "📡 Bot channel test - This message will be deleted."
+            )
+            await self.app.delete_messages(channel_id, test_channel_msg.id)
+            member = await self.app.get_chat_member(channel_id, (await self.app.get_me()).id)
+            can_post = member.privileges.can_post_messages if hasattr(member, 'privileges') else False
+            await test_msg.edit(
+                f"✅ Channel Test Successful!\n\n"
+                f"📝 Channel: {chat.title}\n"
+                f"🆔 ID: `{channel_id}`\n"
+                f"🔧 Status: ✅ Accessible\n"
+                f"📤 Can Post: {'✅ Yes' if can_post else '❌ No'}\n"
+                f"👤 Bot Status: {member.status}\n\n"
+                f"⚠️ {'Bot can post to this channel!' if can_post else 'Bot cannot post! Make bot admin with post permissions.'}"
             )
         except Exception as e:
-            await message.reply(f"❌ Error: {str(e)}")
+            await test_msg.edit(
+                f"❌ Channel Test Failed!\n\n"
+                f"🆔 ID: `{channel_id}`\n"
+                f"🔧 Status: ❌ Inaccessible\n"
+                f"⚠️ Error: {str(e)}\n\n"
+                f"🔍 Make sure:\n"
+                f"1. Bot is added to the channel\n"
+                f"2. Bot has admin permissions\n"
+                f"3. Channel ID is correct"
+            )
 
     async def handle_ping_command(self, message: Message):
         start_time = datetime.now()
@@ -429,8 +276,7 @@ class UploadBot:
         uptime = datetime.now() - self.start_time
         hours, remainder = divmod(int(uptime.total_seconds()), 3600)
         minutes, seconds = divmod(remainder, 60)
-        channel_data = await database_channel_collection.find_one({})
-        channel_status = f"✅ Set (ID: {channel_data['channel_id']})" if channel_data and 'channel_id' in channel_data else "❌ Not set"
+        channel_status = f"✅ Set (ID: {self.database_channel})" if self.database_channel else "❌ Not set"
         status_text = f"""🏓 **Bot Status**
 
 📊 **System:**
@@ -460,16 +306,13 @@ class UploadBot:
             team_members = await upload_team_collection.count_documents({})
             catbox_uploads = await collection.count_documents({"upload_site": "catbox", "deleted": False})
             other_uploads = total_characters - catbox_uploads
-            channel_data = await database_channel_collection.find_one({})
-            if channel_data and 'channel_id' in channel_data:
-                channel_status = f"✅ Set (ID: {channel_data['channel_id']})"
+            channel_status = f"✅ Set (ID: {self.database_channel})" if self.database_channel else "❌ Not set"
+            if self.database_channel:
                 try:
-                    chat = await self.app.get_chat(channel_data['channel_id'])
-                    channel_status = f"✅ {chat.title} (ID: {channel_data['channel_id']})"
+                    chat = await self.app.get_chat(self.database_channel)
+                    channel_status = f"✅ {chat.title} (ID: {self.database_channel})"
                 except:
                     pass
-            else:
-                channel_status = "❌ Not set"
             uptime = datetime.now() - self.start_time
             hours, remainder = divmod(int(uptime.total_seconds()), 3600)
             minutes, seconds = divmod(remainder, 60)
@@ -582,20 +425,17 @@ class UploadBot:
     async def send_startup_message_to_owner(self):
         try:
             owner_id = OWNER_ID
-            channel_data = await database_channel_collection.find_one({})
             try:
                 status_msg = f"""🤖 Catbox Bot Started ⚡
 
 🔧 Bot: @{(await self.app.get_me()).username}
-🌐 Database Channel: {'✅ Set' if channel_data and 'channel_id' in channel_data else '❌ Not set'}
-{f'📡 Channel ID: {channel_data["channel_id"]}' if channel_data and 'channel_id' in channel_data else ''}
+🌐 Database Channel: {'✅ Set' if self.database_channel else '❌ Not set'}
+{f'📡 Channel ID: {self.database_channel}' if self.database_channel else ''}
 
 ⚡ Target: Uploads under 8 seconds
 🕐 Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
 
-{'⚠️ WARNING: No database channel set! Uploads will not be broadcasted.' if not channel_data or 'channel_id' not in channel_data else ''}
-
-Use /setchannel to set the broadcast channel."""
+{'⚠️ WARNING: Channel may be inaccessible! Uploads will not be broadcasted.' if not self.database_channel else ''}"""
                 await self.app.send_message(owner_id, status_msg)
                 logger.info(f"✅ Startup message sent to owner ID: {owner_id}")
             except Exception as e:
@@ -623,35 +463,23 @@ Use /setchannel to set the broadcast channel."""
         except Exception as e:
             logger.error(f"❌ Failed to initialize owner: {e}")
 
-    async def try_set_default_channel(self):
-        """Attempt to set the default channel from config if none exists."""
-        if DEFAULT_DATABASE_CHANNEL:
-            existing = await database_channel_collection.find_one({})
-            if not existing:
-                logger.info(f"No database channel set. Attempting to set default: {DEFAULT_DATABASE_CHANNEL}")
-                try:
-                    chat = await self.app.get_chat(DEFAULT_DATABASE_CHANNEL)
-                    # Test sending a message
-                    test_msg = await self.app.send_message(
-                        DEFAULT_DATABASE_CHANNEL,
-                        "🤖 Bot started – setting default database channel."
-                    )
-                    await self.app.delete_messages(DEFAULT_DATABASE_CHANNEL, test_msg.id)
-                    await database_channel_collection.update_one(
-                        {},
-                        {"$set": {
-                            "channel_id": DEFAULT_DATABASE_CHANNEL,
-                            "channel_title": chat.title,
-                            "set_by": "system",
-                            "set_at": datetime.utcnow()
-                        }},
-                        upsert=True
-                    )
-                    self.database_channel = DEFAULT_DATABASE_CHANNEL
-                    self.upload_flow.set_database_channel(DEFAULT_DATABASE_CHANNEL)
-                    logger.info(f"✅ Default database channel set to {DEFAULT_DATABASE_CHANNEL}")
-                except Exception as e:
-                    logger.error(f"❌ Failed to set default channel {DEFAULT_DATABASE_CHANNEL}: {e}")
+    async def verify_channel_access(self):
+        """Test the hardcoded channel and log status."""
+        if not self.database_channel:
+            logger.error("❌ No database channel configured in config.py")
+            return
+        try:
+            chat = await self.app.get_chat(self.database_channel)
+            test_msg = await self.app.send_message(
+                self.database_channel,
+                "🤖 Bot started – testing broadcast channel.",
+                disable_notification=True
+            )
+            await self.app.delete_messages(self.database_channel, test_msg.id)
+            logger.info(f"✅ Database channel accessible: {chat.title} (ID: {self.database_channel})")
+        except Exception as e:
+            logger.error(f"❌ Database channel {self.database_channel} is INACCESSIBLE: {e}")
+            logger.error("   Uploads will still work, but broadcast will fail until fixed.")
 
     async def start(self):
         logger.info("Starting Catbox Upload Bot...")
@@ -662,15 +490,8 @@ Use /setchannel to set the broadcast channel."""
             logger.info(f"Bot started as @{me.username}")
 
             await self.initialize_owner()
-
-            # Load database channel from DB or try default
-            channel_data = await database_channel_collection.find_one({})
-            if channel_data and 'channel_id' in channel_data:
-                self.database_channel = channel_data['channel_id']
-                self.upload_flow.set_database_channel(self.database_channel)
-                logger.info(f"Database channel loaded: {self.database_channel}")
-            else:
-                await self.try_set_default_channel()
+            self.upload_flow.set_database_channel(self.database_channel)
+            await self.verify_channel_access()
 
             # Test Catbox
             logger.info("Testing Catbox.moe...")
