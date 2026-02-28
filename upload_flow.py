@@ -2,18 +2,16 @@ from pyrogram import Client, enums
 from pyrogram.types import Message, CallbackQuery
 from typing import Dict, Any, Optional
 import asyncio
-from datetime import datetime, timezone
-from database import collection, database_channel_collection, counters_collection
+from datetime import datetime
+from database import collection, database_channel_collection
 from utils import UploadUtils
 from keyboards import UploadKeyboards
 from catbox import CatboxUploader
-import aiohttp
 import logging
 from io import BytesIO
 import time
 
 logger = logging.getLogger(__name__)
-
 
 class UploadFlow:
     def __init__(self, app: Client):
@@ -41,13 +39,9 @@ class UploadFlow:
             return self.user_cache[user_id]
         try:
             user = await self.app.get_users(user_id)
-            info = {
-                "id": user.id,
-                "username": user.username,
-                "first_name": user.first_name
-            }
-            self.user_cache[user_id] = info
-            return info
+            user_info = {"id": user.id, "username": user.username, "first_name": user.first_name}
+            self.user_cache[user_id] = user_info
+            return user_info
         except Exception as e:
             logger.error(f"Failed to get user info for {user_id}: {e}")
             return {"id": user_id, "username": "Unknown", "first_name": "Unknown"}
@@ -93,28 +87,22 @@ class UploadFlow:
         try:
             start_time = time.time()
             await loading_msg.edit("📥 Downloading media...")
-
-            # Download to memory
             file_bytes, file_size = await self.download_media_to_memory_optimized(message.reply_to_message)
             if not file_bytes:
                 await loading_msg.edit("❌ Failed to download media!")
                 return
-
             download_time = time.time() - start_time
             logger.info(f"Download completed in {download_time:.2f}s, size: {file_size:,} bytes")
 
             await loading_msg.edit(f"⚡ Uploading to Catbox.moe...\n📏 Size: {file_size // 1024} KB")
             upload_start = time.time()
             uploader = CatboxUploader()
-
             timestamp = int(time.time())
             file_extension = '.jpg' if media_type == 'photo' else '.mp4'
             filename = f"char_{timestamp}{file_extension}"
-
             upload_result = await uploader.upload_bytes(file_bytes, filename)
             upload_time = time.time() - upload_start
 
-            # Update stats
             self.upload_stats['total_uploads'] += 1
             self.upload_stats['total_time'] += upload_time
             self.upload_stats['fastest_upload'] = min(self.upload_stats['fastest_upload'], upload_time)
@@ -124,18 +112,14 @@ class UploadFlow:
                 await loading_msg.edit(f"❌ Catbox upload failed: {upload_result.get('error', 'Unknown error')}")
                 return
 
-            logger.info(f"Catbox upload completed in {upload_time:.2f}s")
-
-            # Generate character ID using counter
-            counter = await counters_collection.find_one_and_update(
-                {"_id": "character_id"},
-                {"$inc": {"seq": 1}},
-                upsert=True,
-                return_document=True
-            )
-            char_id = str(counter["seq"])
+            logger.info(f"Catbox upload completed in {upload_time:.2f}s, URL: {upload_result.get('url', 'N/A')}")
 
             session_id = UploadUtils.generate_session_id()
+            character_id = await UploadUtils.generate_character_id()
+            display_id = character_id
+            if display_id.isdigit():
+                display_id = str(int(display_id))
+
             self.sessions[session_id] = {
                 "user_id": message.from_user.id,
                 "chat_id": message.chat.id,
@@ -146,20 +130,16 @@ class UploadFlow:
                 "media_url": upload_result['url'],
                 "file_extension": file_extension,
                 "img_type": media_type,
-                "temp_id": char_id,  # Store without leading zeros
+                "temp_id": display_id,
                 "file_id": upload_result.get('file_id'),
                 "size": file_size,
                 "upload_time": upload_time,
                 "download_time": download_time,
-                "created_at": datetime.now(timezone.utc),
-                # DO NOT store file_bytes here – remove to free memory
+                "created_at": datetime.utcnow(),
+                "file_bytes": file_bytes,
                 "catbox_info": upload_result,
                 "filename": filename
             }
-
-            # Immediately delete file_bytes from memory (no longer needed)
-            file_bytes.close()
-            del file_bytes
 
             total_time = time.time() - start_time
             speed_kb_s = (file_size / 1024) / upload_time if upload_time > 0 else 0
@@ -168,7 +148,7 @@ class UploadFlow:
             keyboard = UploadKeyboards.get_rarity_keyboard(session_id)
             await loading_msg.edit(
                 f"✅ Catbox Upload Successful! ⚡\n\n"
-                f"🆔 ID: {char_id}\n"
+                f"🆔 ID: {display_id}\n"
                 f"👤 Character: {character_name}\n"
                 f"🎬 Anime: {anime_name}\n"
                 f"📁 Type: {'📸 Photo' if media_type == 'photo' else '🎞 Video'}\n"
@@ -184,35 +164,39 @@ class UploadFlow:
 
         except Exception as e:
             await loading_msg.edit(f"❌ Error: {str(e)}")
-            logger.error(f"Upload error: {e}", exc_info=True)
+            logger.error(f"Upload error: {e}")
+            import traceback
+            traceback.print_exc()
 
     async def download_media_to_memory_optimized(self, message) -> tuple:
         try:
+            file_bytes = BytesIO()
+            file_size = 0
             if message.photo:
                 file = await self.app.download_media(message.photo.file_id, in_memory=True)
-                size = message.photo.file_size or 0
+                file_bytes.write(file.getbuffer() if hasattr(file, 'getbuffer') else file.read())
+                file_size = message.photo.file_size or 0
             elif message.video:
                 file = await self.app.download_media(message.video.file_id, in_memory=True)
-                size = message.video.file_size or 0
+                file_bytes.write(file.getbuffer() if hasattr(file, 'getbuffer') else file.read())
+                file_size = message.video.file_size or 0
             elif message.animation:
                 file = await self.app.download_media(message.animation.file_id, in_memory=True)
-                size = message.animation.file_size or 0
+                file_bytes.write(file.getbuffer() if hasattr(file, 'getbuffer') else file.read())
+                file_size = message.animation.file_size or 0
             elif message.document:
                 file = await self.app.download_media(message.document.file_id, in_memory=True)
-                size = message.document.file_size or 0
+                file_bytes.write(file.getbuffer() if hasattr(file, 'getbuffer') else file.read())
+                file_size = message.document.file_size or 0
             else:
                 return None, 0
-
-            # file is already a BytesIO-like object
-            file_bytes = BytesIO(file.getbuffer()) if hasattr(file, 'getbuffer') else BytesIO(file.read())
             file_bytes.seek(0)
-            return file_bytes, size
+            return file_bytes, file_size
         except Exception as e:
             logger.error(f"Download error: {e}")
             return None, 0
 
     async def handle_update_character(self, message: Message) -> None:
-        # (unchanged – same as before)
         if not await UploadUtils.is_uploader(message.from_user.id):
             await message.reply("❌ You don't have permission to update characters!")
             return
@@ -229,7 +213,7 @@ class UploadFlow:
             return
 
         char_id_input = args[1]
-        character = await self.find_character_by_id(char_id_input)
+        character = await UploadUtils.find_character_by_id(char_id_input)
         if not character:
             await message.reply(f"❌ Character ID {char_id_input} not found!")
             return
@@ -262,24 +246,19 @@ class UploadFlow:
             if not media_type:
                 await message.reply("❌ Please reply to an image or video!")
                 return
-
             loading_msg = await message.reply("🔄 Updating media to Catbox...")
             try:
                 file_bytes, file_size = await self.download_media_to_memory_optimized(message.reply_to_message)
                 if not file_bytes:
                     await loading_msg.edit("❌ Failed to download media!")
                     return
-
                 timestamp = int(time.time())
                 filename = f"update_{character['id']}_{timestamp}.jpg"
                 uploader = CatboxUploader()
                 upload_result = await uploader.upload_bytes(file_bytes, filename)
-                file_bytes.close()
-
                 if not upload_result['success']:
                     await loading_msg.edit(f"❌ Catbox upload failed: {upload_result.get('error')}")
                     return
-
                 await collection.update_one(
                     {"id": character['id']},
                     {"$set": {
@@ -294,6 +273,7 @@ class UploadFlow:
                 await loading_msg.edit(f"✅ Character {character['id']} media updated successfully!\n"
                                       f"⚡ Upload Time: {upload_result.get('upload_time', 0):.2f}s\n"
                                       f"🌐 URL: {upload_result['url'][:50]}...")
+                file_bytes.close()
             except Exception as e:
                 await loading_msg.edit(f"❌ Error: {str(e)}")
 
@@ -310,28 +290,10 @@ class UploadFlow:
                               f"📊 Current: {character.get('rarity', 'Unknown')}\n\n"
                               f"Select new rarity:",
                               reply_markup=keyboard)
+
         else:
             await message.reply("❌ Invalid update type!\n"
                               "✅ Valid types: name, anime, media, rarity")
-
-    async def find_character_by_id(self, char_id_input: str):
-        # identical to main's helper – you can reuse the one from main or implement here
-        # We'll keep a local copy for independence.
-        char = await collection.find_one({"id": char_id_input, "deleted": False})
-        if char:
-            return char
-        if char_id_input.isdigit():
-            no_zeros = str(int(char_id_input))
-            if no_zeros != char_id_input:
-                char = await collection.find_one({"id": no_zeros, "deleted": False})
-                if char:
-                    return char
-            four_digit = char_id_input.zfill(4)
-            if four_digit != char_id_input:
-                char = await collection.find_one({"id": four_digit, "deleted": False})
-                if char:
-                    return char
-        return None
 
     async def handle_callback(self, callback_query: CallbackQuery) -> None:
         data = callback_query.data
@@ -346,12 +308,10 @@ class UploadFlow:
         if len(parts) < 2:
             await callback_query.answer("❌ Invalid callback!", show_alert=True)
             return
-
         session_id = parts[1]
-        if session_id not in self.sessions:
+        if not session_id or session_id not in self.sessions:
             await callback_query.answer("❌ Session expired!", show_alert=True)
             return
-
         session = self.sessions[session_id]
 
         if data.startswith("rarity:"):
@@ -380,20 +340,17 @@ class UploadFlow:
         if len(parts) < 3:
             await callback_query.answer("❌ Invalid callback!", show_alert=True)
             return
-
         action = parts[0]
         session_id = None
         for part in parts:
             if part.startswith("update_"):
                 session_id = part
                 break
-
         if not session_id or session_id.replace("update_", "") not in self.update_sessions:
             await callback_query.answer("❌ Session expired!", show_alert=True)
             return
-
-        clean_id = session_id.replace("update_", "")
-        session = self.update_sessions[clean_id]
+        clean_session_id = session_id.replace("update_", "")
+        session = self.update_sessions[clean_session_id]
         char_id = session["char_id"]
 
         if action == "rarity":
@@ -402,12 +359,13 @@ class UploadFlow:
                 await callback_query.answer(f"✅ Selected: {rarity}")
                 await collection.update_one({"id": char_id}, {"$set": {"rarity": rarity}})
                 await callback_query.message.edit_text(f"✅ Character {char_id} rarity updated to: {rarity}")
-                del self.update_sessions[clean_id]
+                del self.update_sessions[clean_session_id]
 
         elif action == "cancel":
             await callback_query.answer("❌ Update cancelled")
             await callback_query.message.edit_text("❌ Rarity update cancelled.")
-            del self.update_sessions[clean_id]
+            if clean_session_id in self.update_sessions:
+                del self.update_sessions[clean_session_id]
 
         elif action == "back":
             await callback_query.answer("↩️ Back to rarities")
@@ -426,8 +384,7 @@ class UploadFlow:
         })
 
         if session.get('catbox_info'):
-            speed = (session['size'] / 1024) / session['upload_time'] if session['upload_time'] > 0 else 0
-            preview_text += f"\n⚡ Upload Speed: {speed:.1f} KB/s"
+            preview_text += f"\n⚡ Upload Speed: {(session['size'] / 1024) / session['upload_time']:.1f} KB/s"
             preview_text += f"\n⏱ Upload Time: {session['upload_time']:.2f}s"
 
         if self.database_channel:
@@ -439,8 +396,83 @@ class UploadFlow:
         await callback_query.answer("✅ Preview generated")
         await callback_query.message.edit_text(preview_text, reply_markup=keyboard)
 
+    async def broadcast_to_database_channel(self, character_doc: Dict[str, Any]) -> bool:
+        if not self.database_channel:
+            logger.error("No database channel set for broadcasting!")
+            return False
+
+        user_info = await self.get_user_info(character_doc['added_by']['id'])
+        caption = UploadUtils.format_caption_for_character(character_doc, {
+            "username": user_info["username"],
+            "first_name": user_info["first_name"]
+        })
+
+        try:
+            result = await self.broadcast_to_single_channel(self.database_channel, character_doc, caption)
+            if result:
+                logger.info(f"✅ Successfully broadcast to database channel: {self.database_channel}")
+                return True
+            else:
+                logger.error(f"❌ Failed to broadcast to database channel: {self.database_channel}")
+                return False
+        except Exception as e:
+            logger.error(f"❌ Error broadcasting to database channel {self.database_channel}: {e}")
+            return False
+
+    async def broadcast_to_single_channel(self, channel_id: int, character_doc: Dict[str, Any], caption: str) -> bool:
+        try:
+            if not isinstance(channel_id, int):
+                try:
+                    channel_id = int(channel_id)
+                except ValueError:
+                    logger.error(f"❌ Invalid channel ID format: {channel_id}")
+                    return False
+
+            media_url = character_doc['img_url']
+            media_type = character_doc['img_type']
+
+            # Log what we're about to send
+            logger.info(f"Attempting to send {media_type} to channel {channel_id} with URL: {media_url}")
+
+            # First, try sending as photo/video as per type
+            send_methods = []
+            if media_type == 'photo':
+                send_methods.append(lambda: self.app.send_photo(chat_id=channel_id, photo=media_url, caption=caption))
+                send_methods.append(lambda: self.app.send_document(chat_id=channel_id, document=media_url, caption=caption))  # fallback
+            elif media_type == 'video':
+                send_methods.append(lambda: self.app.send_video(chat_id=channel_id, video=media_url, caption=caption))
+                send_methods.append(lambda: self.app.send_document(chat_id=channel_id, document=media_url, caption=caption))  # fallback
+            else:
+                send_methods.append(lambda: self.app.send_document(chat_id=channel_id, document=media_url, caption=caption))
+
+            last_exception = None
+            for send_method in send_methods:
+                try:
+                    await send_method()
+                    logger.info(f"✅ Broadcast successful using method for {media_type} to channel {channel_id}")
+                    return True
+                except Exception as e:
+                    last_exception = e
+                    logger.warning(f"Broadcast attempt with method failed: {e}")
+                    # If it's WEBPAGE_MEDIA_EMPTY, continue to next method (fallback)
+                    if "WEBPAGE_MEDIA_EMPTY" in str(e):
+                        logger.info("WEBPAGE_MEDIA_EMPTY detected, trying fallback send_document")
+                        continue
+                    else:
+                        # If it's another error, maybe break
+                        break
+
+            # If all methods failed
+            logger.error(f"❌ All broadcast methods failed for channel {channel_id}. Last error: {last_exception}")
+            return False
+
+        except Exception as e:
+            logger.error(f"❌ Broadcast exception for channel {channel_id}: {e}")
+            return False
+
     async def confirm_upload(self, callback_query: CallbackQuery, session_id: str) -> None:
         session = self.sessions[session_id]
+
         processing_msg = await callback_query.message.edit(
             "⏳ Processing your upload...\n"
             f"🆔 ID: {session['temp_id']}\n"
@@ -448,12 +480,15 @@ class UploadFlow:
         )
 
         user_info = await self.get_user_info(session["user_id"])
+        char_id = session['temp_id']
+        if char_id.isdigit():
+            char_id = str(int(char_id))
 
         character_doc = {
             "name": session["character_name"],
             "anime": session["anime_name"],
             "rarity": session["rarity"],
-            "id": session["temp_id"],
+            "id": char_id,
             "subtype": "",
             "img_url": session["media_url"],
             "file_extension": session["file_extension"],
@@ -465,7 +500,7 @@ class UploadFlow:
                 "first_name": user_info["first_name"]
             },
             "edition": "",
-            "date_added": datetime.now(timezone.utc),
+            "date_added": datetime.utcnow(),
             "deleted": False,
             "catbox_id": session.get("file_id"),
             "size": session.get("size", 0),
@@ -488,14 +523,19 @@ class UploadFlow:
             await processing_msg.edit(f"📡 Broadcasting to database channel (ID: {self.database_channel})...")
             broadcast_success = await self.broadcast_to_database_channel(character_doc)
 
-        # Clean up session
+        if "file_bytes" in session:
+            try:
+                session["file_bytes"].close()
+            except:
+                pass
+
         if session_id in self.sessions:
             del self.sessions[session_id]
 
         from keyboards import UploadKeyboards
         rarity_emoji = UploadKeyboards.RARITIES.get(character_doc['rarity'], "")
         type_emoji = "📸" if character_doc['img_type'] == 'photo' else '🎞'
-        avg_upload = self.upload_stats['total_time'] / self.upload_stats['total_uploads'] if self.upload_stats['total_uploads'] > 0 else 0
+        avg_upload_time = self.upload_stats['total_time'] / self.upload_stats['total_uploads'] if self.upload_stats['total_uploads'] > 0 else 0
 
         success_text = f"""🎉 Character Uploaded Successfully! ⚡
 
@@ -514,7 +554,7 @@ class UploadFlow:
 📊 Upload Statistics:
 • Total Uploads: {self.upload_stats['total_uploads']}
 • Fastest Upload: {self.upload_stats['fastest_upload']:.2f}s
-• Average Upload: {avg_upload:.2f}s
+• Average Upload: {avg_upload_time:.2f}s
 
 ✅ Character has been:
 • Added to database
@@ -526,48 +566,13 @@ class UploadFlow:
         await callback_query.answer("✅ Upload completed successfully!")
         await processing_msg.edit(success_text)
 
-    async def broadcast_to_database_channel(self, character_doc: Dict[str, Any]) -> bool:
-        if not self.database_channel:
-            logger.error("No database channel set for broadcasting!")
-            return False
-
-        user_info = await self.get_user_info(character_doc['added_by']['id'])
-        caption = UploadUtils.format_caption_for_character(character_doc, {
-            "username": user_info["username"],
-            "first_name": user_info["first_name"]
-        })
-
-        try:
-            return await self.broadcast_to_single_channel(self.database_channel, character_doc, caption)
-        except Exception as e:
-            logger.error(f"Broadcast error: {e}")
-            return False
-
-    async def broadcast_to_single_channel(self, channel_id: int, character_doc: Dict[str, Any], caption: str) -> bool:
-        media_url = character_doc['img_url']
-        media_type = character_doc['img_type']
-
-        try:
-            chat = await self.app.get_chat(channel_id)
-
-            if media_type == 'photo':
-                await self.app.send_photo(chat_id=channel_id, photo=media_url, caption=caption)
-            elif media_type == 'video':
-                await self.app.send_video(chat_id=channel_id, video=media_url, caption=caption)
-            elif media_type == 'animation':
-                await self.app.send_animation(chat_id=channel_id, animation=media_url, caption=caption)
-            else:
-                await self.app.send_document(chat_id=channel_id, document=media_url, caption=caption)
-
-            logger.info(f"✅ Broadcast successful to channel {channel_id} ({chat.title})")
-            return True
-
-        except Exception as e:
-            logger.error(f"Broadcast attempt failed for channel {channel_id}: {e}")
-            return False
-
     async def cancel_upload(self, callback_query: CallbackQuery, session_id: str) -> None:
         if session_id in self.sessions:
+            if "file_bytes" in self.sessions[session_id]:
+                try:
+                    self.sessions[session_id]["file_bytes"].close()
+                except:
+                    pass
             del self.sessions[session_id]
         await callback_query.answer("❌ Upload cancelled")
         await callback_query.message.edit_text(
