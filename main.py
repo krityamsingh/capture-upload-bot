@@ -193,7 +193,7 @@ class UploadBot:
             except Exception as e:
                 logger.warning(f"Direct URL send failed: {e}")
 
-            # Enhanced fallback: download with browser User-Agent
+            # Enhanced fallback: download with browser User-Agent and check for empty data
             try:
                 headers = {
                     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
@@ -204,6 +204,12 @@ class UploadBot:
                         if resp.status != 200:
                             raise Exception(f"HTTP {resp.status}")
                         data = await resp.read()
+                        if not data:
+                            raise Exception("Downloaded file is empty (0 bytes)")
+                        # Optional: check content-length header if available
+                        content_length = resp.headers.get('content-length')
+                        if content_length and int(content_length) == 0:
+                            raise Exception("Server reported content-length 0")
                         file_like = BytesIO(data)
 
                 if img_type == 'photo':
