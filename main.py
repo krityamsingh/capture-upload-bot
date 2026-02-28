@@ -9,7 +9,7 @@ from typing import List, Optional
 import aiohttp
 from io import BytesIO
 
-from config import API_ID, API_HASH, BOT_TOKEN, MONGO_URL, OWNER_ID, CATBOX_API_KEY
+from config import API_ID, API_HASH, BOT_TOKEN, MONGO_URL, OWNER_ID, OWNER_IDS, CATBOX_API_KEY
 from upload_flow import UploadFlow
 from team_manager import TeamManager
 from utils import UploadUtils
@@ -680,3 +680,4 @@ if __name__ == "__main__":
         logger.error(f"Bot crashed: {e}")
         import traceback
         traceback.print_exc()
+
