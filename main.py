@@ -39,7 +39,7 @@ class UploadBot:
         )
         self.upload_flow = UploadFlow(self.app)
         self.team_manager = TeamManager(self.app)
-        self.database_channel = DATABASE_CHANNEL  # Hardcoded
+        self.database_channel = DATABASE_CHANNEL
         self.start_time = datetime.now()
         self.upload_count = 0
         self.register_handlers()
@@ -76,8 +76,6 @@ class UploadBot:
         @self.app.on_message(filters.command("team") & filters.private)
         async def team_command(client, message: Message):
             await self.team_manager.show_team(message)
-
-        # ❌ Removed /setchannel, /channel, /removechannel handlers
 
         @self.app.on_message(filters.command("testcat") & filters.private)
         async def test_catbox_command(client, message: Message):
@@ -242,7 +240,8 @@ class UploadBot:
             chat = await self.app.get_chat(channel_id)
             test_channel_msg = await self.app.send_message(
                 channel_id,
-                "📡 Bot channel test - This message will be deleted."
+                "📡 Bot channel test - This message will be deleted.",
+                disable_notification=True
             )
             await self.app.delete_messages(channel_id, test_channel_msg.id)
             member = await self.app.get_chat_member(channel_id, (await self.app.get_me()).id)
@@ -470,6 +469,7 @@ class UploadBot:
             return
         try:
             chat = await self.app.get_chat(self.database_channel)
+            # Send a silent test message
             test_msg = await self.app.send_message(
                 self.database_channel,
                 "🤖 Bot started – testing broadcast channel.",
