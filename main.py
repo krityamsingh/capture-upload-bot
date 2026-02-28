@@ -108,6 +108,11 @@ class UploadBot:
         async def remove_channel_command(client, message: Message):
             await self.handle_remove_channel(message)
 
+        # NEW COMMAND: /replaceurl
+        @self.app.on_message(filters.command("replaceurl") & filters.private)
+        async def replace_url_command(client, message: Message):
+            await self.handle_replace_url(message)
+
         @self.app.on_callback_query()
         async def callback_handler(client, callback_query: CallbackQuery):
             await self.upload_flow.handle_callback(callback_query)
@@ -121,6 +126,7 @@ class UploadBot:
 /check [id] - View character
 /uchar - Update character
 /delchar - Delete character
+/replaceurl - Replace character's media URL
 /addteam - Add team member
 /rmteam - Remove team member
 /team - View team
@@ -187,10 +193,14 @@ class UploadBot:
             except Exception as e:
                 logger.warning(f"Direct URL send failed: {e}")
 
-            # Fallback: download and re-upload
+            # Enhanced fallback: download with browser User-Agent
             try:
-                async with aiohttp.ClientSession() as session:
-                    async with session.get(media_url) as resp:
+                headers = {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+                }
+                timeout = aiohttp.ClientTimeout(total=30)
+                async with aiohttp.ClientSession(timeout=timeout) as session:
+                    async with session.get(media_url, headers=headers) as resp:
                         if resp.status != 200:
                             raise Exception(f"HTTP {resp.status}")
                         data = await resp.read()
@@ -203,7 +213,7 @@ class UploadBot:
                 else:
                     await message.reply_document(document=file_like, caption=caption)
             except Exception as download_error:
-                logger.error(f"Download fallback also failed: {download_error}")
+                logger.error(f"Download fallback failed: {download_error}", exc_info=True)
                 caption += f"\n\n🔗 Direct Link: {media_url}"
                 await message.reply(caption)
 
@@ -232,6 +242,61 @@ class UploadBot:
                 if character:
                     return character
         return None
+
+    async def handle_replace_url(self, message: Message):
+        """Handle /replaceurl <character_id> <new_url>"""
+        if not message.from_user:
+            return
+
+        if not await UploadUtils.is_uploader(message.from_user.id):
+            await message.reply("❌ You don't have permission to replace character URLs!")
+            return
+
+        args = message.text.split()
+        if len(args) < 3:
+            await message.reply("❓ Usage: /replaceurl <character_id> <new_url>\n\nExample: /replaceurl 120 https://files.catbox.moe/newimage.jpg")
+            return
+
+        char_id_input = args[1]
+        new_url = args[2]
+
+        # Basic URL validation
+        if not new_url.startswith(('http://', 'https://')):
+            await message.reply("❌ Invalid URL! Must start with http:// or https://")
+            return
+
+        character = await self.find_character_by_id(char_id_input)
+        if not character:
+            await message.reply(f"❌ Character ID {char_id_input} not found!")
+            return
+
+        # Determine new media type from URL extension (optional)
+        ext = new_url.lower().split('.')[-1] if '.' in new_url else ''
+        if ext in ['jpg', 'jpeg', 'png', 'gif', 'webp']:
+            new_type = 'photo'
+        elif ext in ['mp4', 'mov', 'avi', 'webm']:
+            new_type = 'video'
+        else:
+            new_type = character.get('img_type', 'photo')  # fallback to old type
+
+        # Update the character
+        await collection.update_one(
+            {"id": character['id']},
+            {"$set": {
+                "img_url": new_url,
+                "img_type": new_type,
+                "upload_site": "custom",  # mark as manually replaced
+                "replaced_at": datetime.now(timezone.utc),
+                "replaced_by": message.from_user.id
+            }}
+        )
+
+        await message.reply(
+            f"✅ Character {character['id']} URL updated successfully!\n\n"
+            f"📁 New URL: {new_url}\n"
+            f"📁 New Type: {new_type}"
+        )
+        logger.info(f"User {message.from_user.id} replaced URL for character {character['id']} with {new_url}")
 
     async def handle_test_catbox(self, message: Message):
         if not message.from_user or not await UploadUtils.is_uploader(message.from_user.id):
@@ -680,4 +745,3 @@ if __name__ == "__main__":
         logger.error(f"Bot crashed: {e}")
         import traceback
         traceback.print_exc()
-
