@@ -4,17 +4,36 @@ from config import MONGO_URL
 client = AsyncIOMotorClient(MONGO_URL)
 db = client['Character_catcher']
 
-# Main character collection
+# Other existing collections
 collection = db['anime_characters']
+user_totals_collection = db['user_totals']
+user_collection = db["user_collection"]
+safari_cooldown_collection = db['safari_cooldown_collection']
+safari_users_collection = db['safari_users_collection']
+group_user_totals_collection = db['group_user_total']
+top_global_groups_collection = db['top_global_groups']
+guild = db["guild_team"]
+gban = db["gban"]
+clan_collection = db['clans']
+join_requests_collection = db['join_requests']
+global_ban_users_collection = db['global_ban_users']
+users_collection = db['user']
+videos_collection = db['videos']
+sales_collection = db['sales']
+blocked_users_collection = db["blocked_users"]
 
-# Upload team collection
+# New collection for upload team
 upload_team_collection = db["upload_team"]
 
-# Database channel collection (single channel)
+# Database channel collection
 database_channel_collection = db["database_channel"]
 
-# Counter for character IDs
-counters_collection = db["counters"]
-
-# Keep other collections if needed by other parts, but for upload bot we only need above.
-# If you still need others for compatibility, you can add them, but they are not used.
+__all__ = [
+    'collection', 'user_collection', 'user_totals_collection',
+    'safari_cooldown_collection', 'safari_users_collection',
+    'group_user_totals_collection', 'top_global_groups_collection',
+    'guild', 'gban', 'clan_collection', 'join_requests_collection',
+    'global_ban_users_collection', 'users_collection', 'videos_collection',
+    'sales_collection', 'blocked_users_collection', 'db',
+    'upload_team_collection', 'database_channel_collection'
+]
