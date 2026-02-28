@@ -12,13 +12,7 @@ import config
 
 logger = logging.getLogger(__name__)
 
-
 class CatboxUploader:
-    """
-    Async uploader for Catbox.moe with support for both in-memory bytes and file paths.
-    Optimised for reliability and speed with proper error handling and retries.
-    """
-
     def __init__(
         self,
         api_key: Optional[str] = None,
@@ -54,8 +48,7 @@ class CatboxUploader:
         file_bytes.seek(0)
 
         if size > 10 * 1024 * 1024:
-            logger.warning(f"Large file ({size / 1024 / 1024:.2f} MB) uploaded via upload_bytes(). "
-                           f"Consider using upload_file() for better memory efficiency.")
+            logger.warning(f"Large file ({size / 1024 / 1024:.2f} MB) uploaded via upload_bytes().")
 
         if size > self.max_file_size:
             return {
@@ -70,10 +63,7 @@ class CatboxUploader:
 
     async def upload_file(self, file_path: str) -> Dict[str, Any]:
         if not os.path.isfile(file_path):
-            return {
-                'success': False,
-                'error': f'File not found: {file_path}'
-            }
+            return {'success': False, 'error': f'File not found: {file_path}'}
 
         size = os.path.getsize(file_path)
         filename = os.path.basename(file_path)
@@ -209,18 +199,10 @@ class CatboxUploader:
     def _get_content_type(self, filename: str) -> str:
         ext = filename.lower().split('.')[-1] if '.' in filename else ''
         content_types = {
-            'jpg': 'image/jpeg',
-            'jpeg': 'image/jpeg',
-            'png': 'image/png',
-            'gif': 'image/gif',
-            'mp4': 'video/mp4',
-            'mov': 'video/quicktime',
-            'avi': 'video/x-msvideo',
-            'webp': 'image/webp',
-            'webm': 'video/webm',
-            'txt': 'text/plain',
-            'pdf': 'application/pdf',
-            'zip': 'application/zip',
+            'jpg': 'image/jpeg', 'jpeg': 'image/jpeg', 'png': 'image/png',
+            'gif': 'image/gif', 'mp4': 'video/mp4', 'mov': 'video/quicktime',
+            'avi': 'video/x-msvideo', 'webp': 'image/webp', 'webm': 'video/webm',
+            'txt': 'text/plain', 'pdf': 'application/pdf', 'zip': 'application/zip',
         }
         return content_types.get(ext, 'application/octet-stream')
 
