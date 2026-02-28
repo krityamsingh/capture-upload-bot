@@ -10,7 +10,7 @@ class Character(BaseModel):
     subtype: Optional[str] = ""
     img_url: str
     file_extension: str
-    img_type: str  # "photo" or "video"
+    img_type: str
     upload_site: str = "pixeldrain"
     added_by: Dict[str, Any]
     edition: Optional[str] = ""
@@ -21,7 +21,7 @@ class UploadSession(BaseModel):
     user_id: int
     chat_id: int
     message_id: int
-    step: str  # "rarity", "subrarity", "preview", "confirmed"
+    step: str
     character_name: str
     anime_name: str
     media_url: str
@@ -35,6 +35,6 @@ class UploadSession(BaseModel):
 class TeamMember(BaseModel):
     user_id: int
     username: Optional[str] = None
-    role: str = "team_member"  # "owner" or "team_member"
+    role: str = "team_member"
     added_by: int
     added_at: datetime = Field(default_factory=datetime.utcnow)
