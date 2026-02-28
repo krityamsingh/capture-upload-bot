@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import datetime
 from pyrogram import Client
 from pyrogram.types import Message
 from database import upload_team_collection
@@ -30,8 +30,9 @@ class TeamManager:
             "first_name": user.first_name,
             "role": "team_member",
             "added_by": message.from_user.id,
-            "added_at": datetime.now(timezone.utc)
+            "added_at": datetime.utcnow()
         })
+
         await message.reply(f"✅ User added to uploader team.")
 
     async def remove_team_member(self, message: Message, user_id: int) -> None:
@@ -57,6 +58,7 @@ class TeamManager:
             return
 
         team_members = await upload_team_collection.find().sort("role", -1).to_list(None)
+
         if not team_members:
             await message.reply("👥 Team is empty!")
             return
